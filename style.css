@@ -56,17 +56,15 @@
 
 /* ---- features ---- */
 
-.regex-perf-kit .rpk-features {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    max-width: 72ch;
-}
-
+.regex-perf-kit .rpk-features,
 .regex-perf-kit .rpk-feature-group {
     display: flex;
     flex-direction: column;
     gap: 10px;
+}
+
+.regex-perf-kit .rpk-features {
+    max-width: 72ch;
 }
 
 .regex-perf-kit .rpk-feature {
