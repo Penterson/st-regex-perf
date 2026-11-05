@@ -526,6 +526,32 @@ export async function rowMeasure(h) {
     };
 }
 
+/** Order conflicts: an earlier script removes what a later one would have matched; unrelated pairs are not flagged. */
+export async function orderConflict(h, { long = false } = {}) {
+    await useScripts(h, [
+        script({ scriptName: 'Strip tag', findRegex: '/<x>/g', replaceString: '' }), // removes "<x>", which Tagged needs
+        script({ scriptName: 'Tagged', findRegex: '/<x>y/g', replaceString: 'Z' }),
+        script({ scriptName: 'Quiet', findRegex: '/<q>/g', replaceString: '' }), // never matches: changes nothing
+        script({ scriptName: 'After quiet', findRegex: '/<r>/g', replaceString: 'R' }),
+    ]);
+    const pad = long ? 'p'.repeat(5000) : '';
+    const out = [];
+    for (let i = 0; i < 3; i++) out.push(h.engine.getRegexedString(`a <x>y b ${i} ${pad}`, P.AI)); // the conflict, three times
+    out.push(h.engine.getRegexedString('plain <r> text', P.AI)); // Quiet did not change the text: no conflict
+    out.push(h.engine.getRegexedString('no y: <x> here', P.AI)); // Tagged would not have matched anyway
+    const root = document.getElementById('regex_perf_kit');
+    root?.querySelector('#rpk_refresh').click();
+    const rowOf = (name) => [...root?.querySelectorAll('#rpk_table tbody tr') ?? []].find(tr => tr.querySelector('.rpk-col-name')?.firstChild.textContent.trim() === name);
+    const badge = (name) => rowOf(name)?.querySelector('.rpk-badge[title*="runs first"]');
+    return {
+        out,
+        summary: root?.querySelector('#rpk_summary').textContent ?? '',
+        taggedBadge: badge('Tagged')?.title ?? null,
+        otherBadges: ['Strip tag', 'Quiet', 'After quiet'].map(n => badge(n)?.title ?? null),
+        report: await report(h),
+    };
+}
+
 /** Items 10–13. Report columns and warnings: estimate, changed count, replacer time, nested quantifiers, spikes. */
 export async function insights(h, arg) {
     const longHead = !!arg?.longHead;

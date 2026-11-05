@@ -148,12 +148,12 @@ test('shared literal check: one scan per literal per input across scripts; displ
     for (const v of ['none', 'baseline', 'current']) assert.deepEqual(save[v].out, want, v);
     assert.deepEqual(save.none.perRender, [0, 0, 0], 'plain SillyTavern scans nothing');
     assert.deepEqual(save.baseline.perRender, [5, 5, 5], 'baseline: every script scans on every render');
-    assert.deepEqual(save.current.perRender, [3, 3, 3], 'save path: each of the three literals once per render ("<a>" is shared)');
+    assert.deepEqual(save.current.perRender, [4, 4, 4], 'save path: each of the three literals once per render ("<a>" is shared), plus the order-conflict check of "<b>" on the input A2 changed');
     const display = await each('litMemo', { display: true }, { variants: ['baseline', 'current'] });
     for (const v of ['baseline', 'current']) assert.deepEqual(display[v].out, want, v);
     assert.deepEqual(display.baseline.perRender, [5, 5, 5]);
-    assert.deepEqual(display.current.scans, { '<a>': 1, '<b>': 1, '<d>': 1 }, 'display path: each literal once');
-    assert.deepEqual(display.current.perRender, [3, 0, 0], 're-renders scan nothing');
+    assert.deepEqual(display.current.scans, { '<a>': 1, '<b>': 2, '<d>': 1 }, 'display path: each literal once ("<b>" also on the input A2 changed, for the order-conflict check)');
+    assert.deepEqual(display.current.perRender, [4, 0, 0], 're-renders scan nothing');
 });
 
 test('item 6: the memo has a memory budget with LRU eviction', async ({ each }) => {
@@ -294,6 +294,22 @@ test('per-row stopwatch: re-renders the chat without that script and shows the m
     assert.ok(r.current.toasts.includes('Measuring...'));
     assert.ok(r.current.statsUnchanged, 'measuring does not count as activity');
     assert.ok(r.current.chatUnchanged);
+});
+
+test('order conflicts: an earlier script removing what a later one would have matched is flagged; unrelated pairs are not', async ({ each }) => {
+    const r = await each('orderConflict');
+    assert.deepEqual(r.none.out, ['a y b 0 ', 'a y b 1 ', 'a y b 2 ', 'plain R text', 'no y:  here']);
+    assert.deepEqual(r.baseline.out, r.none.out);
+    assert.deepEqual(r.current.out, r.none.out);
+    assert.doesNotMatch(r.baseline.report, /Order conflict/);
+    const text = '"Strip tag" runs first and removes what "Tagged" would have matched: 3 times';
+    assert.equal(r.current.taggedBadge, text);
+    assert.deepEqual(r.current.otherBadges, [null, null, null]);
+    assert.match(r.current.summary, /Order conflict: Strip tag runs first and removes what Tagged looks for \(3 times\)\. Swap them or merge them\./);
+    assert.match(r.current.report, new RegExp(`^Order conflicts \\(an earlier script removed what a later one looks for\\)\n${text.replace(/[()"]/g, '\\$&')}, e\\.g\\. "a <x>y b 0 "$`, 'm'));
+    assert.match(row(reportRows(r.current.report), 'Tagged').Warnings, /order conflict/);
+    const long = (await each('orderConflict', { long: true }, { variants: ['current'] })).current;
+    assert.match(long.taggedBadge, /removes the literal "Tagged" looks for: 3 times \(match not verified on long inputs\)$/, 'inputs over 4000 characters are not re-run');
 });
 
 test('per-message time: "Measure on this chat" lists the 5 slowest messages under the result and in the report', async ({ each }) => {

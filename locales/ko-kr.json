@@ -116,7 +116,6 @@
     "no match": "매치 없음",
     "Candidates to disable (ran ${0}+ times, never matched): ${1}": "끄기 후보 (${0}회 이상 실행, 매치 없음): ${1}",
     "Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Matched | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings": "순위 | 스크립트 | 실행 | 총ms | 평균ms | 최대ms | 치환ms | 매치 | 변경 | 스킵 | 히트 | 스트리밍 스킵 | 리터럴 | 최소 길이 | 경고",
-    "Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${0} ms, <code>∅</code> ran ${1}+ times without ever matching.": "이름 옆 표시: <code>.*</code>는 긴 글에서 느려질 수 있는 패턴, <code>(a+)+</code>는 중첩 수량자, <code>⚡</code>는 한 번에 ${0} ms 초과 이력, <code>∅</code>는 ${1}번 넘게 돌았지만 매치 없음.",
     "Never matched in ${0}+ runs: <b>${1}</b>. Consider turning them off.": "${0}번 넘게 돌았지만 한 번도 매치하지 않은 스크립트: <b>${1}</b>. 꺼도 됩니다.",
     "Matched": "매치",
     "Runs where the pattern matched, even if the text came out the same": "패턴이 매치된 실행 횟수 (텍스트가 그대로였어도 포함)",
@@ -126,5 +125,11 @@
     "#${0} (${1} chars) ${2} ms": "#${0} (${1}글자) ${2} ms",
     "Click a row to open the script in the Regex extension; the stopwatch re-renders this chat without the script and shows the time it costs, the power icon turns it off.": "행 클릭: 정규식 편집기에서 열기. 스톱워치: 이 스크립트만 빼고 채팅을 다시 그려 이 스크립트가 드는 시간 표시. 전원 아이콘: 끄기.",
     "Measure this chat without this script": "이 스크립트만 빼고 이 채팅 측정",
-    "Without this script the chat renders in ${0} ms instead of ${1} ms (③ and ⑤ off)": "이 스크립트를 빼면 채팅 렌더링이 ${1} ms에서 ${0} ms로 (③·⑤ 끈 상태)"
+    "Without this script the chat renders in ${0} ms instead of ${1} ms (③ and ⑤ off)": "이 스크립트를 빼면 채팅 렌더링이 ${1} ms에서 ${0} ms로 (③·⑤ 끈 상태)",
+    "Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${0} ms, <code>∅</code> ran ${1}+ times without ever matching, <code>⇅</code> an earlier script removes what this one looks for (order conflict).": "이름 옆 표시: <code>.*</code>는 긴 글에서 느려질 수 있는 패턴, <code>(a+)+</code>는 중첩 수량자, <code>⚡</code>는 한 번에 ${0} ms 초과 이력, <code>∅</code>는 ${1}번 넘게 돌았지만 매치 없음, <code>⇅</code>는 앞선 스크립트가 이 스크립트가 찾는 글자를 지움 (순서 충돌).",
+    "order conflict": "순서 충돌",
+    "\"${0}\" runs first and removes what \"${1}\" would have matched: ${2} times": "\"${0}\" 가 먼저 실행되어 \"${1}\" 이 매치할 글자를 지움: ${2}회",
+    "\"${0}\" runs first and removes the literal \"${1}\" looks for: ${2} times (match not verified on long inputs)": "\"${0}\" 가 먼저 실행되어 \"${1}\" 이 찾는 리터럴을 지움: ${2}회 (긴 입력이라 매치 여부는 미확인)",
+    "Order conflicts (an earlier script removed what a later one looks for)": "순서 충돌 (앞선 스크립트가 뒤 스크립트가 찾는 글자를 지움)",
+    "Order conflict: <b>${0}</b> runs first and removes what <b>${1}</b> looks for (${2} times). Swap them or merge them.": "순서 충돌: <b>${0}</b> 가 먼저 실행되어 <b>${1}</b> 이 찾는 글자를 지웁니다 (${2}회). 순서를 바꾸거나 하나로 합치면 됩니다."
 }
