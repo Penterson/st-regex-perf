@@ -280,6 +280,39 @@ export async function needleAnd(h) {
     return { out, both: per(both), five: per(five), tag: per(tag), report: await report(h) };
 }
 
+/**
+ * Shared literal check: each literal is scanned once per input however many scripts look for it; a displayed message
+ * (display: true) keeps its answers for its re-renders, a save-time input does not.
+ */
+export async function litMemo(h, { display }) {
+    await useScripts(h, [
+        script({ scriptName: 'A1', findRegex: '/<a>\\d/g', replaceString: '1', markdownOnly: display }), // "<a>" twice
+        script({ scriptName: 'A2', findRegex: '/<a>\\w/g', replaceString: '2', markdownOnly: display }),
+        script({ scriptName: 'B', findRegex: '/<b>/g', replaceString: '3', markdownOnly: display }),
+        script({ scriptName: 'C', findRegex: '/<c>/gi', replaceString: '4', markdownOnly: display }), // case-insensitive: a RegExp check, not includes()
+        script({ scriptName: 'D', findRegex: '/<d>/g', replaceString: '{{user}}', markdownOnly: display }), // impure: never memoized by ③, still prefiltered
+    ]);
+    const mes = 'no tags here but <a>y and <D> ' + 'words '.repeat(50);
+    const orig = String.prototype.includes;
+    const scans = {};
+    String.prototype.includes = function (lit, ...rest) {
+        if (lit[0] === '<') scans[lit] = (scans[lit] ?? 0) + 1; // the literals (flags.includes('u') and such are not counted)
+        return orig.call(this, lit, ...rest);
+    };
+    const out = [];
+    const perRender = [];
+    try {
+        for (let k = 0; k < 3; k++) {
+            const before = Object.values(scans).reduce((a, b) => a + b, 0);
+            out.push(h.engine.getRegexedString(mes, P.AI, display ? { isMarkdown: true } : {}));
+            perRender.push(Object.values(scans).reduce((a, b) => a + b, 0) - before);
+        }
+    } finally {
+        String.prototype.includes = orig;
+    }
+    return { out, scans, perRender };
+}
+
 /** Item 6. Memo memory budget: with a 1 MB budget, old large entries are evicted (LRU) well before the entry cap. */
 export async function memoBudget(h) {
     applyProfile(h, { memoMaxMB: 1, memoMaxLen: 20000 });

@@ -88,10 +88,48 @@ const sanitizeRegexMacro = (x) => (x && typeof x === 'string'
 const CONTROL_ESCAPES = { n: '\n', t: '\t', r: '\r', f: '\f', v: '\v' };
 const BAIL = Symbol('bail');
 
+// ② Literal presence per input: each literal (or case-insensitive check) gets a small id once, and an input remembers
+// the answers in an array by id, so the same string flowing through every script is scanned once per literal. The
+// last input is found without hashing. With keep, the input also goes into a map of the LIT_CACHE_MAX most recent
+// ones (no longer than the memo's limit) for the re-renders of displayed messages; hashing a fresh long string
+// costs about as much as a few scans, so save-time inputs, which never come back, are not kept. Cleared when the
+// script info changes.
+const LIT_CACHE_MAX = 256;
+const litIds = new Map(); // literal or "\0source/flags" -> id
+const litCache = new Map(); // input -> answers by id
+let litIn = null;
+let litSeen = null;
+const litId = (key) => {
+    let id = litIds.get(key);
+    if (id === undefined) litIds.set(key, id = litIds.size);
+    return id;
+};
+function litPresent(str, id, lit, re, keep) {
+    if (str !== litIn) {
+        litIn = str;
+        if (!keep || str.length > settings.memoMaxLen) {
+            litSeen = [];
+        } else {
+            litSeen = litCache.get(str);
+            if (!litSeen) {
+                if (litCache.size >= LIT_CACHE_MAX) litCache.delete(litCache.keys().next().value);
+                litCache.set(str, litSeen = []);
+            }
+        }
+    }
+    let v = litSeen[id];
+    if (v === undefined) litSeen[id] = v = re ? re.test(str) : str.includes(lit);
+    return v;
+}
+const clearLitCache = () => {
+    litCache.clear();
+    litIn = litSeen = null;
+};
+
 /**
  * Parses a pattern once. Every match contains, for each of terms, at least one of its literals (a one-literal term
  * is a mandatory run, a longer one comes from an alternation) and is at least minLen UTF-16 units long; test(str)
- * checks both, needles is the single best term (null if none is certain, with a NEEDLE_REASONS code in reason).
+ * (keep: remember this input's answers for a re-render) checks both, needles is the single best term (null if none is certain, with a NEEDLE_REASONS code in reason).
  * nested: an unbounded quantifier inside an unboundedly repeated group, e.g. (a+)+.
  * Conservative: classes, class escapes, backreferences, lookarounds and modifier groups contribute no literal, and
  * patterns with the v flag or a case modifier ((?i:), (?-i:)) get nothing at all. Literals in groups that must
@@ -99,7 +137,7 @@ const BAIL = Symbol('bail');
  * every branch has one.
  * @param {string} source RegExp.source
  * @param {string} flags RegExp.flags
- * @returns {{needles: string[] | null, reason: string | null, terms: string[][], minLen: number, test: ((str: string) => boolean) | null, nested: boolean}}
+ * @returns {{needles: string[] | null, reason: string | null, terms: string[][], minLen: number, test: ((str: string, keep?: boolean) => boolean) | null, nested: boolean}}
  */
 export function extractNeedle(source, flags) {
     const u = flags.includes('u');
@@ -329,14 +367,18 @@ export function extractNeedle(source, flags) {
         // With the i flag, escaped copies of the literals under the pattern's i/u flags decide: they fold case exactly
         // like the pattern itself (toLowerCase() does not: σ/ς/Σ, µ/μ, ſ/s ...).
         const res = terms.map(set => new RegExp(set.map(s => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')).join('|'), u ? 'iu' : 'i'));
-        has = res.length === 1 ? (str) => res[0].test(str) : (str) => res.every(re => re.test(str));
+        const ids = res.map(re => litId('\0' + re.source + '/' + re.flags));
+        has = res.length === 1 ? (str, keep) => litPresent(str, ids[0], null, res[0], keep) : (str, keep) => res.every((re, k) => litPresent(str, ids[k], null, re, keep));
     } else if (terms.length === 1 && terms[0].length === 1) {
         const [[lit]] = terms;
-        has = (str) => str.includes(lit);
+        const id = litId(lit);
+        has = (str, keep) => litPresent(str, id, lit, null, keep);
     } else {
-        has = (str) => terms.every(set => set.some(s => str.includes(s)));
+        const ids = terms.map(set => set.map(litId));
+        has = (str, keep) => terms.every((set, k) => set.some((lit, j) => litPresent(str, ids[k][j], lit, null, keep)));
     }
-    const test = !minLen ? has : !has ? (str) => str.length >= minLen : (str) => str.length >= minLen && has(str);
+    // test(str, keep): keep remembers the input's answers for its next render (see litPresent)
+    const test = !minLen ? has : !has ? (str) => str.length >= minLen : (str, keep) => str.length >= minLen && has(str, keep);
     return { needles, reason, terms, minLen, test, nested };
 }
 
@@ -460,7 +502,9 @@ function buildInfo() {
             versionParts.push(re.source, re.flags, replaceString, trimSig, String(!!s.markdownOnly), String(!!s.promptOnly), String(s.minDepth), String(s.maxDepth), String(s.placement));
         }
     }
-    return { map, counts, depthRules, version: fnv1a(versionParts.join('\u0003')), builtAt: Date.now() };
+    const version = fnv1a(versionParts.join('\u0003'));
+    if (version !== infoCache?.version) clearLitCache(); // other scripts, other literals
+    return { map, counts, depthRules, version, builtAt: Date.now() };
 }
 
 // ---- Instrumented RegExp ----
@@ -470,6 +514,7 @@ let statsSince = Date.now();
 const persistStats = { hits: 0, stores: 0 };
 let bypass = false; // set by the formatter hooks while a stored result is being shown
 let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
+let displayPass = false; // set by the formatter hooks while a message is being formatted for display
 
 // ③ Memo: memoPrefix -> Map(input -> entry). Keying by the input string itself (its hash is cached and the same
 // string object flows through consecutive scripts) avoids building a new key per call. memoLru orders all
@@ -531,7 +576,8 @@ class PerfRegExp extends RegExp {
             stat.streamSkipped++;
             return str;
         }
-        if (settings.prefilter && test && !test(str)) {
+        // a displayed message comes back on every re-render: its literal answers are kept (save-time inputs do not)
+        if (settings.prefilter && test && !test(str, markdownOnly || displayPass)) {
             stat.skipped++;
             return str;
         }
@@ -656,7 +702,7 @@ let streamTail = null; // raw text this pass appends after the regex stage
 
 /** Clears the state the two hooks share for one formatting pass. */
 function resetPass() {
-    bypass = streamApply = false;
+    bypass = streamApply = displayPass = false;
     pending = streamView = streamTail = null;
 }
 
@@ -690,6 +736,7 @@ function installPersistHooks() {
     // stored result and bypass every script for this message.
     mf.addHook((mes, c) => {
         resetPass();
+        displayPass = true;
         if (c.messageId < 0 || c.isSystem) return mes;
         const sp = settings.persist || settings.streamingThrottle ? liveStream() : null;
         if (sp) return settings.streamingSkip && settings.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;

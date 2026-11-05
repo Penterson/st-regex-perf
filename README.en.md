@@ -55,6 +55,7 @@ No SillyTavern core file is modified.
 
 - Script info (replacement, display-only flag, ...) is re-read whenever it changes, so editing a script or switching presets takes
   effect without reloading the chat. When several scripts share a pattern, caching and the streaming skip apply only if they suit all of them.
+- ②'s literal check runs once per input string: however many scripts look for the same literal, and however often a displayed message is re-rendered (the 256 most recent are remembered), each literal is scanned once.
 - Streaming is only checked while a generation runs (`GENERATION_STARTED` until `GENERATION_ENDED`/`GENERATION_STOPPED`), so
   display scripts pay nothing for the check otherwise.
 
