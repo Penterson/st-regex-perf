@@ -25,7 +25,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
 
 ## Use
 
-- Reopen the chat or render a few messages to fill the table.
+- Reopen the chat or render a few messages to fill the table. The summary counts scripts as active/total per origin (global / preset / scoped). Each feature is described under its checkbox in the panel too.
 - `/regexperf` shows the report in a popup, `/regexperf text` returns it as text, `/regexperf reset` resets the stats.
 - The summary's **estimated time saved** is (prefilter skips + cache hits + streaming skips) × each script's average run time.
 - **Measure on this chat** re-renders the current chat once with the features off and once on, and shows the time actually saved. The page is busy meanwhile; the measurement does not show up in the stats.
