@@ -71,7 +71,7 @@ export async function equivalence(h, { profile }) {
     const corpus = await import('./corpus.js');
     const rpk = applyProfile(h, profile);
     h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: corpus.CHAT() });
-    // ⑧ stores display output, so a {{random}} display script keeps its first roll there (documented in the README).
+    // ⑤ stores display output, so a {{random}} display script keeps its first roll there (documented in the README).
     await useScripts(h, corpus.SCRIPTS().filter(s => !(PROFILES[profile].persist && s.scriptName === 'Dice')));
     const out = [];
     const rec = (label, value) => out.push([label, value]);
@@ -89,7 +89,8 @@ export async function equivalence(h, { profile }) {
     h.engine.RegexProvider.instance.clear();
     await h.eventSource.emit(h.event_types.CHAT_CHANGED);
     renderAll(h, rec, 'after clear');
-    // ⑨ re-renders the whole chat with the features off and on: nothing it leaves behind may change the output
+    // "Measure on this chat" re-renders the chat with the features off and on: nothing it leaves behind may change
+    // the output
     document.querySelector('#rpk_measure')?.click();
     await new Promise(r => setTimeout(r, 60));
     h.st.reseed(); // its renders also rolled {{random}}, as any re-render does
@@ -153,7 +154,7 @@ async function report(h) {
     return h.commands.regexperf ? String(await h.commands.regexperf.callback({}, 'text')) : '';
 }
 
-/** ① Case-insensitive patterns whose matches need Unicode case folding (σ/Σ/ς, µ/μ, ſ/s). */
+/** Item 1. Case-insensitive patterns whose matches need Unicode case folding (σ/Σ/ς, µ/μ, ſ/s). */
 export async function caseFold(h) {
     await useScripts(h, [
         script({ findRegex: '/ΣΟΦΙΑ/gi', replaceString: '[sophia]' }),
@@ -164,7 +165,7 @@ export async function caseFold(h) {
     return ['ΟΔΟΣ', 'οδος', 'a 5µm grain', 'Sunday', 'σοφια'].map(s => h.engine.getRegexedString(s, P.AI));
 }
 
-/** ② A script's replacement is edited, then the chat reloads (or a preset switches) without RegexProvider.clear(). */
+/** Item 2. A script's replacement is edited, then the chat reloads (or a preset switches) without RegexProvider.clear(). */
 export async function staleEdit(h) {
     const out = [];
     await useScripts(h, [script({ findRegex: '/hello/g', replaceString: 'A' })]);
@@ -182,7 +183,7 @@ export async function staleEdit(h) {
     return out;
 }
 
-/** ③ Matched text that contains macros: SillyTavern substitutes them again after inserting the groups. */
+/** Item 3. Matched text that contains macros: SillyTavern substitutes them again after inserting the groups. */
 export async function macroInMatch(h) {
     await useScripts(h, [
         script({ findRegex: '/\\[(.*?)\\]/g', replaceString: '($1)' }),
@@ -203,8 +204,8 @@ export async function macroInMatch(h) {
     return out;
 }
 
-/** ④ ⑧ keeps display output per message; renaming the persona or the character must refresh it. */
-export async function persistNames(h, { charName = 'ch_name' } = {}) {
+/** Item 4. ⑤ keeps display output per message; renaming the persona or the character must refresh it. */
+export async function persistNames(h) {
     applyProfile(h, { persist: true });
     await useScripts(h, [
         script({ findRegex: '/\\bme\\b/g', replaceString: '{{user}}', markdownOnly: true }),
@@ -216,13 +217,13 @@ export async function persistNames(h, { charName = 'ch_name' } = {}) {
     const out = [render(), render()];
     h.st.setState({ name1: 'Bob' });
     out.push(render());
-    if (charName === 'ch_name') h.st.chat[0].name = 'Kit'; // the author name SillyTavern passes as ch_name
+    h.st.chat[0].name = 'Kit'; // the author name SillyTavern passes as ch_name
     h.st.setState({ name2: 'Kit' });
     out.push(render());
     return out;
 }
 
-/** ⑤ substituteRegex = 2 (ESCAPED): recognized as its script, memoized, and skipped while streaming. */
+/** Item 5. substituteRegex = 2 (ESCAPED): recognized as its script, memoized, and skipped while streaming. */
 export async function escapedSubst(h) {
     h.st.setState({ name1: 'User', name2: 'Dr. A (B)' });
     const s = script({ scriptName: 'Escaped char', findRegex: '/{{char}}: (.+)/g', replaceString: '<b>$1</b>', substituteRegex: 2, markdownOnly: true });
@@ -242,14 +243,14 @@ export async function escapedSubst(h) {
     return { first, second, live, report: await report(h) };
 }
 
-/** ⑧ The hand-checked cases and the fuzzer, in Chrome, against the loaded extension's extractNeedle(). */
+/** Item 8. The hand-checked cases and the fuzzer, in Chrome, against the loaded extension's extractNeedle(). */
 export async function needleFuzz(h, { seed, patterns }) {
     const { extractNeedle } = await import(`/scripts/extensions/third-party/${h.variant}/index.js`);
     const f = await import('/harness/needle-fuzz.js');
     return { cases: f.runCases(extractNeedle), fuzz: f.fuzz(extractNeedle, { seed, patterns }) };
 }
 
-/** ⑧ Literals inside groups and alternations prefilter; an optional astral character under u is not a needle. */
+/** Item 8. Literals inside groups and alternations prefilter; an optional astral character under u is not a needle. */
 export async function needleCoverage(h) {
     const group = script({ findRegex: '/(?:<summary>)([\\s\\S]*?)(?:<\\/summary>)/g', replaceString: '$1' });
     const alt = script({ findRegex: '/<thinking>[\\s\\S]*?<\\/thinking>|<think>[\\s\\S]*?<\\/think>/g', replaceString: '' });
@@ -265,7 +266,7 @@ export async function needleCoverage(h) {
     };
 }
 
-/** ⑥ Memo memory budget: with a 1 MB budget, old large entries are evicted (LRU) well before the entry cap. */
+/** Item 6. Memo memory budget: with a 1 MB budget, old large entries are evicted (LRU) well before the entry cap. */
 export async function memoBudget(h) {
     applyProfile(h, { memoMaxMB: 1, memoMaxLen: 20000 });
     const s = script({ findRegex: '/x/g', replaceString: 'y' });
@@ -278,7 +279,7 @@ export async function memoBudget(h) {
     return { ok: outs.every((o, i) => o === `${i} ` + 'y'.repeat(10000)), runsFirst, runsLast };
 }
 
-/** ⑦ Display scripts outside a generation do not build getContext(); during one, the exact check still decides. */
+/** Item 7. Display scripts outside a generation do not build getContext(); during one, the exact check still decides. */
 export async function streamingCheck(h) {
     await useScripts(h, [
         script({ findRegex: '/a/g', replaceString: 'A', markdownOnly: true }),
@@ -327,7 +328,7 @@ export async function sharedPattern(h) {
     return out;
 }
 
-/** ⑧ The persisted display output also depends on the message depth and on each script's placement. */
+/** ⑤ The persisted display output also depends on the message depth and on each script's placement. */
 export async function persistDepth(h) {
     applyProfile(h, { persist: true });
     const hp = script({ findRegex: '/\\[HP\\]/g', replaceString: '<meter>', markdownOnly: true, maxDepth: 0 });
@@ -347,7 +348,7 @@ export async function persistDepth(h) {
     return out;
 }
 
-/** ⑰ Everything the panel, the report, the slash command and the toasts show, after some activity. */
+/** Item 17. Everything the panel, the report, the slash command and the toasts show, after some activity. */
 export async function uiTexts(h) {
     applyProfile(h, { persist: true });
     await useScripts(h, [
@@ -385,7 +386,7 @@ export async function uiTexts(h) {
     };
 }
 
-/** ⑰ Keys whose translation in this locale is not the expected value (e.g. SillyTavern already translates them). */
+/** Item 17. Keys whose translation in this locale is not the expected value (e.g. SillyTavern already translates them). */
 export function translations(h, entries) {
     return entries.filter(([key, value]) => h.i18n.translate(key) !== value);
 }
@@ -400,7 +401,7 @@ function reportRows(text) {
 
 const slowRegex = '/[\\s\\S]*?ZZZ/g'; // no match in the chat below: quadratic scan, prefiltered by "ZZZ"
 
-/** ⑨ "Measure on this chat": renders the chat with the features off and on; stats are left as they were. */
+/** Item 9. "Measure on this chat": renders the chat with the features off and on; stats are left as they were. */
 export async function measure(h) {
     await useScripts(h, [script({ scriptName: 'Slow', findRegex: slowRegex, replaceString: '', markdownOnly: true }),
         script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true })]);
@@ -421,7 +422,7 @@ export async function measure(h) {
     };
 }
 
-/** ⑩⑪⑫⑬ Report columns and warnings: estimate, changed count, replacer time, nested quantifiers, spikes. */
+/** Items 10–13. Report columns and warnings: estimate, changed count, replacer time, nested quantifiers, spikes. */
 export async function insights(h) {
     await useScripts(h, [
         script({ scriptName: 'Changes', findRegex: '/\\bcat\\b/g', replaceString: 'dog' }),
@@ -443,7 +444,7 @@ export async function insights(h) {
     return { text, rows: reportRows(text) };
 }
 
-/** ⑭ Clicking a table row opens the script in SillyTavern's regex editor; the row's off button disables it. */
+/** Item 14. Clicking a table row opens the script in SillyTavern's regex editor; the row's off button disables it. */
 export async function rowActions(h) {
     const scripts = [script({ scriptName: 'Alpha', findRegex: '/alpha/g', replaceString: 'A' }), script({ scriptName: 'Beta', findRegex: '/beta/g', replaceString: 'B' })];
     await useScripts(h, scripts);
@@ -478,7 +479,7 @@ export async function rowActions(h) {
     };
 }
 
-/** ⑮ Hidden limits are editable in the panel; memo memory and this chat's ⑧ size are shown. */
+/** Item 15. Hidden limits are editable in the panel; memo memory and this chat's ⑤ size are shown. */
 export async function limits(h) {
     const root = document.getElementById('regex_perf_kit');
     const set = (id, value) => {
@@ -505,7 +506,7 @@ export async function limits(h) {
     return { found, values, usage: root.querySelector('#rpk_usage')?.textContent ?? '' };
 }
 
-/** ⑯ Compromise mode: while streaming, display scripts format the completed lines at most every N ms. */
+/** Item 16. Compromise mode: while streaming, display scripts format the completed lines at most every N ms. */
 export async function streamThrottle(h, { throttle }) {
     applyProfile(h, { streamingThrottle: throttle, streamingThrottleMs: 500 });
     const bold = script({ findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true });
@@ -540,7 +541,7 @@ export async function streamThrottle(h, { throttle }) {
     return out;
 }
 
-/** What a user of main sees and does: settings, controls, toggles, /regexperf, clearing ⑧. */
+/** The user-facing surface the baseline already had: settings, controls, toggles, /regexperf, clearing ⑤. */
 export async function ux(h) {
     const root = document.getElementById('regex_perf_kit');
     const rpk = h.extension_settings.regex_perf_kit;
@@ -568,7 +569,7 @@ export async function ux(h) {
         textStarts: String(await cmd.callback({}, 'text')).split('\n')[0].replace(/\(.*\)/, ''),
         popup: (await cmd.callback({}, ''), h.popups.map(p => /^<pre class="rpk-report">/.test(p.content))),
     };
-    // ⑧: entries stored in the chat, then cleared by the button (which saves the chat)
+    // ⑤: entries stored in the chat, then cleared by the button (which saves the chat)
     rpk.persist = true;
     h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: 'x', extra: {} }] });
     h.st.messageFormatting('x', 'Char', false, false, 0);

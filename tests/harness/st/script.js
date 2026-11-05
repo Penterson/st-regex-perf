@@ -26,12 +26,10 @@ export function setState(patch) {
     if ('streamingProcessor' in patch) streamingProcessor = patch.streamingProcessor;
 }
 
-export const counters = { saveSettings: 0, saveChat: 0, macroCalls: 0 };
+export const counters = { saveSettings: 0, saveChat: 0 };
 export function saveSettingsDebounced() { counters.saveSettings++; }
 export async function saveChatConditional() { counters.saveChat++; }
 
-/** {{getvar::name}} values. */
-export const vars = {};
 let rolls = 0;
 /** Restarts the {{random}} sequence. */
 export function reseed() { rolls = 0; }
@@ -45,7 +43,6 @@ const LEGACY = { user: 'user', bot: 'char', char: 'char', group: 'char', charifn
  */
 export function substituteParams(content, options = {}) {
     if (!content) return '';
-    counters.macroCalls++;
     const o = options && typeof options === 'object' ? options : { name1Override: arguments[1], name2Override: arguments[2] };
     const env = { user: o.name1Override ?? name1, char: o.name2Override ?? name2, ...o.dynamicMacros };
     const post = typeof o.postProcessFn === 'function' ? o.postProcessFn : (x) => x;
@@ -54,8 +51,6 @@ export function substituteParams(content, options = {}) {
         const [name, ...args] = body.split('::');
         const key = name.trim();
         if (/^random$/i.test(key)) return post(args.length ? args[rolls++ % args.length] : String(rolls++));
-        if (/^newline$/i.test(key)) return '\n';
-        if (/^getvar$/i.test(key)) return post(String(vars[args[0]] ?? ''));
         if (/^slow$/i.test(key)) { // test-only: a macro that takes 2 ms
             const end = performance.now() + 2;
             while (performance.now() < end) { /* busy */ }

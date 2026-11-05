@@ -1,6 +1,6 @@
 // A realistic roleplay setup for the equivalence test: display, prompt and save-time scripts, depth limits,
 // macros, escaped substitution, alternation, Unicode, and a chat in English and Korean.
-// It deliberately avoids the inputs that trigger the bugs fixed on this branch; each of those has its own case.
+// It deliberately avoids the inputs that trigger the bugs fixed since the baseline; each of those has its own case.
 import { P, script } from './scenarios.js';
 
 export const SCRIPTS = () => [

@@ -3,11 +3,12 @@
  *
  * The engine compiles every script pattern through RegexProvider.instance.get(). That method is patched to
  * return a RegExp subclass whose [Symbol.replace] (where String.prototype.replace() dispatches) adds
- * ① profiler, ③ memo cache, ② literal prefilter, ④ streaming skip of display-only scripts and
- * ⑤ a persisted display cache (needs ST's MessageFormatter hooks, as does ④'s compromise mode).
+ * ① profiler, ② literal prefilter, ③ memo cache and ④ streaming skip of display-only scripts.
+ * ST's MessageFormatter hooks add ⑤ a persisted display cache and ④'s compromise mode.
  * No ST core file is modified.
  */
 
+// Namespace import: older engines lack getScriptsByType / SCRIPT_TYPES, and a missing named import fails to load.
 import * as engine from '../../regex/engine.js';
 import { regexFromString } from '../../../utils.js';
 
@@ -304,65 +305,67 @@ function buildInfo() {
             groups.push(['global', getRegexScripts({ allowedOnly: true }) ?? []]);
         }
     } catch (e) { console.warn('[RegexPerf] reading regex scripts failed', e); }
-    const scripts = groups.flatMap(([, list]) => list);
     const { substituteParamsExtended } = ctx();
     const map = new Map();
-    const counts = { total: scripts.length, active: 0, noNeedle: 0, heavy: 0, nested: 0, types: {} };
-    for (const [name, list] of groups) {
-        counts.types[name] = { total: list.length, active: list.filter(x => x?.findRegex && !x.disabled).length };
-    }
+    const counts = { total: 0, active: 0, noNeedle: 0, heavy: 0, nested: 0, types: {} };
     const versionParts = [];
     const depthRules = []; // [min, max] of display scripts with depth limits, for the ⑤ key
 
-    for (const s of scripts) {
-        if (!s?.findRegex || s.disabled) continue;
-        counts.active++;
+    for (const [origin, list] of groups) {
+        const tally = { total: list.length, active: 0 };
+        counts.types[origin] = tally;
+        counts.total += list.length;
+        for (const s of list) {
+            if (!s?.findRegex || s.disabled) continue;
+            tally.active++;
+            counts.active++;
 
-        let rs = s.findRegex;
-        const substitute = Number(s.substituteRegex);
-        if (substitute === 1 || substitute === 2) { // RAW / ESCAPED, as runRegexScript() compiles them
-            try { rs = substituteParamsExtended(rs, {}, substitute === 2 ? sanitizeRegexMacro : undefined); } catch { /* keep the raw pattern */ }
+            let rs = s.findRegex;
+            const substitute = Number(s.substituteRegex);
+            if (substitute === 1 || substitute === 2) { // RAW / ESCAPED, as runRegexScript() compiles them
+                try { rs = substituteParamsExtended(rs, {}, substitute === 2 ? sanitizeRegexMacro : undefined); } catch { /* keep the raw pattern */ }
+            }
+            let re;
+            try { re = regexFromString(rs); } catch { /* invalid pattern */ }
+            if (!re) continue;
+
+            const key = keyOf(re);
+            const prev = map.get(key);
+            const replaceString = String(s.replaceString ?? '');
+            const trims = Array.isArray(s.trimStrings) ? s.trimStrings : [];
+            const trimSig = trims.join('\u0002');
+            const needle = prev?.needle ?? extractNeedle(re.source, re.flags);
+            if (!needle.needles) counts.noNeedle++;
+            if (HEAVY_HINT.test(re.source)) counts.heavy++;
+            if (needle.nested) counts.nested++;
+
+            // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
+            const replacement = replaceString.replace(/{{match}}/gi, '$0');
+            const info = {
+                name: s.scriptName || t`(no name)`,
+                markdownOnly: !!s.markdownOnly,
+                // No macros, and no group reference that could complete one (<$1>, {$1}): the output then depends
+                // only on the input, so it can be memoized.
+                pure: !MACRO.test(replacement) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(replacement)
+                    && !trims.some(trim => MACRO.test(String(trim))),
+                replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
+                needle,
+                ids: [s.id], // for the row actions in the table
+            };
+            if (prev) { // scripts with the same pattern share one wrapper: keep only what holds for all of them
+                info.name = prev.name + ', ' + info.name;
+                info.ids = [...prev.ids, s.id];
+                info.markdownOnly &&= prev.markdownOnly;
+                info.pure &&= prev.pure && prev.replaceSig === info.replaceSig;
+            }
+            map.set(key, info);
+
+            // The same limits getRegexedString() applies; display scripts only, as those are what ⑤ stores.
+            const min = !isNaN(s.minDepth) && s.minDepth !== null && s.minDepth >= -1 ? Number(s.minDepth) : -Infinity;
+            const max = !isNaN(s.maxDepth) && s.maxDepth !== null && s.maxDepth >= 0 ? Number(s.maxDepth) : Infinity;
+            if (s.markdownOnly && (min > -Infinity || max < Infinity)) depthRules.push([min, max]);
+            versionParts.push(re.source, re.flags, replaceString, trimSig, String(!!s.markdownOnly), String(!!s.promptOnly), String(s.minDepth), String(s.maxDepth), String(s.placement));
         }
-        let re;
-        try { re = regexFromString(rs); } catch { /* invalid pattern */ }
-        if (!re) continue;
-
-        const replaceString = String(s.replaceString ?? '');
-        const trims = Array.isArray(s.trimStrings) ? s.trimStrings : [];
-        const trimSig = trims.join('\u0002');
-        const needle = extractNeedle(re.source, re.flags);
-        if (!needle.needles) counts.noNeedle++;
-        if (HEAVY_HINT.test(re.source)) counts.heavy++;
-        if (needle.nested) counts.nested++;
-
-        // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
-        const replacement = replaceString.replace(/{{match}}/gi, '$0');
-        const info = {
-            name: s.scriptName || t`(no name)`,
-            markdownOnly: !!s.markdownOnly,
-            // No macros, and no group reference that could complete one (<$1>, {$1}): the output then depends
-            // only on the input, so it can be memoized.
-            pure: !MACRO.test(replacement) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(replacement)
-                && !trims.some(trim => MACRO.test(String(trim))),
-            replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
-            needle,
-            ids: [s.id], // for the row actions in the table
-        };
-        const key = keyOf(re);
-        const prev = map.get(key);
-        if (prev) { // scripts with the same pattern share one wrapper: keep only what holds for all of them
-            info.name = prev.name + ', ' + info.name;
-            info.ids = [...prev.ids, s.id];
-            info.markdownOnly &&= prev.markdownOnly;
-            info.pure &&= prev.pure && prev.replaceSig === info.replaceSig;
-        }
-        map.set(key, info);
-
-        // The same limits getRegexedString() applies; display scripts only, as those are what ⑤ stores.
-        const min = !isNaN(s.minDepth) && s.minDepth !== null && s.minDepth >= -1 ? Number(s.minDepth) : -Infinity;
-        const max = !isNaN(s.maxDepth) && s.maxDepth !== null && s.maxDepth >= 0 ? Number(s.maxDepth) : Infinity;
-        if (s.markdownOnly && (min > -Infinity || max < Infinity)) depthRules.push([min, max]);
-        versionParts.push(re.source, re.flags, replaceString, trimSig, String(!!s.markdownOnly), String(!!s.promptOnly), String(s.minDepth), String(s.maxDepth), String(s.placement));
     }
     return { map, counts, depthRules, version: fnv1a(versionParts.join('\u0003')), builtAt: Date.now() };
 }
@@ -665,11 +668,12 @@ const fmtNeedles = (r) => r.needle?.needles?.map(s => JSON.stringify(s)).join(' 
 // every call the prefilter, the memo or the streaming skip avoided would have cost the script's average run
 const savedMs = (r) => (r.skipped + r.hits + r.streamSkipped) * avgMs(r);
 const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.changed;
-const warnings = (r) => [
-    r.heavy && t`.*-style`,
-    r.needle?.nested && t`nested quantifier`,
-    r.maxMs > SPIKE_MS && t`spike`,
-    ineffective(r) && t`no effect`,
+/** A row's warnings: words for the report, or badges for the panel. */
+const warnings = (r, badges = false) => [
+    r.heavy && (badges ? badge('.*', t`Pattern that may backtrack a lot`) : t`.*-style`),
+    r.needle?.nested && (badges ? badge('(a+)+', t`Nested quantifier: can backtrack catastrophically on long text`) : t`nested quantifier`),
+    r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`A single run took ${fmtMs(r.maxMs)} ms (over ${SPIKE_MS} ms)`) : t`spike`),
+    ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without changing the text: a candidate to disable`) : t`no effect`),
 ].filter(Boolean);
 
 function buildSummary() {
@@ -678,15 +682,7 @@ function buildSummary() {
     const sum = (key) => rows.reduce((acc, r) => acc + r[key], 0);
     const total = sum('totalMs');
     const top = rows[0];
-    let persistEntries = 0;
-    let persistChars = 0;
     const { chat } = ctx();
-    for (const m of chat ?? []) {
-        const e = m?.extra?.[EXTRA_KEY];
-        if (!e) continue;
-        persistEntries++;
-        persistChars += String(e.k).length + (e.v?.length ?? 0);
-    }
     return {
         counts,
         rows,
@@ -702,8 +698,21 @@ function buildSummary() {
         top,
         topShare: top && total > 0 ? top.totalMs / total * 100 : 0,
         usage: t`Memo: ${memoLru.size} entries, ${(memoBytes / 1048576).toFixed(1)} of ${settings.memoMaxMB} MB`
-            + (persistAvailable ? ' · ' + t`⑤ in this chat: ${persistEntries} messages, ≈${Math.round(persistChars / 1024)} KB` : ''),
+            + (persistAvailable ? ' · ' + persistUsage(chat) : ''),
     };
+}
+
+/** ⑤ storage in this chat (only scanned when the hooks exist). */
+function persistUsage(chat) {
+    let entries = 0;
+    let chars = 0;
+    for (const m of chat ?? []) {
+        const e = m?.extra?.[EXTRA_KEY];
+        if (!e) continue;
+        entries++;
+        chars += String(e.k).length + (e.v?.length ?? 0);
+    }
+    return t`⑤ in this chat: ${entries} messages, ≈${Math.round(chars / 1024)} KB`;
 }
 
 let measured = null; // last "Measure on this chat" result
@@ -712,8 +721,8 @@ const measureText = (m) => t`This chat (${m.messages} messages): ${fmtMs(m.off)}
 
 /** "global 3/40 · preset 2/8 · scoped 0/0": active/total per script origin. */
 const typeCounts = (c) => {
-    const n = (k) => c.types[k] ?? { active: 0, total: 0 };
-    return [t`global ${n('global').active}/${n('global').total}`, t`preset ${n('preset').active}/${n('preset').total}`, t`scoped ${n('scoped').active}/${n('scoped').total}`].join(' · ');
+    const [g, p, s] = ['global', 'preset', 'scoped'].map(k => c.types[k] ?? { active: 0, total: 0 });
+    return [t`global ${g.active}/${g.total}`, t`preset ${p.active}/${p.total}`, t`scoped ${s.active}/${s.total}`].join(' · ');
 };
 
 function buildReportText() {
@@ -897,6 +906,9 @@ const feature = (id, name, desc, labelId = '') => `
           <span class="rpk-feature-text"><span class="rpk-feature-name">${name}</span><span class="rpk-feature-desc">${desc}</span></span>
         </label>`;
 
+/** A number field for LIMITS[key]; bindUi() finds it as #rpk_<key>. */
+const limit = (key, name, title) => `<label${title ? ` title="${title}"` : ''}>${name} <input type="number" class="text_pole" id="rpk_${key}"></label>`;
+
 const settingsHtml = () => `
 <div id="regex_perf_kit" class="regex-perf-kit">
   <div class="inline-drawer">
@@ -922,11 +934,11 @@ const settingsHtml = () => `
       <details class="rpk-limits">
         <summary>${t`Limits`}</summary>
         <div class="rpk-grid">
-          <label title="${t`Oldest results are evicted beyond this many.`}">${t`③ Memo entries`} <input type="number" class="text_pole" id="rpk_memoMaxEntries"></label>
-          <label title="${t`Longer inputs are not memoized.`}">${t`③ Memo max input (characters)`} <input type="number" class="text_pole" id="rpk_memoMaxLen"></label>
-          <label title="${t`Oldest results are evicted beyond this estimated size (2 bytes per character of input and output).`}">${t`③ Memo memory (MB)`} <input type="number" class="text_pole" id="rpk_memoMaxMB"></label>
-          <label title="${t`Longer display results are not stored in the chat.`}">${t`⑤ Max stored result (characters)`} <input type="number" class="text_pole" id="rpk_persistMaxLen"></label>
-          <label>${t`④ Compromise interval (ms)`} <input type="number" class="text_pole" id="rpk_streamingThrottleMs"></label>
+          ${limit('memoMaxEntries', t`③ Memo entries`, t`Oldest results are evicted beyond this many.`)}
+          ${limit('memoMaxLen', t`③ Memo max input (characters)`, t`Longer inputs are not memoized.`)}
+          ${limit('memoMaxMB', t`③ Memo memory (MB)`, t`Oldest results are evicted beyond this estimated size (2 bytes per character of input and output).`)}
+          ${limit('persistMaxLen', t`⑤ Max stored result (characters)`, t`Longer display results are not stored in the chat.`)}
+          ${limit('streamingThrottleMs', t`④ Compromise interval (ms)`)}
         </div>
       </details>
 
@@ -974,12 +986,12 @@ function setContent(el, value, prop = 'innerHTML') {
 }
 
 const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">${text}</span>`;
+const tile = (label, value) => `<div class="rpk-stat"><span class="rpk-stat-value">${value}</span><span class="rpk-stat-label">${label}</span></div>`;
 
 function renderPanel() {
     if (!ui) return;
     const s = buildSummary();
     const c = s.counts;
-    const tile = (label, value) => `<div class="rpk-stat"><span class="rpk-stat-value">${value}</span><span class="rpk-stat-label">${label}</span></div>`;
     let summary = '<div class="rpk-scripts">' + [
         t`Active scripts <b>${c.active}</b>/${c.total}`,
         typeCounts(c),
@@ -1009,15 +1021,11 @@ function renderPanel() {
     ui.rows = s.rows.slice(0, 60);
     setContent(ui.tbody, ui.rows.map((r, i) => {
         const cls = (s.total > 0 && r.totalMs / s.total >= 0.5) ? 'rpk-hot' : (r.heavy ? 'rpk-heavy' : '');
-        const badges = (r.heavy ? badge('.*', t`Pattern that may backtrack a lot`) : '')
-            + (r.needle?.nested ? badge('(a+)+', t`Nested quantifier: can backtrack catastrophically on long text`) : '')
-            + (r.maxMs > SPIKE_MS ? badge('⚡', t`A single run took ${fmtMs(r.maxMs)} ms (over ${SPIKE_MS} ms)`) : '')
-            + (ineffective(r) ? badge('∅', t`Ran ${r.calls} times without changing the text: a candidate to disable`) : '');
         const actions = r.ids.length
             ? `<span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span> <span class="rpk-off fa-solid fa-power-off" title="${t`Turn this script off`}"></span>`
             : '';
         return `<tr class="${cls}${r.ids.length ? ' rpk-script' : ''}" title="${esc(r.src)}" data-i="${i}">
-          <td>${i + 1}</td><td>${esc(r.name)}${badges}</td>
+          <td>${i + 1}</td><td>${esc(r.name)}${warnings(r, true).join('')}</td>
           <td>${r.calls}</td><td>${fmtMs(r.totalMs)}</td><td>${fmtMs(avgMs(r))}</td><td>${fmtMs(r.maxMs)}</td>
           <td>${fmtMs(r.replMs)}</td><td>${r.changed}</td>
           <td>${r.skipped}</td><td>${r.hits}</td><td class="rpk-lit">${r.needle?.needles ? esc(fmtNeedles(r)) : `<span class="rpk-dim">${t`none`}</span>`}</td>

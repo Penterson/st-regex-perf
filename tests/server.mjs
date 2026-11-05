@@ -1,6 +1,6 @@
 // Static server that lays out a SillyTavern-shaped URL space for the browser tests:
 // pinned SillyTavern files where the code under test needs the real thing, small stand-ins for the rest,
-// the working tree as the extension and main (BASELINE) as "baseline".
+// the working tree as the extension and the BASELINE commit as "baseline".
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -12,7 +12,7 @@ import { ST_DIR } from './fetch-st.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 
-/** main before this work; the tests compare the working tree against it. */
+/** main before the item 1–17 work (merged in PR #2); the tests compare the working tree against it. */
 export const BASELINE = '3f3d4027692ef666bc7a64bd93b0f6043b8274fd';
 
 const real = (p) => join(ST_DIR, 'public', p);

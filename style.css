@@ -105,7 +105,8 @@
     font-size: 0.9em;
 }
 
-.regex-perf-kit .rpk-limits summary {
+.regex-perf-kit .rpk-limits summary,
+.regex-perf-kit .rpk-tips summary {
     cursor: pointer;
 }
 
@@ -234,10 +235,6 @@
 .regex-perf-kit .rpk-tips {
     margin-top: 10px;
     font-size: 0.85em;
-}
-
-.regex-perf-kit .rpk-tips summary {
-    cursor: pointer;
 }
 
 .regex-perf-kit .rpk-tips ul {
