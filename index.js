@@ -515,6 +515,7 @@ const stats = new Map(); // pattern key -> counters, see getStat()
 let statsSince = Date.now();
 const persistStats = { hits: 0, stores: 0 };
 let bypass = false; // set by the formatter hooks while a stored result is being shown
+let skipStat = null; // the pattern a per-row measurement renders the chat without
 let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
 let displayPass = false; // set by the formatter hooks while a message is being formatted for display
 
@@ -571,6 +572,7 @@ class PerfRegExp extends RegExp {
     [Symbol.replace](str, replacer) {
         const { stat, markdownOnly, test, memoPrefix } = this._meta;
 
+        if (stat === skipStat) return str;
         if (bypass) {
             stat.bypass++;
             return str;
@@ -876,6 +878,7 @@ function persistUsage(chat) {
 }
 
 let measured = null; // last "Measure on this chat" result
+const rowMeasures = new Map(); // stat -> {with, without}: per-row measurements of this session
 
 const SLOWEST_MESSAGES = 5;
 /** "#12 (4321 chars) 85 ms, ..." for the slowest messages of a measurement. */
@@ -920,13 +923,16 @@ function buildReportText() {
 const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'spike'];
 const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false }; // what a measurement turns off
 
+const CACHES_OFF = { profiler: false, memo: false, persist: false }; // a per-row measurement keeps the prefilter as set
+
 /**
  * Renders every message of the current chat as SillyTavern displays it (messageFormatting), first with the
- * prefilter, the memo and ⑤ off, then with the user's settings, and returns both times. The chat was rendered when
- * it opened, so this is a re-render, as on swipes, edits and reloads. Synchronous, so the temporarily changed
- * settings can never be saved, and the stats are restored afterwards.
+ * prefilter, the memo and ⑤ off, then with the user's settings, and returns both times. With a stat, both passes
+ * run with the caches off, the second one without that pattern: {with, without}. The chat was rendered when it
+ * opened, so this is a re-render, as on swipes, edits and reloads. Synchronous, so the temporarily changed settings
+ * can never be saved, and the stats are restored afterwards.
  */
-function measureChat() {
+function measureChat(without = null) {
     const { chat, messageFormatting } = ctx();
     if (!chat?.length || typeof messageFormatting !== 'function') return null;
     const render = (times) => { // times: per-message {i, len, ms} are pushed when given
@@ -943,22 +949,26 @@ function measureChat() {
     const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => st[c])]));
     const savedPersist = { ...persistStats };
     const times = [];
-    let off, on;
+    let first, second;
     try {
-        Object.assign(settings, FEATURES_OFF);
-        off = render(times); // per message with the features off: the raw cost of each
-        Object.assign(settings, user, { profiler: false });
-        on = render();
+        Object.assign(settings, without ? CACHES_OFF : FEATURES_OFF);
+        first = render(without ? null : times); // per message with the features off: the raw cost of each
+        if (without) skipStat = without;
+        else Object.assign(settings, user, { profiler: false });
+        second = render();
     } finally {
+        skipStat = null;
         Object.assign(settings, user);
         for (const [k, st] of stats) COUNTERS.forEach((c, i) => { st[c] = saved.get(k)?.[i] ?? 0; });
         Object.assign(persistStats, savedPersist);
     }
-    return { messages: chat.length, off, on, slowest: times.sort((a, b) => b.ms - a.ms).slice(0, SLOWEST_MESSAGES) };
+    if (without) return { with: first, without: second };
+    return { messages: chat.length, off: first, on: second, slowest: times.sort((a, b) => b.ms - a.ms).slice(0, SLOWEST_MESSAGES) };
 }
 
 function resetStats() {
     stats.clear();
+    rowMeasures.clear();
     statsSince = Date.now();
     persistStats.hits = persistStats.stores = 0;
     wrapped.clear(); // wrappers hold their stat object; new ones link to fresh stats
@@ -1055,7 +1065,7 @@ const settingsHtml = () => `
           <li>${t`<b>Runs</b> are real regex executions; <b>Skips</b> and <b>Hits</b> are runs avoided by ② and ③. A script with 0 runs and many skips never had to run at all.`}</li>
           <li>${t`<b>Replacer</b> is the part of Total ms spent in the replacement; if it is large, the replacement (macros) is slow, not the pattern.`}</li>
           <li>${t`Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${SPIKE_MS} ms, <code>∅</code> ran ${INEFFECTIVE_RUNS}+ times without ever matching.`}</li>
-          <li>${t`Click a row to open the script in the Regex extension; the power icon turns it off.`}</li>
+          <li>${t`Click a row to open the script in the Regex extension; the stopwatch re-renders this chat without the script and shows the time it costs, the power icon turns it off.`}</li>
         </ul>
       </details>
 
@@ -1126,9 +1136,10 @@ function renderPanel() {
     ui.rows = s.rows.slice(0, 60);
     setContent(ui.tbody, ui.rows.map((r, i) => {
         const cls = (s.total > 0 && r.totalMs / s.total >= 0.5) ? 'rpk-hot' : (r.heavy ? 'rpk-heavy' : '');
-        const actions = r.ids.length
-            ? `<span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span> <span class="rpk-off fa-solid fa-power-off" title="${t`Turn this script off`}"></span>`
-            : '';
+        const m = rowMeasures.get(r);
+        const actions = (m ? `<span class="rpk-row-ms" title="${esc(t`Without this script the chat renders in ${fmtMs(m.without)} ms instead of ${fmtMs(m.with)} ms (③ and ⑤ off)`)}">−${fmtMs(m.with - m.without)} ms</span>` : '')
+            + `<span class="rpk-measure-row fa-solid fa-stopwatch" title="${t`Measure this chat without this script`}"></span>`
+            + (r.ids.length ? ` <span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span> <span class="rpk-off fa-solid fa-power-off" title="${t`Turn this script off`}"></span>` : '');
         return `<tr class="${cls}${r.ids.length ? ' rpk-script' : ''}" title="${esc(r.src)}" data-i="${i}">
           ${td('rank', i + 1)}${td('name', esc(r.name) + warnings(r, true).join(''))}
           ${td('runs', r.calls)}${td('total', fmtMs(r.totalMs))}${td('avg', fmtMs(avgMs(r)))}${td('max', fmtMs(r.maxMs))}
@@ -1208,20 +1219,32 @@ function bindUi() {
         toastr.info(t`Removed ${n} persistent cache entries.`);
         renderPanel();
     });
-    find('#rpk_measure').addEventListener('click', async () => {
+    /** Runs fn (a measurement that freezes the page) after the toast had a moment to paint; not during a stream. */
+    const measuring = async (fn) => {
         if (liveStream()) {
             toastr.warning(t`Wait until the generation finishes.`);
             return;
         }
         toastr.info(t`Measuring...`);
-        await new Promise(resolve => setTimeout(resolve, 20)); // let the toast paint before the page is busy
-        measured = measureChat() ?? measured;
+        await new Promise(resolve => setTimeout(resolve, 20));
+        fn();
         renderPanel();
+    };
+    find('#rpk_measure').addEventListener('click', () => measuring(() => {
+        measured = measureChat() ?? measured;
         if (measured) toastr.success(measureText(measured));
-    });
+    }));
     ui.tbody.addEventListener('click', (e) => {
         const r = ui.rows[e.target.closest('tr[data-i]')?.dataset.i];
-        if (r?.ids.length) scriptAction(r, !!e.target.closest('.rpk-off'));
+        if (!r) return;
+        if (e.target.closest('.rpk-measure-row')) {
+            measuring(() => {
+                const m = measureChat(r);
+                if (m) rowMeasures.set(r, m);
+            });
+        } else if (r.ids.length) {
+            scriptAction(r, !!e.target.closest('.rpk-off'));
+        }
     });
 
     // auto-refresh while the drawer is open

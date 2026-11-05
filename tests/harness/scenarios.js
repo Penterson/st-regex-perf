@@ -495,6 +495,37 @@ export async function measure(h) {
     };
 }
 
+/** Per-row stopwatch: re-renders the chat without one script and shows the time it costs in the row; stats untouched. */
+export async function rowMeasure(h) {
+    applyProfile(h, { prefilter: false }); // the stopwatch keeps the prefilter as set: off, so the slow script really runs
+    await useScripts(h, [
+        script({ scriptName: 'Slow', findRegex: slowRegex, replaceString: '', markdownOnly: true }),
+        script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true }),
+    ]);
+    const long = 'word **bold** '.repeat(400);
+    h.st.setState({ chat: Array.from({ length: 8 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: `${i} ${long}`, extra: {} })) });
+    h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
+    const table = async () => (await report(h)).split('\n\n')[1];
+    const before = await table();
+    const root = document.getElementById('regex_perf_kit');
+    root.querySelector('#rpk_refresh').click();
+    const rowOf = (name) => [...root.querySelectorAll('#rpk_table tbody tr')].find(tr => tr.querySelector('.rpk-col-name')?.firstChild.textContent.trim() === name);
+    const watch = rowOf('Slow')?.querySelector('.rpk-measure-row');
+    if (!watch) return null;
+    watch.click();
+    await new Promise(r => setTimeout(r, 80));
+    const cell = rowOf('Slow').querySelector('.rpk-row-ms');
+    return {
+        text: cell?.textContent ?? '',
+        title: cell?.title ?? '',
+        boldHas: !!rowOf('Bold').querySelector('.rpk-row-ms'),
+        toasts: h.toasts.map(([, m]) => m),
+        statsUnchanged: (await table()) === before,
+        chatUnchanged: h.st.chat.every((m, i) => m.mes === `${i} ${long}`),
+        editorOpened: h.popups.length, // the stopwatch click must not open the script editor (no editor here: popups stay 0 either way)
+    };
+}
+
 /** Items 10–13. Report columns and warnings: estimate, changed count, replacer time, nested quantifiers, spikes. */
 export async function insights(h, arg) {
     const longHead = !!arg?.longHead;
