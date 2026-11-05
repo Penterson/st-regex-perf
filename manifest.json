@@ -1,0 +1,13 @@
+{
+    "display_name": "Regex Perf Kit",
+    "loading_order": 100,
+    "requires": [],
+    "optional": [],
+    "dependencies": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "readyforanothergame",
+    "version": "0.1.0",
+    "homePage": "",
+    "auto_update": false
+}

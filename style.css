@@ -1,0 +1,123 @@
+.regex-perf-kit .rpk-summary {
+    font-size: 0.9em;
+    line-height: 1.5;
+    margin: 6px 0 10px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 6%, transparent);
+}
+
+.regex-perf-kit .rpk-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 2px 12px;
+}
+
+.regex-perf-kit .rpk-note {
+    font-size: 0.85em;
+    opacity: 0.8;
+    margin: 4px 0;
+    min-height: 1em;
+}
+
+.regex-perf-kit .rpk-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.regex-perf-kit .rpk-table-wrap {
+    max-height: 320px;
+    overflow: auto;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    border-radius: 6px;
+}
+
+.regex-perf-kit .rpk-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.82em;
+    font-variant-numeric: tabular-nums;
+}
+
+.regex-perf-kit .rpk-table th,
+.regex-perf-kit .rpk-table td {
+    padding: 3px 6px;
+    text-align: right;
+    white-space: nowrap;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.08));
+}
+
+.regex-perf-kit .rpk-table th:nth-child(2),
+.regex-perf-kit .rpk-table td:nth-child(2),
+.regex-perf-kit .rpk-table th:last-child,
+.regex-perf-kit .rpk-table td:last-child {
+    text-align: left;
+}
+
+.regex-perf-kit .rpk-table td:nth-child(2) {
+    max-width: 220px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.regex-perf-kit .rpk-table td:last-child {
+    max-width: 160px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-family: monospace;
+}
+
+.regex-perf-kit .rpk-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.6));
+}
+
+.regex-perf-kit .rpk-hot td {
+    color: var(--warning, #f0a040);
+    font-weight: 600;
+}
+
+.regex-perf-kit .rpk-heavy td:nth-child(2) {
+    opacity: 0.95;
+}
+
+.regex-perf-kit .rpk-badge {
+    font-family: monospace;
+    font-size: 0.85em;
+    padding: 0 4px;
+    border-radius: 4px;
+    background: rgba(240, 160, 64, 0.25);
+}
+
+.regex-perf-kit .rpk-warn {
+    color: var(--warning, #f0a040);
+}
+
+.regex-perf-kit .rpk-dim {
+    opacity: 0.6;
+}
+
+.regex-perf-kit .rpk-tips {
+    margin-top: 10px;
+    font-size: 0.85em;
+}
+
+.regex-perf-kit .rpk-tips ul {
+    margin: 6px 0 0 16px;
+    padding: 0;
+}
+
+.regex-perf-kit .rpk-tips li {
+    margin: 4px 0;
+}
+
+.rpk-report {
+    text-align: left;
+    white-space: pre;
+    font-size: 0.8em;
+    overflow: auto;
+    max-height: 70vh;
+}
