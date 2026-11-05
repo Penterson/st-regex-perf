@@ -11,6 +11,13 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        st: [release, staging] # the SillyTavern commits pinned in tests/st-version.json
+    name: test (SillyTavern ${{ matrix.st }})
+    env:
+      ST_REF: ${{ matrix.st }}
     steps:
       - uses: actions/checkout@v4
         with:

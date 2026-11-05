@@ -77,5 +77,5 @@ npm test
 
 `npm test`는 ST의 ESLint 규칙으로 린트하고, 리터럴 추출기(`extractNeedle`)를 퍼징하고(프리필터가 건너뛴 텍스트에서 정규식이 매치하면 실패),
 headless Chrome에서 ST의 실제 정규식 엔진(`RegexProvider`/`runRegexScript`)으로 확장 없음 / 기준 커밋(`tests/server.mjs`의 `BASELINE`) / 현재 코드의 결과를 비교합니다.
-ST 파일은 `tests/st-version.json`에 고정된 커밋에서 테스트할 때 내려받습니다(AGPL이라 저장소에 포함하지 않음). Chrome 위치는 `CHROME_PATH`로 지정할 수 있습니다.
-GitHub Actions가 푸시와 PR마다 같은 테스트를 돌립니다.
+ST 파일은 `tests/st-version.json`에 고정된 커밋(release와 staging 하나씩)에서 테스트할 때 내려받습니다(AGPL이라 저장소에 포함하지 않음). `ST_REF=release npm test`로 다른 쪽을 고를 수 있고(기본 staging), Chrome 위치는 `CHROME_PATH`로 지정할 수 있습니다.
+GitHub Actions가 푸시와 PR마다 두 커밋 모두에 대해 같은 테스트를 돌립니다.

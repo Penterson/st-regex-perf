@@ -1,4 +1,4 @@
-// SillyTavern's ESLint setup (.eslintrc.cjs of the commit pinned in tests/st-version.json): the same base,
+// SillyTavern's ESLint setup (.eslintrc.cjs of the commits pinned in tests/st-version.json): the same base,
 // plugin and rules, with its browser-side settings (public/**/*.js) for the extension itself.
 // `npm run test:eslint-sync` fails when the rules below drift from SillyTavern's.
 module.exports = {
