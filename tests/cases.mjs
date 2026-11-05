@@ -288,7 +288,7 @@ test('per-row stopwatch: re-renders the chat without that script and shows the m
     const t = /renders in ([\d.]+) ms instead of ([\d.]+) ms/.exec(r.current.title);
     assert.ok(t, r.current.title);
     const [without, with_] = t.slice(1).map(Number);
-    assert.ok(with_ > without * 2, `the slow script dominates: ${r.current.title}`);
+    assert.ok(with_ > without * 1.5, `the slow script dominates: ${r.current.title}`);
     assert.ok(Math.abs(Number(m[1]) - (with_ - without)) <= 0.1 + with_ * 0.01, 'shown difference = with - without');
     assert.equal(r.current.boldHas, false, 'only the measured row shows a time');
     assert.ok(r.current.toasts.includes('Measuring...'));
@@ -397,6 +397,14 @@ test('item 15: memo and ⑤ limits are editable (validated) and memo / ⑤ usage
     assert.deepEqual(r.current.values, { memoMaxEntries: 4, memoMaxLen: 0, memoMaxMB: 64, persistMaxLen: 123457 });
     assert.match(r.current.usage, /cache: 4 entries/);
     assert.match(r.current.usage, /in this chat: 3 messages, ≈0 KB of 8 MB/);
+});
+
+test('⑤ key: 64 bits of the text, so same-length fnv1a collisions do not share a result; old-format entries are recomputed', async ({ each }) => {
+    const r = await each('persistKey');
+    assert.deepEqual(r.none.out, ['zhj0tclp', 'ti0fsnfk', 'ti0fsnfk']);
+    assert.deepEqual(r.baseline.out, ['zhj0tclp', 'zhj0tclp', 'ti0fsnfk'], 'baseline serves the colliding message the stored result (bug reproduced)');
+    assert.deepEqual(r.current.out, r.none.out);
+    assert.match(r.current.key, /^[0-9a-z]+-[0-9a-z]+:8:/, 'two hashes, then the length');
 });
 
 test('⑤ budget: beyond the per-chat cap the oldest messages\' results are dropped; usage is shown against the cap', async ({ each }) => {

@@ -52,6 +52,19 @@ function fnv1a(str) {
     return (h >>> 0).toString(36);
 }
 
+/** Two independent 32-bit hashes of str in one pass (fnv1a and a multiply-xorshift mix), as one 64-bit key. */
+function hash64(str) {
+    let a = 0x811c9dc5;
+    let b = 0x9e3779b9;
+    for (let i = 0; i < str.length; i++) {
+        const c = str.charCodeAt(i);
+        a = Math.imul(a ^ c, 0x01000193);
+        b = Math.imul(b ^ c, 0x85ebca6b);
+        b ^= b >>> 13;
+    }
+    return (a >>> 0).toString(36) + '-' + (b >>> 0).toString(36);
+}
+
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' };
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ESCAPES[c]);
 
@@ -806,7 +819,9 @@ function installPersistHooks() {
             for (let k = c.messageId + 1; k < chat.length; k++) if (!chat[k]?.is_system) depth++;
             depths = msg.is_system ? ':*' : ':' + depthRules.map(([min, max]) => (depth < min || depth > max ? 0 : 1)).join('');
         }
-        const key = fnv1a(mes) + ':' + mes.length + ':' + version + ':' + names + depths;
+        // 64 bits of the text: a 32-bit hash alone collides once in a few tens of thousands of same-length messages.
+        // Entries keyed the old way simply miss and are recomputed.
+        const key = hash64(mes) + ':' + mes.length + ':' + version + ':' + names + depths;
         const e = msg.extra?.[EXTRA_KEY];
         if (e && e.k === key) {
             bypass = true;
