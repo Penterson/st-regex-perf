@@ -151,7 +151,7 @@ const KO_CHANGED = new Set([
     '같은 메시지에 같은 스크립트를 다시 돌릴 때 이전 결과를 재사용합니다. 치환문에 {{매크로}}가 있는 스크립트는 자동 제외.',
 ]);
 // Words the Korean UI keeps in English: product and SillyTavern setting names, units, the test's script names.
-const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|markdownOnly|staging|extra|regexperf|reset|text|Status card|Greedy|Nobody|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b/g;
+const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|markdownOnly|staging|extra|regexperf|reset|text|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b/g;
 
 test('item 17: Korean locale keeps main\'s Korean UI text; nothing is left untranslated', async ({ each }) => {
     const r = await each('uiTexts', null, { locale: 'ko-kr', variants: ['baseline', 'current'] });
@@ -183,4 +183,93 @@ test('item 17: every Korean string resolves under SillyTavern\'s real ko-kr.json
     assert.ok(entries.length > 50, `parsed ${entries.length} entries`);
     const r = await each('translations', entries, { locale: 'ko-kr', variants: ['current'] });
     assert.deepEqual(r.current, []);
+});
+
+test('item 9: "Measure on this chat" renders with the features off and on and shows the time saved', async ({ each }) => {
+    const r = await each('measure', null, { variants: ['baseline', 'current'] });
+    assert.equal(r.baseline, null, 'main has no such button');
+    const m = /\((\d+)\D+\): ([\d.]+) ms .*?, ([\d.]+) ms .*?([-\d.]+) ms .*?\(([-\d]+)%\)/.exec(r.current.text);
+    assert.ok(m, r.current.text);
+    const [messages, off, on, saved, pct] = m.slice(1).map(Number);
+    assert.equal(messages, 8);
+    assert.ok(off > on * 2, `the prefilter skips the slow script: ${r.current.text}`);
+    assert.ok(Math.abs(saved - (off - on)) <= 0.1 + off * 0.01, 'saved = off - on');
+    assert.ok(Math.abs(pct - (off - on) / off * 100) <= 1);
+    assert.ok(r.current.statsUnchanged, 'measuring does not count as activity');
+    assert.ok(r.current.chatUnchanged);
+});
+
+const num = (s) => Number(String(s).replace(/[^\d.-]/g, ''));
+const row = (rows, name) => rows.find(x => x.Script === name) ?? assert.fail(`no row ${name}`);
+
+test('item 10: summary shows the estimated time saved = (skips + hits + streaming skips) x average run time', async ({ each }) => {
+    const r = await each('insights', null, { variants: ['baseline', 'current'] });
+    assert.doesNotMatch(r.baseline.text, /≈/);
+    const m = /Estimated time saved: ≈([\d.]+) ms/.exec(r.current.text);
+    assert.ok(m, r.current.text);
+    const want = r.current.rows.reduce((acc, x) => acc + (num(x.Runs) ? (num(x.Skips) + num(x.Hits) + num(x['Stream skips'])) * num(x['Total ms']) / num(x.Runs) : 0), 0);
+    assert.ok(want > 0);
+    assert.ok(Math.abs(num(m[1]) - want) <= want * 0.02 + 0.05, `${m[1]} vs ${want}`);
+});
+
+test('item 11: scripts that ran many times without changing the text are flagged', async ({ each }) => {
+    const r = await each('insights', null, { variants: ['current'] });
+    const rows = r.current.rows;
+    assert.ok(num(row(rows, 'Changes').Changed) > 0);
+    assert.equal(num(row(rows, 'Never changes').Changed), 0);
+    for (const name of ['Never changes', 'Slow regex']) assert.match(row(rows, name).Warnings, /no effect/, name);
+    for (const name of ['Changes', 'Rarely runs']) assert.doesNotMatch(row(rows, name).Warnings, /no effect/, name);
+    assert.match(r.current.text, /Candidates to disable.*Never changes/);
+});
+
+test('item 12: replacer (macro) time is measured separately from regex time', async ({ each }) => {
+    const r = await each('insights', null, { variants: ['baseline', 'current'] });
+    assert.ok(!r.baseline.rows[0] || !('Replacer ms' in r.baseline.rows[0]));
+    const macro = row(r.current.rows, 'Slow macro');
+    const regex = row(r.current.rows, 'Slow regex');
+    assert.ok(num(macro['Replacer ms']) >= 150, `30 x 2 ms x 3: ${macro['Replacer ms']}`);
+    assert.ok(num(macro['Replacer ms']) >= num(macro['Total ms']) * 0.8);
+    assert.ok(num(regex['Total ms']) > 10);
+    assert.ok(num(regex['Replacer ms']) <= num(regex['Total ms']) * 0.05, 'no matches, so no replacer time');
+});
+
+test('item 13: nested quantifiers and execution spikes are flagged', async ({ each }) => {
+    const r = await each('insights', null, { variants: ['current'] });
+    assert.match(row(r.current.rows, 'Nested').Warnings, /nested quantifier/);
+    assert.match(row(r.current.rows, 'Slow macro').Warnings, /spike/);
+    assert.ok(num(row(r.current.rows, 'Slow macro')['Max ms']) > 50);
+    assert.doesNotMatch(row(r.current.rows, 'Changes').Warnings, /nested|spike/);
+});
+
+test('item 14: a table row opens its script in the regex editor; its off button disables the script', async ({ each }) => {
+    const r = await each('rowActions', null, { variants: ['current'] });
+    const [alpha, beta] = r.current.ids;
+    assert.deepEqual(r.current.events, [`edit ${alpha}`, `save ${beta} disabled=true`]);
+    assert.deepEqual(r.current.disabled, [false, true]);
+    assert.equal(r.current.unknownHasActions, false, 'patterns that are not scripts get no actions');
+});
+
+test('item 15: memo and ⑧ limits are editable (validated) and memo / ⑧ usage is shown', async ({ each }) => {
+    const r = await each('limits', null, { variants: ['baseline', 'current'] });
+    assert.deepEqual(r.baseline.found, [false, false, false, false]);
+    assert.deepEqual(r.current.found, [true, true, true, true]);
+    assert.deepEqual(r.current.values, { memoMaxEntries: 4, memoMaxLen: 0, memoMaxMB: 64, persistMaxLen: 123457 });
+    assert.match(r.current.usage, /Memo: 4 entries/);
+    assert.match(r.current.usage, /in this chat: 3 messages/);
+});
+
+test('item 16: streaming compromise mode formats completed lines at most every N ms; final render is complete', async ({ each }) => {
+    const on = await each('streamThrottle', { throttle: true }, { variants: ['current'] });
+    const off = await each('streamThrottle', { throttle: false });
+    const final = 'A <b>one</b>\nB <b>two</b>\nC <b>three</b>\nD <b>four</b>';
+    assert.deepEqual(on.current, [
+        'A <b>one</b>\nB **t', 1,
+        'A <b>one</b>\nB **two**\nC **th', 0,
+        'A <b>one</b>\nB <b>two</b>\nC <b>three</b>\nD **f', 1,
+        'A <b>one</b>\nB <b>two</b>\nC <b>three</b>\nD **fou', 0,
+        final,
+    ]);
+    assert.deepEqual(off.none.filter(x => typeof x === 'number'), [1, 1, 1, 1], 'plain SillyTavern formats every chunk');
+    assert.deepEqual(off.current, off.baseline, 'off by default: same as main (display scripts skipped while live)');
+    assert.equal(off.current.at(-1), final);
 });

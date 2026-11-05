@@ -353,6 +353,7 @@ export async function uiTexts(h) {
         script({ scriptName: 'Status card', findRegex: '/<status>([\\s\\S]*?)<\\/status>/g', replaceString: '<b>$1</b>', markdownOnly: true }),
         script({ scriptName: 'Greedy', findRegex: '/x.*y/g', replaceString: 'z' }),
         script({ scriptName: 'Nobody', findRegex: '/nothing-here/g', replaceString: '' }),
+        script({ scriptName: 'Digits', findRegex: '/\\d+/g', replaceString: '#' }), // no literal: shows "none"
     ]);
     h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: 'x <status>ok</status> y', extra: {} }] });
     for (let i = 0; i < 3; i++) {
@@ -386,4 +387,154 @@ export async function uiTexts(h) {
 /** ⑰ Keys whose translation in this locale is not the expected value (e.g. SillyTavern already translates them). */
 export function translations(h, entries) {
     return entries.filter(([key, value]) => h.i18n.translate(key) !== value);
+}
+
+/** Rows of the extension's text report, each keyed by the column headers. */
+function reportRows(text) {
+    const lines = text.split('\n');
+    const head = lines.indexOf('') + 1; // the table header follows the first blank line
+    const cols = lines[head].split(' | ');
+    return lines.slice(head + 1).filter(Boolean).map(l => Object.fromEntries(l.split(' | ').map((v, i) => [cols[i], v])));
+}
+
+const slowRegex = '/[\\s\\S]*?ZZZ/g'; // no match in the chat below: quadratic scan, prefiltered by "ZZZ"
+
+/** ⑨ "Measure on this chat": renders the chat with the features off and on; stats are left as they were. */
+export async function measure(h) {
+    await useScripts(h, [script({ scriptName: 'Slow', findRegex: slowRegex, replaceString: '', markdownOnly: true }),
+        script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true })]);
+    const long = 'word **bold** '.repeat(400);
+    h.st.setState({ chat: Array.from({ length: 8 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: `${i} ${long}`, extra: {} })) });
+    h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
+    const table = async () => (await report(h)).split('\n\n')[1]; // the per-script rows
+    const before = await table();
+    const root = document.getElementById('regex_perf_kit');
+    const button = root?.querySelector('#rpk_measure');
+    if (!button) return null;
+    button.click();
+    await new Promise(r => setTimeout(r, 50));
+    return {
+        text: root.querySelector('#rpk_measure_result').textContent,
+        statsUnchanged: (await table()) === before,
+        chatUnchanged: h.st.chat.every((m, i) => m.mes === `${i} ${long}`),
+    };
+}
+
+/** ⑩⑪⑫⑬ Report columns and warnings: estimate, changed count, replacer time, nested quantifiers, spikes. */
+export async function insights(h) {
+    await useScripts(h, [
+        script({ scriptName: 'Changes', findRegex: '/\\bcat\\b/g', replaceString: 'dog' }),
+        script({ scriptName: 'Never changes', findRegex: '/\\d{5}/g', replaceString: 'N' }),
+        script({ scriptName: 'Rarely runs', findRegex: '/\\d{6}/g', replaceString: 'N', placement: [P.USER] }),
+        script({ scriptName: 'Slow regex', findRegex: '/x[\\s\\S]*?q{3}/g', replaceString: '' }), // needle "x": each one scans to the end
+        script({ scriptName: 'Slow macro', findRegex: '/@/g', replaceString: '{{slow}}' }), // 2 ms per match
+        script({ scriptName: 'Nested', findRegex: '/(?:\\w+\\s?)+!/g', replaceString: '!' }), // never runs: no "!"
+    ]);
+    const long = 'lorem ipsum x '.repeat(500);
+    for (let i = 0; i < 25; i++) {
+        const mes = `msg ${i}: the cat sat ${long}`;
+        h.engine.getRegexedString(mes, P.AI);
+        h.engine.getRegexedString(mes, P.AI); // memo hits for the pure scripts
+    }
+    for (let i = 0; i < 3; i++) h.engine.getRegexedString(`user ${i}`, P.USER);
+    for (let i = 0; i < 3; i++) h.engine.getRegexedString('@'.repeat(30) + i, P.AI); // ~60 ms per call
+    const text = await report(h);
+    return { text, rows: reportRows(text) };
+}
+
+/** ⑭ Clicking a table row opens the script in SillyTavern's regex editor; the row's off button disables it. */
+export async function rowActions(h) {
+    const scripts = [script({ scriptName: 'Alpha', findRegex: '/alpha/g', replaceString: 'A' }), script({ scriptName: 'Beta', findRegex: '/beta/g', replaceString: 'B' })];
+    await useScripts(h, scripts);
+    // SillyTavern's script list, built from its real scriptTemplate.html with the handlers renderScript() binds
+    const template = await (await fetch('/scripts/extensions/regex/scriptTemplate.html')).text();
+    const events = [];
+    for (const s of scripts) {
+        const row = $(template).attr('id', s.id);
+        row.find('.edit_existing_regex').on('click', () => events.push(`edit ${s.id}`));
+        row.find('.disable_regex').prop('checked', !!s.disabled).on('input', function () {
+            s.disabled = !!$(this).prop('checked');
+            events.push(`save ${s.id} disabled=${s.disabled}`);
+        });
+        row.find('.regex-toggle-on').on('click', () => row.find('.disable_regex').prop('checked', true).trigger('input'));
+        $('#saved_regex_scripts').append(row);
+    }
+    'alpha beta'.replace(h.engine.RegexProvider.instance.get('/alpha/g'), 'A');
+    'beta'.replace(h.engine.RegexProvider.instance.get('/beta/g'), 'B');
+    'gamma'.replace(h.engine.RegexProvider.instance.get('/gamma/g'), 'C'); // not a script: no actions
+    const root = document.getElementById('regex_perf_kit');
+    root.querySelector('#rpk_refresh').click();
+    const rows = () => [...root.querySelectorAll('#rpk_table tbody tr')];
+    const rowOf = (name) => rows().find(tr => tr.textContent.includes(name));
+    rowOf('Alpha')?.querySelector('td:nth-child(2)')?.click();
+    rowOf('Beta')?.querySelector('.rpk-off')?.click();
+    await new Promise(r => setTimeout(r, 0));
+    return {
+        events,
+        ids: scripts.map(s => s.id),
+        disabled: scripts.map(s => !!s.disabled),
+        unknownHasActions: !!rows().find(tr => tr.title.includes('gamma'))?.querySelector('.rpk-off, .rpk-edit'),
+    };
+}
+
+/** ⑮ Hidden limits are editable in the panel; memo memory and this chat's ⑧ size are shown. */
+export async function limits(h) {
+    const root = document.getElementById('regex_perf_kit');
+    const set = (id, value) => {
+        const el = root.querySelector('#' + id);
+        if (!el) return false;
+        el.value = String(value);
+        el.dispatchEvent(new Event('change'));
+        return true;
+    };
+    const rpk = h.extension_settings.regex_perf_kit;
+    const found = ['rpk_memoMaxEntries', 'rpk_memoMaxLen', 'rpk_memoMaxMB', 'rpk_persistMaxLen'].map(id => !!root.querySelector('#' + id));
+    if (found.includes(false)) return { found };
+    await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
+    for (let i = 0; i < 10; i++) h.engine.getRegexedString(`x ${i}`, P.AI, { isMarkdown: true });
+    set('rpk_memoMaxEntries', 4);
+    set('rpk_memoMaxLen', '-5');
+    set('rpk_memoMaxMB', 'abc');
+    set('rpk_persistMaxLen', 123456.7);
+    const values = { memoMaxEntries: rpk.memoMaxEntries, memoMaxLen: rpk.memoMaxLen, memoMaxMB: rpk.memoMaxMB, persistMaxLen: rpk.persistMaxLen };
+    rpk.persist = true;
+    h.st.setState({ chat: [0, 1, 2].map(i => ({ name: 'Char', is_user: false, is_system: false, mes: `x ${i}`, extra: {} })) });
+    h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
+    root.querySelector('#rpk_refresh').click();
+    return { found, values, usage: root.querySelector('#rpk_usage')?.textContent ?? '' };
+}
+
+/** ⑯ Compromise mode: while streaming, display scripts format the completed lines at most every N ms. */
+export async function streamThrottle(h, { throttle }) {
+    applyProfile(h, { streamingThrottle: throttle, streamingThrottleMs: 500 });
+    const bold = script({ findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true });
+    await useScripts(h, [bold]);
+    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: '', extra: {} }] });
+    const source = h.engine.RegexProvider.instance.get(bold.findRegex).source;
+    const realNow = performance.now.bind(performance);
+    let clock = 0;
+    performance.now = () => clock;
+    const ticks = [[0, 'A **one**\nB **t'], [100, 'A **one**\nB **two**\nC **th'], [600, 'A **one**\nB **two**\nC **three**\nD **f'], [700, 'A **one**\nB **two**\nC **three**\nD **fou']];
+    const out = [];
+    try {
+        await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+        const sp = { messageId: 0, isFinished: false, isStopped: false };
+        h.st.setState({ streamingProcessor: sp });
+        for (const [at, text] of ticks) {
+            clock = at;
+            h.st.chat[0].mes = text;
+            const runs = executionsBySource(() => out.push(h.st.messageFormatting(text, 'Char', false, false, 0)))[source] ?? 0;
+            out.push(runs);
+        }
+        clock = 800;
+        sp.isFinished = true;
+        const final = 'A **one**\nB **two**\nC **three**\nD **four**';
+        h.st.chat[0].mes = final;
+        out.push(h.st.messageFormatting(final, 'Char', false, false, 0));
+        h.st.setState({ streamingProcessor: null });
+        await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    } finally {
+        performance.now = realNow;
+    }
+    return out;
 }

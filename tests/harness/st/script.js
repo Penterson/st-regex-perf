@@ -54,6 +54,11 @@ export function substituteParams(content, options = {}) {
         if (/^random$/i.test(key)) return post(args.length ? args[rolls++ % args.length] : String(rolls++));
         if (/^newline$/i.test(key)) return '\n';
         if (/^getvar$/i.test(key)) return post(String(vars[args[0]] ?? ''));
+        if (/^slow$/i.test(key)) { // test-only: a macro that takes 2 ms
+            const end = performance.now() + 2;
+            while (performance.now() < end) { /* busy */ }
+            return '';
+        }
         const envKey = Object.keys(env).find(k => k.toLowerCase() === key.toLowerCase());
         if (envKey === undefined) return m;
         const value = env[envKey];
