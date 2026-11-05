@@ -877,6 +877,9 @@ function persistUsage(chat) {
 
 let measured = null; // last "Measure on this chat" result
 
+const SLOWEST_MESSAGES = 5;
+/** "#12 (4321 chars) 85 ms, ..." for the slowest messages of a measurement. */
+const slowestText = (m) => t`Slowest messages (features off): ${m.slowest.map(x => t`#${x.i} (${x.len} chars) ${fmtMs(x.ms)} ms`).join(', ')}`;
 const measureText = (m) => t`This chat (${m.messages} messages): ${fmtMs(m.off)} ms with the features off, ${fmtMs(m.on)} ms on — ${fmtMs(m.off - m.on)} ms saved (${m.off > 0 ? Math.round((m.off - m.on) / m.off * 100) : 0}%)`;
 
 /** "global 3/40 · preset 2/8 · scoped 0/0": active/total per script origin. */
@@ -899,7 +902,7 @@ function buildReportText() {
             : t`Estimated time saved: not available yet (no measured runs)`,
         s.usage,
     ];
-    if (measured) lines.push(measureText(measured));
+    if (measured) lines.push(measureText(measured), slowestText(measured));
     if (s.top) lines.push(t`#1 "${s.top.name}" takes ${s.topShare.toFixed(0)}% of the total time`);
     if (s.ineffective.length) lines.push(t`Candidates to disable (ran ${INEFFECTIVE_RUNS}+ times, never matched): ${s.ineffective.join(', ')}`);
     lines.push('', t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Matched | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`);
@@ -926,21 +929,24 @@ const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: 
 function measureChat() {
     const { chat, messageFormatting } = ctx();
     if (!chat?.length || typeof messageFormatting !== 'function') return null;
-    const render = () => {
+    const render = (times) => { // times: per-message {i, len, ms} are pushed when given
         const t0 = performance.now();
         chat.forEach((m, i) => {
+            const t1 = times ? performance.now() : 0;
             if (m?.mes) messageFormatting(m.mes, m.name, m.is_system, m.is_user, i);
             if (m?.extra?.reasoning) messageFormatting(m.extra.reasoning, '', false, false, i, {}, true);
+            if (times) times.push({ i, len: (m?.mes?.length ?? 0) + (m?.extra?.reasoning?.length ?? 0), ms: performance.now() - t1 });
         });
         return performance.now() - t0;
     };
     const user = Object.fromEntries(Object.keys(FEATURES_OFF).map(k => [k, settings[k]]));
     const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => st[c])]));
     const savedPersist = { ...persistStats };
+    const times = [];
     let off, on;
     try {
         Object.assign(settings, FEATURES_OFF);
-        off = render();
+        off = render(times); // per message with the features off: the raw cost of each
         Object.assign(settings, user, { profiler: false });
         on = render();
     } finally {
@@ -948,7 +954,7 @@ function measureChat() {
         for (const [k, st] of stats) COUNTERS.forEach((c, i) => { st[c] = saved.get(k)?.[i] ?? 0; });
         Object.assign(persistStats, savedPersist);
     }
-    return { messages: chat.length, off, on };
+    return { messages: chat.length, off, on, slowest: times.sort((a, b) => b.ms - a.ms).slice(0, SLOWEST_MESSAGES) };
 }
 
 function resetStats() {
@@ -1136,7 +1142,7 @@ function renderPanel() {
         ? t`⑤ and the compromise mode need a newer SillyTavern (staging with MessageFormatter hooks).`
         : settings.persist ? t`⑤ is on: display results are being saved in this chat. Changing a script invalidates them automatically.` : '', 'textContent');
     setContent(ui.usage, s.usage, 'textContent');
-    setContent(ui.measure, measured ? measureText(measured) : '', 'textContent');
+    setContent(ui.measure, measured ? `<p>${esc(measureText(measured))}</p><p class="rpk-dim">${esc(slowestText(measured))}</p>` : '');
 }
 
 /**

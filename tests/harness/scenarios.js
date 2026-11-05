@@ -476,7 +476,8 @@ export async function measure(h) {
     await useScripts(h, [script({ scriptName: 'Slow', findRegex: slowRegex, replaceString: '', markdownOnly: true }),
         script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true })]);
     const long = 'word **bold** '.repeat(400);
-    h.st.setState({ chat: Array.from({ length: 8 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: `${i} ${long}`, extra: {} })) });
+    const mes = (i) => `${i} ${i === 5 ? long.repeat(6) : long}`; // message 5 is six times longer: the slowest
+    h.st.setState({ chat: Array.from({ length: 8 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: mes(i), extra: {} })) });
     h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
     const table = async () => (await report(h)).split('\n\n')[1]; // the per-script rows
     const before = await table();
@@ -486,9 +487,11 @@ export async function measure(h) {
     button.click();
     await new Promise(r => setTimeout(r, 50));
     return {
-        text: root.querySelector('#rpk_measure_result').textContent,
+        text: root.querySelector('#rpk_measure_result p')?.textContent ?? root.querySelector('#rpk_measure_result').textContent,
+        slowest: root.querySelector('#rpk_measure_result p.rpk-dim')?.textContent ?? '',
+        report: await report(h),
         statsUnchanged: (await table()) === before,
-        chatUnchanged: h.st.chat.every((m, i) => m.mes === `${i} ${long}`),
+        chatUnchanged: h.st.chat.every((m, i) => m.mes === mes(i)),
     };
 }
 

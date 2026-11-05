@@ -280,6 +280,17 @@ test('item 9: "Measure on this chat" renders with the features off and on and sh
     assert.ok(r.current.chatUnchanged);
 });
 
+test('per-message time: "Measure on this chat" lists the 5 slowest messages under the result and in the report', async ({ each }) => {
+    const r = (await each('measure', null, { variants: ['current'] })).current;
+    const entry = /#(\d+) \((\d+) chars\) ([\d.]+) ms/g;
+    const list = [...r.slowest.matchAll(entry)].map(m => m.slice(1).map(Number));
+    assert.equal(list.length, 5, r.slowest);
+    assert.match(r.slowest, /^Slowest messages \(features off\): #5 \(33602 chars\) /, 'the six-times-longer message 5 comes first, with its length');
+    for (let k = 1; k < list.length; k++) assert.ok(list[k - 1][2] >= list[k][2], 'sorted by time');
+    assert.ok(list[0][2] > list[1][2] * 2, `message 5 is clearly slower: ${r.slowest}`);
+    assert.ok(r.report.includes('\n' + r.slowest + '\n'), 'the report has the same line');
+});
+
 
 test('item 10: summary shows the estimated time saved = (skips + hits + streaming skips) x average run time', async ({ each }) => {
     const r = await each('insights', null, { variants: ['baseline', 'current'] });

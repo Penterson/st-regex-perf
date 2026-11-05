@@ -173,6 +173,10 @@
     margin-top: 8px;
 }
 
+.regex-perf-kit .rpk-measured p {
+    margin: 0 0 2px;
+}
+
 /* ---- table ---- */
 
 .regex-perf-kit .rpk-table-wrap {
