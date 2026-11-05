@@ -811,56 +811,56 @@ const KO = {
     'Since ${0}': '측정 시작 ${0}',
     // features
     '① Measure run time (profiler)': '① 실행 시간 측정 (프로파일러)',
-    'Counts how often each script runs and how long it takes, for the table below. Costs almost nothing.': '스크립트마다 몇 번 실행되고 얼마나 걸렸는지 재서 아래 표에 보여줍니다. 부담은 거의 없습니다.',
-    '② Skip runs that cannot match (literal prefilter)': '② 매치할 수 없는 실행 건너뛰기 (리터럴 프리필터)',
-    'If the message does not even contain the fixed text a script looks for (such as &lt;/status&gt;), the regex is not run. The result is exactly the same.': '스크립트가 찾는 고정 문구(예: &lt;/status&gt;)가 메시지에 아예 없으면 정규식을 돌리지 않습니다. 결과는 완전히 같습니다.',
-    '③ Reuse results (memory cache)': '③ 결과 재사용 (메모리 캐시)',
-    'When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with {{macros}} are left out automatically.': '같은 메시지에 같은 스크립트를 다시 적용할 때(스와이프, 다시 그리기, 재로드) 이전 결과를 그대로 씁니다. {{매크로}}가 든 스크립트나 텍스트는 자동으로 제외합니다.',
+    'Counts how often each script runs and how long it takes, for the table below. Costs almost nothing.': '스크립트별로 몇 번 돌았고 얼마나 걸렸는지 잽니다. 결과는 아래 표에 나옵니다. 켜 둬도 느려지지 않습니다.',
+    '② Skip runs that cannot match (literal prefilter)': '② 맞을 리 없는 정규식은 돌리지 않기 (리터럴 프리필터)',
+    'If the message does not even contain the fixed text a script looks for (such as &lt;/status&gt;), the regex is not run. The result is exactly the same.': '스크립트가 찾는 글자(예를 들어 &lt;/status&gt;)가 메시지에 없으면 그 정규식은 애초에 맞을 수가 없습니다. 그래서 돌리지 않습니다. 결과는 똑같습니다.',
+    '③ Reuse results (memory cache)': '③ 한 번 한 계산은 다시 쓰기 (메모리 캐시)',
+    'When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with {{macros}} are left out automatically.': '스와이프하거나 채팅을 다시 그릴 때 같은 메시지에 같은 스크립트가 또 돌아갑니다. 그때는 아까 결과를 꺼내 씁니다. {{매크로}}가 들어 있으면 값이 바뀔 수 있어서 빼 둡니다.',
     '④ Rest display scripts while streaming': '④ 스트리밍 중에는 표시용 스크립트 쉬기',
-    'While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. This removes most streaming lag.': '답변이 생성되는 동안에는 "Only Format Display" 스크립트를 건너뛰고, 생성이 끝나면 한 번만 적용합니다. 스트리밍 렉이 크게 줄어듭니다.',
-    '④ Compromise: format finished lines while streaming': '④ 절충 모드: 완성된 줄은 스트리밍 중에도 꾸미기',
-    'With ④ on, display scripts still format the lines that are already complete, at most once per interval (0.5 s by default, under Limits). The line being written stays raw; the finished reply gets every script.': '④가 켜져 있을 때, 이미 완성된 줄에는 표시용 스크립트를 일정 간격(기본 0.5초, 한도에서 조절)마다 적용합니다. 지금 써지는 중인 줄은 그대로 보이고, 생성이 끝나면 전부 적용됩니다.',
-    '⑤ Save results in the chat file (persistent cache)': '⑤ 결과를 채팅 파일에 저장 (영구 캐시)',
-    'Stores the display result with the message, so reopening the chat skips the work. The chat file grows; results are recomputed automatically when a script changes.': '표시 결과를 메시지와 함께 저장해 두어, 채팅을 다시 열 때 계산을 건너뜁니다. 채팅 파일이 커지며, 스크립트를 고치면 자동으로 다시 계산합니다.',
+    'While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. This removes most streaming lag.': '답변이 한 글자씩 올라오는 동안에는 화면이 바뀔 때마다 표시용("Only Format Display") 스크립트가 전부 돌아갑니다. 이걸 켜면 그동안은 쉬게 하고 답변이 끝났을 때 한 번만 돌립니다. 스트리밍이 버벅이는 이유는 대개 여기 있습니다.',
+    'Compromise: keep formatting the finished lines': '절충안: 다 써진 줄은 꾸며 가며 보기',
+    'With ④ on, display scripts still format the lines that are already complete, at most once per interval (0.5 s by default, under Limits). The line being written stays raw; the finished reply gets every script.': '④를 켠 채로, 다 써진 줄에는 표시용 스크립트를 0.5초에 한 번꼴로 돌립니다(간격은 한도에서 바꿉니다). 지금 써지는 중인 줄만 그대로 두고, 답변이 끝나면 전부 돌립니다.',
+    '⑤ Save results in the chat file (persistent cache)': '⑤ 꾸민 결과를 채팅 파일에 같이 저장 (영구 캐시)',
+    'Stores the display result with the message, so reopening the chat skips the work. The chat file grows; results are recomputed automatically when a script changes.': '채팅을 다시 열 때마다 모든 메시지를 처음부터 꾸밉니다. 결과를 메시지에 같이 저장해 두면 그 일을 건너뜁니다. 대신 채팅 파일이 커집니다. 스크립트를 고치면 저장된 결과는 알아서 버리고 다시 만듭니다.',
     // notes
-    '⑤ and the compromise mode need a newer SillyTavern (staging with MessageFormatter hooks).': '⑤ 영구 캐시와 ④ 절충 모드는 최신 SillyTavern(MessageFormatter 훅이 있는 staging)에서만 쓸 수 있습니다.',
-    '⑤ is on: display results are being saved in this chat. Changing a script invalidates them automatically.': '⑤ 켜짐: 표시 결과가 이 채팅에 저장됩니다. 스크립트를 바꾸면 자동으로 무효화됩니다.',
+    '⑤ and the compromise mode need a newer SillyTavern (staging with MessageFormatter hooks).': '⑤와 절충안은 이 SillyTavern 버전에서는 쓸 수 없습니다. MessageFormatter 훅이 있는 staging 빌드가 필요합니다.',
+    '⑤ is on: display results are being saved in this chat. Changing a script invalidates them automatically.': '⑤ 켜짐. 꾸민 결과가 이 채팅에 저장됩니다. 스크립트를 바꾸면 알아서 다시 만듭니다.',
     '③ memory cache: ${0} entries, ${1} of ${2} MB': '③ 메모리 캐시: ${0}개, ${1} / ${2} MB',
     '⑤ saved in this chat: ${0} messages, ≈${1} KB': '⑤ 이 채팅에 저장: 메시지 ${0}개, ≈${1} KB',
     // limits
     'Limits': '한도',
-    'Oldest results are dropped beyond this many.': '이 개수를 넘으면 가장 오래된 결과부터 지웁니다.',
+    'Oldest results are dropped beyond this many.': '이보다 많아지면 오래된 것부터 지웁니다.',
     '③ Cache entries': '③ 캐시 개수',
-    'Longer inputs are not cached.': '이보다 긴 입력은 캐시하지 않습니다.',
+    'Longer inputs are not cached.': '이보다 긴 메시지는 캐시에 넣지 않습니다.',
     '③ Longest input to cache (characters)': '③ 캐시할 최대 입력 길이 (글자)',
-    'Oldest results are dropped beyond this estimated size (2 bytes per character of input and output).': '추정 크기(입력+출력 글자당 2바이트)가 이를 넘으면 가장 오래된 결과부터 지웁니다.',
+    'Oldest results are dropped beyond this estimated size (2 bytes per character of input and output).': '캐시가 이만큼을 넘으면 오래된 것부터 지웁니다 (입력과 출력 글자당 2바이트로 어림).',
     '③ Cache memory (MB)': '③ 캐시 메모리 (MB)',
-    'Longer display results are not saved in the chat.': '이보다 긴 표시 결과는 채팅에 저장하지 않습니다.',
+    'Longer display results are not saved in the chat.': '이보다 긴 결과는 채팅 파일에 넣지 않습니다.',
     '⑤ Longest result to save (characters)': '⑤ 저장할 최대 결과 길이 (글자)',
-    '④ Compromise interval (ms)': '④ 절충 모드 간격 (ms)',
+    'Compromise interval (ms)': '절충안 간격 (ms)',
     // buttons
     'Measure on this chat': '이 채팅으로 측정',
-    'Re-renders this chat twice, with the features off and on, and shows the real difference. The page freezes for a moment.': '이 채팅을 기능 끔/켬 상태로 한 번씩 다시 그려 실제 차이를 보여줍니다. 잠깐 화면이 멈춥니다.',
+    'Re-renders this chat twice, with the features off and on, and shows the real difference. The page freezes for a moment.': '이 채팅을 기능을 끈 채 한 번, 켠 채 한 번 다시 그려서 실제 차이를 잽니다. 그동안 화면이 잠깐 멈춥니다.',
     'Copy report': '리포트 복사',
     'Reset stats': '측정 초기화',
     'rpk_refresh': '새로고침',
     'Clear saved results (this chat)': '저장된 결과 삭제 (이 채팅)',
     // summary
     '${0} of ${1} scripts active (${2}). ${3} messages in this chat.': '스크립트 ${1}개 중 ${0}개 활성 (${2}). 이 채팅의 메시지 ${3}개.',
-    'Patterns to look at: no fixed text ${0}, .*-style ${1}, nested quantifiers ${2}.': '눈여겨볼 패턴: 고정 문구 없음 ${0}, .* 계열 ${1}, 중첩 수량자 ${2}.',
+    'Patterns to look at: no fixed text ${0}, .*-style ${1}, nested quantifiers ${2}.': '눈여겨볼 패턴: 찾을 글자가 없는 것 ${0}, .* 계열 ${1}, 중첩 수량자 ${2}.',
     'prefilter ${0}, cache ${1}, streaming ${2}': '프리필터 ${0}, 캐시 ${1}, 스트리밍 ${2}',
     'Regex ran ${0} times, ${1} in total.': '정규식을 ${0}회 실행해 ${1}가 걸렸습니다.',
     '${0} runs were skipped (${1}), saving about ${2}.': '${0}회는 실행하지 않았습니다 (${1}). 약 ${2}를 아꼈습니다.',
-    '${0} runs were skipped (${1}). The time saved is known once some runs have been measured.': '${0}회는 실행하지 않았습니다 (${1}). 아낀 시간은 실행이 측정된 뒤에 계산됩니다.',
+    '${0} runs were skipped (${1}). The time saved is known once some runs have been measured.': '${0}회는 실행하지 않았습니다 (${1}). 아낀 시간은 실행이 몇 번 잡힌 뒤에 나옵니다.',
     'Slowest: <b>${0}</b>, ${1}% of the time.': '가장 느린 스크립트는 <b>${0}</b>, 전체 시간의 ${1}%입니다.',
-    'Never changed the text in ${0}+ runs: <b>${1}</b>. Consider turning them off.': '${0}회 넘게 실행됐지만 텍스트를 바꾼 적이 없는 스크립트: <b>${1}</b>. 꺼도 됩니다.',
+    'Never changed the text in ${0}+ runs: <b>${1}</b>. Consider turning them off.': '${0}번 넘게 돌았는데 바꾼 게 없는 스크립트: <b>${1}</b>. 꺼도 됩니다.',
     'global ${0}/${1}': '글로벌 ${0}/${1}',
     'preset ${0}/${1}': '프리셋 ${0}/${1}',
     'scoped ${0}/${1}': '범위 지정 ${0}/${1}',
     'saved results ${0}': '저장된 결과 ${0}',
-    'Turning it off or fixing it helps the most.': '이 스크립트를 끄거나 고치면 효과가 가장 큽니다.',
-    '⚠ Could not patch the regex engine — this SillyTavern version is not supported.': '⚠ 정규식 엔진 패치 실패 — 이 ST 버전은 지원되지 않습니다.',
-    'No runs measured yet. Render a message or reopen the chat.': '아직 측정된 실행이 없습니다. 메시지를 렌더링하거나 채팅을 다시 열어보세요.',
+    'Turning it off or fixing it helps the most.': '이것부터 손보는 게 제일 효과가 큽니다.',
+    '⚠ Could not patch the regex engine — this SillyTavern version is not supported.': '⚠ 정규식 엔진을 패치하지 못했습니다. 이 ST 버전은 지원하지 않습니다.',
+    'No runs measured yet. Render a message or reopen the chat.': '아직 잰 게 없습니다. 채팅을 다시 열거나 메시지를 하나 그려 보세요.',
     // table
     'Script': '스크립트',
     'Runs': '실행',
@@ -882,26 +882,26 @@ const KO = {
     'The fixed text ② looks for before running this script': '②가 이 스크립트를 돌리기 전에 찾는 고정 문구',
     'none': '없음',
     'How to read the table': '표 읽는 법',
-    'Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.': '총 시간이 긴 순서입니다. 강조된 행은 전체 정규식 시간의 절반 이상을 차지하므로, 고치거나 끄면 효과가 가장 큽니다.',
-    '<b>Runs</b> are real regex executions; <b>Skips</b> and <b>Hits</b> are runs avoided by ② and ③. A script with 0 runs and many skips never had to run at all.': '<b>실행</b>은 실제 정규식 실행, <b>스킵</b>과 <b>히트</b>는 ②와 ③이 피한 실행입니다. 실행 0에 스킵이 많은 스크립트는 아예 돌아갈 필요가 없었던 것입니다.',
-    '<b>Replacer</b> is the part of Total ms spent in the replacement; if it is large, the replacement (macros) is slow, not the pattern.': '<b>치환</b>은 총 ms 중 치환문에 쓴 시간입니다. 이 값이 크면 패턴이 아니라 치환문(매크로)이 느린 것입니다.',
-    'Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${0} ms, <code>∅</code> ran ${1}+ times without changing anything.': '이름 뒤 표시: <code>.*</code> 긴 텍스트에서 느릴 수 있음, <code>(a+)+</code> 중첩 수량자, <code>⚡</code> 한 번에 ${0} ms 초과, <code>∅</code> ${1}회 이상 실행했지만 변경 없음.',
-    'Click a row to open the script in the Regex extension; the power icon turns it off.': '행을 누르면 정규식 확장에서 그 스크립트가 열리고, 전원 아이콘은 스크립트를 끕니다.',
-    'Contains .* or similar: may be slow on long text (backtracking)': '.* 같은 패턴 포함: 긴 텍스트에서 느릴 수 있음 (백트래킹)',
-    'Nested quantifier such as (a+)+: can become extremely slow on long text': '(a+)+ 같은 중첩 수량자: 긴 텍스트에서 극도로 느려질 수 있음',
+    'Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.': '오래 걸린 순서입니다. 굵은 행은 혼자서 전체 시간의 절반을 넘게 먹고 있다는 뜻이니 그것부터 보면 됩니다.',
+    '<b>Runs</b> are real regex executions; <b>Skips</b> and <b>Hits</b> are runs avoided by ② and ③. A script with 0 runs and many skips never had to run at all.': '<b>실행</b>은 정말로 돌아간 횟수, <b>스킵</b>과 <b>히트</b>는 ②와 ③ 덕에 안 돌아간 횟수입니다. 실행 0에 스킵만 쌓인 스크립트는 이 채팅에서 한 번도 필요하지 않았던 겁니다.',
+    '<b>Replacer</b> is the part of Total ms spent in the replacement; if it is large, the replacement (macros) is slow, not the pattern.': '<b>치환</b>은 총 시간 중 치환문(매크로 채우기)에 쓴 몫입니다. 여기가 크면 느린 건 패턴이 아니라 치환문입니다.',
+    'Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${0} ms, <code>∅</code> ran ${1}+ times without changing anything.': '이름 뒤 표시: <code>.*</code> 긴 글에서 느려질 수 있는 패턴, <code>(a+)+</code> 중첩 수량자, <code>⚡</code> 한 번에 ${0} ms를 넘긴 적 있음, <code>∅</code> ${1}번 넘게 돌았는데 바꾼 게 없음.',
+    'Click a row to open the script in the Regex extension; the power icon turns it off.': '행을 누르면 그 스크립트가 편집기에서 열립니다. 전원 아이콘은 끄는 버튼입니다.',
+    'Contains .* or similar: may be slow on long text (backtracking)': '.* 같은 패턴이 있어 긴 글에서 느려질 수 있습니다 (백트래킹)',
+    'Nested quantifier such as (a+)+: can become extremely slow on long text': '(a+)+ 같은 중첩 수량자는 긴 글에서 걷잡을 수 없이 느려질 수 있습니다',
     'One run took ${0} ms (more than ${1} ms)': '한 번 실행에 ${0} ms 걸림 (${1} ms 초과)',
-    'Ran ${0} times without ever changing the text: consider turning it off': '${0}회 실행했지만 텍스트를 한 번도 바꾸지 않음: 끄는 것을 고려해 보세요',
+    'Ran ${0} times without ever changing the text: consider turning it off': '${0}번 돌았는데 바꾼 게 없습니다. 꺼도 됩니다',
     'Open in the Regex extension': '정규식 확장에서 열기',
     'Turn this script off': '이 스크립트 끄기',
     // tips
     'What SillyTavern\'s own settings can do': '설정만으로 할 수 있는 것 (ST 기본 설정)',
-    '<b>User Settings → "# Messages to Load"</b>: how many messages are rendered (= regex applied) when a chat opens. 0 = all. 50–100 makes loading much faster.': '<b>User Settings → "# Messages to Load"</b>: 채팅을 열 때 렌더링(=정규식 적용)하는 메시지 수. 0=전부. 50~100 정도로 줄이면 로딩이 크게 빨라집니다.',
-    '<b>User Settings → "Streaming FPS"</b>: screen updates per second while streaming. Every update runs all display regexes, so 10–15 reduces lag.': '<b>User Settings → "Streaming FPS"</b>: 스트리밍 중 화면 갱신 횟수. 갱신마다 표시용 정규식이 전부 돌아가므로 10~15로 낮추면 렉이 줄어듭니다.',
-    'Turn on <b>"Only Format Display"</b> for display scripts and <b>"Only Format Prompt"</b> for prompt scripts. Scripts with neither run when a message is saved and are not skipped while streaming.': '표시용 스크립트는 <b>"Only Format Display"</b>, 프롬프트용은 <b>"Only Format Prompt"</b>를 켜두세요. 둘 다 꺼진 스크립트는 저장 시점에 돌아가며, 이 확장의 스트리밍 스킵 대상도 아닙니다.',
+    '<b>User Settings → "# Messages to Load"</b>: how many messages are rendered (= regex applied) when a chat opens. 0 = all. 50–100 makes loading much faster.': 'User Settings의 "# Messages to Load": 채팅을 열 때 몇 개까지 그릴지입니다. 0이면 전부. 50~100으로 두면 긴 채팅도 금방 열립니다.',
+    '<b>User Settings → "Streaming FPS"</b>: screen updates per second while streaming. Every update runs all display regexes, so 10–15 reduces lag.': 'User Settings의 "Streaming FPS": 스트리밍 중 화면을 초당 몇 번 바꿀지입니다. 바꿀 때마다 표시용 정규식이 전부 돌아가니 10~15면 충분합니다.',
+    'Turn on <b>"Only Format Display"</b> for display scripts and <b>"Only Format Prompt"</b> for prompt scripts. Scripts with neither run when a message is saved and are not skipped while streaming.': '화면용 스크립트에는 "Only Format Display", 프롬프트용에는 "Only Format Prompt"를 켜 두세요. 둘 다 꺼져 있으면 메시지를 저장할 때 돌아가고, ④도 건너뛰지 못합니다.',
     // toasts, slash command, report
     'Stats reset.': '측정값을 초기화했습니다.',
     'Report copied to the clipboard.': '리포트를 클립보드에 복사했습니다.',
-    'Could not copy — use the /regexperf command to see the report in a popup.': '클립보드 복사 실패 — /regexperf 명령으로 팝업에서 확인하세요.',
+    'Could not copy — use the /regexperf command to see the report in a popup.': '클립보드에 복사하지 못했습니다. /regexperf 명령으로 팝업에서 보세요.',
     'Removed ${0} persistent cache entries.': '영구 캐시 ${0}개를 삭제했습니다.',
     'Stats reset': '측정값 초기화 완료',
     '<div>Shows the Regex Perf Kit report in a popup. <code>/regexperf reset</code> resets the stats, <code>/regexperf text</code> returns it as text.</div>': '<div>Regex Perf Kit 리포트를 팝업으로 표시합니다. <code>/regexperf reset</code> 으로 측정 초기화, <code>/regexperf text</code> 로 텍스트 반환.</div>',
@@ -919,7 +919,7 @@ const KO = {
     'nested quantifier': '중첩 수량자',
     'spike': '스파이크',
     'no effect': '효과 없음',
-    'This chat (${0} messages): ${1} ms with the features off, ${2} ms on — ${3} ms saved (${4}%)': '이 채팅 (메시지 ${0}개): 기능 끔 ${1} ms, 켬 ${2} ms — ${3} ms 절약 (${4}%)',
+    'This chat (${0} messages): ${1} ms with the features off, ${2} ms on — ${3} ms saved (${4}%)': '이 채팅 (메시지 ${0}개): 기능을 끄면 ${1} ms, 켜면 ${2} ms. ${3} ms 절약 (${4}%)',
     '"${0}" is not in the Regex extension\'s list.': '"${0}" 스크립트를 정규식 확장 목록에서 찾을 수 없습니다.',
     'Turned off: ${0}': '껐습니다: ${0}',
     'Wait until the generation finishes.': '생성이 끝난 뒤에 측정하세요.',
@@ -957,7 +957,7 @@ const settingsHtml = () => `
         ${feature('rpk_memo', t`③ Reuse results (memory cache)`, t`When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with {{macros}} are left out automatically.`)}
         <div class="rpk-feature-group">
         ${feature('rpk_streaming', t`④ Rest display scripts while streaming`, t`While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. This removes most streaming lag.`)}
-        ${feature('rpk_stream_throttle', t`④ Compromise: format finished lines while streaming`, t`With ④ on, display scripts still format the lines that are already complete, at most once per interval (0.5 s by default, under Limits). The line being written stays raw; the finished reply gets every script.`, { sub: true })}
+        ${feature('rpk_stream_throttle', t`Compromise: keep formatting the finished lines`, t`With ④ on, display scripts still format the lines that are already complete, at most once per interval (0.5 s by default, under Limits). The line being written stays raw; the finished reply gets every script.`, { sub: true })}
         </div>
         ${feature('rpk_persist', t`⑤ Save results in the chat file (persistent cache)`, t`Stores the display result with the message, so reopening the chat skips the work. The chat file grows; results are recomputed automatically when a script changes.`, { labelId: 'rpk_persist_label' })}
       </div>
@@ -971,7 +971,7 @@ const settingsHtml = () => `
           ${limit('memoMaxLen', t`③ Longest input to cache (characters)`, t`Longer inputs are not cached.`)}
           ${limit('memoMaxMB', t`③ Cache memory (MB)`, t`Oldest results are dropped beyond this estimated size (2 bytes per character of input and output).`)}
           ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved in the chat.`)}
-          ${limit('streamingThrottleMs', t`④ Compromise interval (ms)`)}
+          ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
         </div>
       </details>
 
