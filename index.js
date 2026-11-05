@@ -64,6 +64,17 @@ function liveStream() {
 // SillyTavern's macro syntax: {{...}} and the legacy <USER> <BOT> <CHAR> <GROUP> <CHARIFNOTGROUP> markers.
 const MACRO = /{{|<(?:user|bot|char(?:ifnotgroup)?|group)>/i;
 
+let macroIn = null;
+let macroOut = false;
+/** MACRO.test(str), memoized for the last input: consecutive scripts usually see the same string. */
+function hasMacro(str) {
+    if (str !== macroIn) {
+        macroIn = str;
+        macroOut = MACRO.test(str);
+    }
+    return macroOut;
+}
+
 // Escapes for macro values inside an ESCAPED (substituteRegex 2) pattern, as SillyTavern's sanitizeRegexMacro does.
 const REGEX_MACRO_ESCAPES = { '\n': '\\n', '\r': '\\r', '\t': '\\t', '\v': '\\v', '\f': '\\f', '\0': '\\0' };
 const sanitizeRegexMacro = (x) => (x && typeof x === 'string'
@@ -126,9 +137,10 @@ export function extractNeedle(source, flags) {
                 }
                 return { lit: null };
             }
-            const hex = { u: 4, x: 2 }[nx];
+            const hex = { u: 4, x: 2 }[nx]; // \uXXXX \xXX: skip the digits (a lone \u or \x is not followed by them)
             if (hex) {
-                if (new RegExp(`^[0-9a-fA-F]{${hex}}`).test(source.slice(i, i + hex))) i += hex;
+                const digits = source.slice(i, i + hex);
+                if (digits.length === hex && /^[0-9a-fA-F]+$/.test(digits)) i += hex;
                 return { lit: null };
             }
             if (nx === 'c') {
@@ -269,8 +281,8 @@ const keyOf = (re) => re.source + '\u0000' + re.flags;
 let infoCache = null; // null = rebuild on next use
 const markDirty = () => { infoCache = null; };
 
-function ensureInfo() {
-    if (!infoCache || performance.now() - infoCache.builtAt > 5000) infoCache = buildInfo();
+function ensureInfo() { // runs on every RegexProvider.get(): Date.now() is the cheaper clock
+    if (!infoCache || Date.now() - infoCache.builtAt > 5000) infoCache = buildInfo();
     return infoCache;
 }
 
@@ -337,7 +349,7 @@ function buildInfo() {
         if (s.markdownOnly && (min > -Infinity || max < Infinity)) depthRules.push([min, max]);
         versionParts.push(re.source, re.flags, replaceString, trimSig, String(!!s.markdownOnly), String(!!s.promptOnly), String(s.minDepth), String(s.maxDepth), String(s.placement));
     }
-    return { map, counts, depthRules, version: fnv1a(versionParts.join('\u0003')), builtAt: performance.now() };
+    return { map, counts, depthRules, version: fnv1a(versionParts.join('\u0003')), builtAt: Date.now() };
 }
 
 // ---- Instrumented RegExp ----
@@ -415,7 +427,7 @@ class PerfRegExp extends RegExp {
 
         let bucket;
         // Matched text with macros is substituted again after the groups are inserted, so it is not memoized.
-        if (settings.memo && memoPrefix && str.length <= settings.memoMaxLen && !MACRO.test(str)) {
+        if (settings.memo && memoPrefix && str.length <= settings.memoMaxLen && !hasMacro(str)) {
             bucket = memo.get(memoPrefix);
             if (!bucket) memo.set(memoPrefix, bucket = new Map());
             const hit = bucket.get(str);
@@ -432,9 +444,9 @@ class PerfRegExp extends RegExp {
         // SillyTavern's replacer (groups, trim strings, macros) is timed apart from the matching itself.
         let replMs = 0;
         const fn = settings.profiler && typeof replacer === 'function'
-            ? function (...args) {
+            ? function () {
                 const t1 = performance.now();
-                const r = replacer.apply(this, args);
+                const r = replacer.apply(this, arguments);
                 replMs += performance.now() - t1;
                 return r;
             }

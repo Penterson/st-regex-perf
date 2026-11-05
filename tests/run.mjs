@@ -1,23 +1,10 @@
 // Browser tests: boots the harness in headless Chrome once per variant and compares what SillyTavern's real
 // regex engine produces with no extension ("none"), with main ("baseline") and with the working tree ("current").
 // Usage: node tests/run.mjs [name regex]   Chrome: $CHROME_PATH, else google-chrome / chromium on PATH.
-import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import puppeteer from 'puppeteer-core';
 import { fetchSt } from './fetch-st.mjs';
-import { startServer } from './server.mjs';
+import { chromePath, startServer } from './server.mjs';
 import { tests } from './cases.mjs';
-
-function chromePath() {
-    if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
-    for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
-        try {
-            const p = execFileSync('which', [name], { encoding: 'utf8' }).trim();
-            if (p && existsSync(p)) return p;
-        } catch { /* not installed */ }
-    }
-    throw new Error('Chrome not found: set CHROME_PATH');
-}
 
 await fetchSt();
 const server = await startServer();

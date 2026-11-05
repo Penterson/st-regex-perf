@@ -2,6 +2,7 @@
 // pinned SillyTavern files where the code under test needs the real thing, small stand-ins for the rest,
 // the working tree as the extension and main (BASELINE) as "baseline".
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize } from 'node:path';
@@ -104,4 +105,16 @@ export async function startServer() {
         url: `http://127.0.0.1:${server.address().port}`,
         close: () => new Promise((ok) => server.close(() => ok())),
     };
+}
+
+/** Chrome for puppeteer: $CHROME_PATH, else google-chrome / chromium on PATH. */
+export function chromePath() {
+    if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
+    for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
+        try {
+            const p = execFileSync('which', [name], { encoding: 'utf8' }).trim();
+            if (p && existsSync(p)) return p;
+        } catch { /* not installed */ }
+    }
+    throw new Error('Chrome not found: set CHROME_PATH');
 }

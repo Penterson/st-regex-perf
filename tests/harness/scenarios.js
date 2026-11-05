@@ -584,3 +584,36 @@ export async function ux(h) {
     const cleared = { left: 'regex_perf_cache' in h.st.chat[0].extra, saved: h.st.counters.saveChat - chatSaves, toast: h.toasts.at(-1)?.[1] };
     return { initial, ids, checked, toggled, slash, stored, cleared, note: root.querySelector('#rpk_persist_note').textContent };
 }
+
+/** tests/bench.mjs: cold and warm display renders of a long chat, and the save path on it. */
+export async function bench(h) {
+    const { corpus } = await importCorpus();
+    h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: Array.from({ length: 40 }, () => corpus.CHAT()).flat() });
+    await useScripts(h, corpus.SCRIPTS());
+    const pass = () => {
+        const t0 = performance.now();
+        h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes + ' '.repeat(i % 7), m.name, m.is_system, m.is_user, i));
+        return performance.now() - t0;
+    };
+    const save = () => {
+        const t0 = performance.now();
+        h.st.chat.forEach((m, i) => h.engine.getRegexedString(m.mes + i, P.AI));
+        return performance.now() - t0;
+    };
+    pass(); // JIT warm-up with different inputs below
+    h.st.chat.forEach(m => { m.mes += ' .'; });
+    return { cold: pass(), warm: pass(), save: save() };
+}
+
+/** tests/bench.mjs: many save-path calls on unique inputs, with the given extension settings. */
+export async function benchSave(h, settings) {
+    const { corpus } = await importCorpus();
+    applyProfile(h, settings);
+    h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: corpus.CHAT() });
+    await useScripts(h, corpus.SCRIPTS());
+    const msgs = Array.from({ length: 300 }, (_, i) => corpus.CHAT()[i % 6].mes + ' #' + i);
+    msgs.forEach(m => h.engine.getRegexedString(m, P.AI));
+    const t0 = performance.now();
+    for (let r = 0; r < 5; r++) msgs.forEach(m => h.engine.getRegexedString(m + r, P.AI));
+    return performance.now() - t0;
+}
