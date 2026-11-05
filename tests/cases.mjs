@@ -46,3 +46,48 @@ test('harness: every variant boots and the extension patches the engine', async 
     assert.deepEqual(r.baseline.out, r.none.out);
     assert.deepEqual(r.current.out, r.none.out);
 });
+
+test('item 1: case-insensitive prefilter decides like the regex engine (σ/Σ/ς, µ/μ, ſ)', async ({ each }) => {
+    const r = await each('caseFold');
+    assert.deepEqual(r.none, ['ΟΔΟ[sigma]', 'οδο[sigma]', 'a 5[micrometre] grain', '[sun]day', '[sophia]']);
+    assert.notDeepEqual(r.baseline, r.none, 'main skips these (bug reproduced)');
+    assert.deepEqual(r.current, r.none);
+});
+
+test('item 2: an edited replacement is used after a chat reload or preset switch without clear()', async ({ each }) => {
+    const r = await each('staleEdit');
+    assert.deepEqual(r.none, ['A there', 'B there', 'C there']);
+    assert.notDeepEqual(r.baseline, r.none, 'main returns the old cached output (bug reproduced)');
+    assert.deepEqual(r.current, r.none);
+});
+
+test('item 3: matched text containing {{macros}} or <USER> is not served from the memo', async ({ each }) => {
+    const r = await each('macroInMatch');
+    assert.deepEqual(r.none, ['Hi (Ann) and (Ann)', 'Hi Ann', ' waves', 'Hi (Bob) and (Bob)', 'Hi Bob', 'Cat waves', 'Roll (1)', 'Roll (2)']);
+    assert.notDeepEqual(r.baseline, r.none, 'main reuses the first result (bug reproduced)');
+    assert.deepEqual(r.current, r.none);
+});
+
+test('item 4: ⑧ persisted display output refreshes after a persona or character rename', async ({ each }) => {
+    const r = await each('persistNames');
+    assert.deepEqual(r.none, ['Ann and Cat  waves', 'Ann and Cat  waves', 'Bob and Cat  waves', 'Bob and Kit Cat waves']);
+    assert.notDeepEqual(r.baseline, r.none, 'main keeps the old names (bug reproduced)');
+    assert.deepEqual(r.current, r.none);
+});
+
+test('item 5: escaped-substitution scripts are recognized, memoized and stream-skipped; literal column shows the used needle', async ({ each }) => {
+    const r = await each('escapedSubst');
+    assert.equal(r.none.first, '<b>hello</b>');
+    assert.equal(r.current.first, r.none.first);
+    assert.equal(r.none.live, '<b>hello</b>');
+    // main: unknown script, so no memo and no streaming skip
+    assert.ok(r.baseline.second > 0);
+    assert.equal(r.baseline.live, '<b>hello</b>');
+    assert.match(r.baseline.report, /\(알 수 없음\)/);
+    assert.match(r.baseline.report, /^\d+ \| \(알 수 없음\) \|.*\| - \|/m, 'main shows no literal for the unknown /abc/');
+    // this branch: second render is a memo hit, display script skipped while streaming, named row, real literal
+    assert.equal(r.current.second, 0);
+    assert.equal(r.current.live, 'Dr. A (B): hello');
+    assert.match(r.current.report, /^\d+ \| Escaped char \|/m);
+    assert.match(r.current.report, /^\d+ \| [^|]+ \|.*\| "abc" \|/m, 'the unknown /abc/ row shows its needle');
+});

@@ -130,3 +130,113 @@ export async function smoke(h) {
     const re = h.engine.RegexProvider.instance.get('/x/g');
     return { out, wrapped: Object.getPrototypeOf(re) !== RegExp.prototype };
 }
+
+/** Runs fn while counting regex executions per pattern source. */
+function executionsBySource(fn) {
+    const orig = RegExp.prototype[Symbol.replace];
+    const counts = {};
+    RegExp.prototype[Symbol.replace] = function (...args) {
+        counts[this.source] = (counts[this.source] ?? 0) + 1;
+        return orig.apply(this, args);
+    };
+    try {
+        fn();
+    } finally {
+        RegExp.prototype[Symbol.replace] = orig;
+    }
+    return counts;
+}
+
+/** The extension's text report (the /regexperf text command), or '' without the extension. */
+async function report(h) {
+    return h.commands.regexperf ? String(await h.commands.regexperf.callback({}, 'text')) : '';
+}
+
+/** ① Case-insensitive patterns whose matches need Unicode case folding (σ/Σ/ς, µ/μ, ſ/s). */
+export async function caseFold(h) {
+    await useScripts(h, [
+        script({ findRegex: '/ΣΟΦΙΑ/gi', replaceString: '[sophia]' }),
+        script({ findRegex: '/σ/gi', replaceString: '[sigma]' }),
+        script({ findRegex: '/μm/gi', replaceString: '[micrometre]' }),
+        script({ findRegex: '/ſun/giu', replaceString: '[sun]' }),
+    ]);
+    return ['ΟΔΟΣ', 'οδος', 'a 5µm grain', 'Sunday', 'σοφια'].map(s => h.engine.getRegexedString(s, P.AI));
+}
+
+/** ② A script's replacement is edited, then the chat reloads (or a preset switches) without RegexProvider.clear(). */
+export async function staleEdit(h) {
+    const out = [];
+    await useScripts(h, [script({ findRegex: '/hello/g', replaceString: 'A' })]);
+    out.push(h.engine.getRegexedString('hello there', P.AI));
+    // The regex editor saves a new object for the same id, then reloads the chat.
+    h.extension_settings.regex = [{ ...h.extension_settings.regex[0], replaceString: 'B' }];
+    await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+    out.push(h.engine.getRegexedString('hello there', P.AI));
+    // Switching to a preset whose scripts reuse the pattern: PRESET_CHANGED, no clear, no reload.
+    h.extension_settings.preset_allowed_regex = { [h.preset.apiId]: [h.preset.name] };
+    h.extension_settings.regex = [];
+    h.preset.scripts = [script({ findRegex: '/hello/g', replaceString: 'C', markdownOnly: true })];
+    await h.eventSource.emit(h.event_types.PRESET_CHANGED, { apiId: h.preset.apiId, name: h.preset.name });
+    out.push(h.engine.getRegexedString('hello there', P.AI, { isMarkdown: true }));
+    return out;
+}
+
+/** ③ Matched text that contains macros: SillyTavern substitutes them again after inserting the groups. */
+export async function macroInMatch(h) {
+    await useScripts(h, [
+        script({ findRegex: '/\\[(.*?)\\]/g', replaceString: '($1)' }),
+        // a group reference that completes a legacy marker: {user} -> <user>
+        script({ findRegex: '/\\{(\\w+)\\}/g', replaceString: '<$1>' }),
+        // a trim string with a legacy marker
+        script({ findRegex: '/~(.+?)~/g', replaceString: '$1', trimStrings: ['<CHAR>'] }),
+    ]);
+    const out = [];
+    for (const [user, char] of [['Ann', 'Cat'], ['Bob', 'Kit']]) {
+        h.st.setState({ name1: user, name2: char });
+        out.push(h.engine.getRegexedString('Hi [{{user}}] and [<USER>]', P.AI));
+        out.push(h.engine.getRegexedString('Hi {user}', P.AI));
+        out.push(h.engine.getRegexedString('~Cat waves~', P.AI));
+    }
+    out.push(h.engine.getRegexedString('Roll [{{random::1::2::3}}]', P.AI));
+    out.push(h.engine.getRegexedString('Roll [{{random::1::2::3}}]', P.AI));
+    return out;
+}
+
+/** ④ ⑧ keeps display output per message; renaming the persona or the character must refresh it. */
+export async function persistNames(h, { charName = 'ch_name' } = {}) {
+    applyProfile(h, { persist: true });
+    await useScripts(h, [
+        script({ findRegex: '/\\bme\\b/g', replaceString: '{{user}}', markdownOnly: true }),
+        script({ findRegex: '/\\bthem\\b/g', replaceString: '{{char}}', markdownOnly: true }),
+        script({ findRegex: '/\\[(.*?)\\]/g', replaceString: '$1', trimStrings: ['{{char}}'], markdownOnly: true }),
+    ]);
+    h.st.setState({ name1: 'Ann', name2: 'Cat', chat: [{ name: 'Cat', is_user: false, is_system: false, mes: 'me and them [Cat waves]', extra: {} }] });
+    const render = () => h.st.messageFormatting(h.st.chat[0].mes, h.st.chat[0].name, false, false, 0);
+    const out = [render(), render()];
+    h.st.setState({ name1: 'Bob' });
+    out.push(render());
+    if (charName === 'ch_name') h.st.chat[0].name = 'Kit'; // the author name SillyTavern passes as ch_name
+    h.st.setState({ name2: 'Kit' });
+    out.push(render());
+    return out;
+}
+
+/** ⑤ substituteRegex = 2 (ESCAPED): recognized as its script, memoized, and skipped while streaming. */
+export async function escapedSubst(h) {
+    h.st.setState({ name1: 'User', name2: 'Dr. A (B)' });
+    const s = script({ scriptName: 'Escaped char', findRegex: '/{{char}}: (.+)/g', replaceString: '<b>$1</b>', substituteRegex: 2, markdownOnly: true });
+    await useScripts(h, [s]);
+    const mes = 'Dr. A (B): hello';
+    const source = h.st.substituteParamsExtended('{{char}}: (.+)', {}, (x) => x.replace(/[.^$*+?{}[\]\\/|()]/g, '\\$&'));
+    const display = () => h.engine.getRegexedString(mes, P.AI, { isMarkdown: true });
+    const first = display();
+    const second = executionsBySource(display)[source] ?? 0;
+    // Unknown patterns (compiled outside any script) still get a needle; the literal column must show it.
+    'xx abc yy'.replace(h.engine.RegexProvider.instance.get('/abc/g'), 'z');
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    h.st.setState({ streamingProcessor: { messageId: 0, isFinished: false, isStopped: false } });
+    const live = display();
+    h.st.setState({ streamingProcessor: null });
+    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    return { first, second, live, report: await report(h) };
+}

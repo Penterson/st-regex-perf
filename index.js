@@ -49,16 +49,14 @@ function isStreamingLive() {
     return !!sp && !sp.isFinished && !sp.isStopped;
 }
 
-let lowerIn = null;
-let lowerOut = '';
-/** str.toLowerCase(), memoized for the last input: consecutive scripts usually see the same string. */
-function toLower(str) {
-    if (str !== lowerIn) {
-        lowerIn = str;
-        lowerOut = str.toLowerCase();
-    }
-    return lowerOut;
-}
+// SillyTavern's macro syntax: {{...}} and the legacy <USER> <BOT> <CHAR> <GROUP> <CHARIFNOTGROUP> markers.
+const MACRO = /{{|<(?:user|bot|char(?:ifnotgroup)?|group)>/i;
+
+// Escapes for macro values inside an ESCAPED (substituteRegex 2) pattern, as SillyTavern's sanitizeRegexMacro does.
+const REGEX_MACRO_ESCAPES = { '\n': '\\n', '\r': '\\r', '\t': '\\t', '\v': '\\v', '\f': '\\f', '\0': '\\0' };
+const sanitizeRegexMacro = (x) => (x && typeof x === 'string'
+    ? x.replace(/[\n\r\t\v\f\0.^$*+?{}[\]\\/|()]/g, (c) => REGEX_MACRO_ESCAPES[c] ?? '\\' + c)
+    : x);
 
 const CONTROL_ESCAPES = { n: '\n', t: '\t', r: '\r', f: '\f', v: '\v' };
 
@@ -68,7 +66,7 @@ const CONTROL_ESCAPES = { n: '\n', t: '\t', r: '\r', f: '\f', v: '\v' };
  * Only characters at group depth 0 that are not optional are considered.
  * @param {string} source RegExp.source
  * @param {string} flags RegExp.flags
- * @returns {{needle: string, ci: boolean} | null}
+ * @returns {{needle: string, re: RegExp | null} | null} re: case-insensitive check for the i flag
  */
 export function extractNeedle(source, flags) {
     if (flags.includes('v')) return null;
@@ -177,9 +175,10 @@ export function extractNeedle(source, flags) {
     endRun();
 
     if (!best) return null;
-    if (!flags.includes('i')) return { needle: best, ci: false };
-    const needle = best.toLowerCase();
-    return { needle, ci: needle !== best.toUpperCase() };
+    // With the i flag, an escaped copy of the literal decides: it folds case exactly like the pattern itself
+    // (toLowerCase() does not: σ/ς/Σ, µ/μ, ſ/s ...).
+    const re = flags.includes('i') ? new RegExp(best.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&'), flags.includes('u') ? 'iu' : 'i') : null;
+    return { needle: best, re };
 }
 
 // .*  .+  [\s\S]*  [^]*  (.|\n)*  [\w\W]* — likely heavy backtracking
@@ -213,8 +212,9 @@ function buildInfo() {
         if (s.promptOnly) counts.promptOnly++;
 
         let rs = s.findRegex;
-        if (Number(s.substituteRegex) === 1) {
-            try { rs = substituteParamsExtended(rs); } catch { /* keep the raw pattern */ }
+        const substitute = Number(s.substituteRegex);
+        if (substitute === 1 || substitute === 2) { // RAW / ESCAPED, as runRegexScript() compiles them
+            try { rs = substituteParamsExtended(rs, {}, substitute === 2 ? sanitizeRegexMacro : undefined); } catch { /* keep the raw pattern */ }
         }
         let re;
         try { re = regexFromString(rs); } catch { /* invalid pattern */ }
@@ -228,11 +228,15 @@ function buildInfo() {
         if (!needle) counts.noNeedle++;
         if (heavy) counts.heavy++;
 
+        // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
+        const replacement = replaceString.replace(/{{match}}/gi, '$0');
         map.set(keyOf(re), {
             name: s.scriptName || '(이름 없음)',
             markdownOnly: !!s.markdownOnly,
-            // no macros besides {{match}}: the output depends only on the input, so it can be memoized
-            pure: !/{{(?!match}})/i.test(replaceString) && !trims.some(t => String(t).includes('{{')),
+            // No macros, and no group reference that could complete one (<$1>, {$1}): the output then depends
+            // only on the input, so it can be memoized.
+            pure: !MACRO.test(replacement) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(replacement)
+                && !trims.some(t => MACRO.test(String(t))),
             replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
             needle,
             heavy,
@@ -259,28 +263,27 @@ const clearMemo = () => {
     memoLru.clear();
 };
 
-function getStat(key, re, info) {
+function getStat(key, re) {
     let st = stats.get(key);
     if (!st) {
         st = {
-            name: info?.name ?? '(알 수 없음)',
+            name: '(알 수 없음)',
             src: '/' + re.source + '/' + re.flags,
             calls: 0, totalMs: 0, maxMs: 0,
             skipped: 0, hits: 0, streamSkipped: 0, bypass: 0,
-            heavy: !!info?.heavy,
-            needle: info?.needle?.needle ?? null,
+            heavy: HEAVY_HINT.test(re.source),
+            needle: null, // the needle the wrapper uses, set with its meta
         };
         stats.set(key, st);
-    } else if (info) {
-        st.name = info.name;
     }
     return st;
 }
 
 class PerfRegExp extends RegExp {
-    constructor(source, flags, meta) {
+    constructor(source, flags) {
         super(source, flags);
-        this._meta = meta;
+        this._meta = null; // set by RegexProvider.get() for each script-info version
+        this._version = null;
         // V8 only takes its fast replace path on plain RegExps, so matching runs on an unsubclassed twin.
         this._native = new RegExp(source, flags);
     }
@@ -296,13 +299,14 @@ class PerfRegExp extends RegExp {
             stat.streamSkipped++;
             return str;
         }
-        if (settings.prefilter && needle && !(needle.ci ? toLower(str) : str).includes(needle.needle)) {
+        if (settings.prefilter && needle && !(needle.re ? needle.re.test(str) : str.includes(needle.needle))) {
             stat.skipped++;
             return str;
         }
 
         let bucket;
-        if (settings.memo && memoPrefix && str.length <= settings.memoMaxLen) {
+        // Matched text with macros is substituted again after the groups are inserted, so it is not memoized.
+        if (settings.memo && memoPrefix && str.length <= settings.memoMaxLen && !MACRO.test(str)) {
             bucket = memo.get(memoPrefix);
             if (!bucket) memo.set(memoPrefix, bucket = new Map());
             const hit = bucket.get(str);
@@ -358,24 +362,32 @@ function patchProvider() {
     inst.get = function (regexString) {
         const base = origGet(regexString);
         if (!base) return null;
+        const { map, version } = ensureInfo();
         let w = wrapped.get(regexString);
         if (!w) {
-            const key = keyOf(base);
-            const info = ensureInfo().map.get(key) ?? null;
-            const meta = {
-                stat: getStat(key, base, info),
-                markdownOnly: !!info?.markdownOnly,
-                needle: info ? info.needle : extractNeedle(base.source, base.flags),
-                memoPrefix: info?.pure ? key + '\u0001' + info.replaceSig + '\u0001' : null,
-            };
             try {
-                w = new PerfRegExp(base.source, base.flags, meta);
+                w = new PerfRegExp(base.source, base.flags);
             } catch (e) {
                 console.warn('[RegexPerf] could not wrap regex, falling back', e);
                 return base;
             }
             if (wrapped.size >= 1000) wrapped.delete(wrapped.keys().next().value);
             wrapped.set(regexString, w);
+        }
+        // Script info is re-read whenever it changes, so an edited script takes effect without RegexProvider.clear().
+        if (w._version !== version) {
+            const key = keyOf(base);
+            const info = map.get(key) ?? null;
+            const stat = getStat(key, base);
+            if (info) stat.name = info.name;
+            stat.needle = info ? info.needle : extractNeedle(base.source, base.flags);
+            w._meta = {
+                stat,
+                markdownOnly: !!info?.markdownOnly,
+                needle: stat.needle,
+                memoPrefix: info?.pure ? key + '\u0001' + info.replaceSig + '\u0001' : null,
+            };
+            w._version = version;
         }
         w.lastIndex = 0;
         return w;
@@ -405,9 +417,12 @@ function installPersistHooks() {
         bypass = false;
         pending = null;
         if (!settings.persist || c.messageId < 0 || c.isReasoning || c.isSystem || isStreamingLive()) return mes;
-        const msg = ctx().chat?.[c.messageId];
+        const { chat, name1, name2 } = ctx();
+        const msg = chat?.[c.messageId];
         if (!msg) return mes;
-        const key = fnv1a(mes) + ':' + mes.length + ':' + ensureInfo().version + ':' + (c.characterName || '');
+        // {{user}}/{{char}} in replacements and trim strings resolve to these names (ch_name: the message author).
+        const names = fnv1a([c.ch_name ?? c.characterName, name1, name2].join('\u0000'));
+        const key = fnv1a(mes) + ':' + mes.length + ':' + ensureInfo().version + ':' + names;
         const e = msg.extra?.[EXTRA_KEY];
         if (e && e.k === key) {
             bypass = true;
@@ -487,7 +502,7 @@ function buildReportText() {
     if (s.top) lines.push(`1위 "${s.top.name}" 가 전체 시간의 ${s.topShare.toFixed(0)}% 차지`);
     lines.push('', '순위 | 스크립트 | 실행 | 총ms | 평균ms | 최대ms | 스킵 | 히트 | 리터럴 | 경고');
     s.rows.forEach((r, i) => {
-        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${r.skipped} | ${r.hits} | ${r.needle ? JSON.stringify(r.needle) : '-'} | ${r.heavy ? '.* 계열' : ''}`);
+        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${r.skipped} | ${r.hits} | ${r.needle ? JSON.stringify(r.needle.needle) : '-'} | ${r.heavy ? '.* 계열' : ''}`);
     });
     return lines.join('\n');
 }
@@ -591,7 +606,7 @@ function renderPanel() {
         return `<tr class="${cls}" title="${esc(r.src)}">
           <td>${i + 1}</td><td>${esc(r.name)}${r.heavy ? ' <span class="rpk-badge" title="백트래킹이 많을 수 있는 패턴">.*</span>' : ''}</td>
           <td>${r.calls}</td><td>${fmtMs(r.totalMs)}</td><td>${fmtMs(avgMs(r))}</td><td>${fmtMs(r.maxMs)}</td>
-          <td>${r.skipped}</td><td>${r.hits}</td><td>${r.needle ? esc(JSON.stringify(r.needle)) : '<span class="rpk-dim">없음</span>'}</td>
+          <td>${r.skipped}</td><td>${r.hits}</td><td>${r.needle ? esc(JSON.stringify(r.needle.needle)) : '<span class="rpk-dim">없음</span>'}</td>
         </tr>`;
     }).join('') || '<tr><td colspan="9" class="rpk-dim">아직 측정된 실행이 없습니다. 메시지를 렌더링하거나 채팅을 다시 열어보세요.</td></tr>');
 
