@@ -1097,7 +1097,23 @@ const feature = (id, name, desc, { labelId = '', sub = false } = {}) => `
 const limit = (key, name, title) => `<label${title ? ` title="${title}"` : ''}><span>${name}</span><input type="number" class="text_pole" id="rpk_${key}"></label>`;
 
 // Table cells carry a column class so the narrow layout can hide columns; headers explain themselves on hover.
-const th = (col, text, title) => `<th class="rpk-col-${col}"${title ? ` title="${esc(title)}"` : ''}>${text}</th>`;
+const th = (col, text, title) => `<th class="rpk-col-${col}${SORT_KEYS[col] ? ' rpk-sortable' : ''}${sortBy === col ? ' rpk-sorted' : ''}" data-col="${col}"${title ? ` title="${esc(title)}"` : ''}>${text}${sortBy === col ? (sortDesc ? ' ▾' : ' ▴') : ''}</th>`;
+
+// Sorting and the name filter are per session (not saved). Clicking a header sorts by it, again flips the direction.
+const SORT_KEYS = {
+    rank: (r, i) => i, name: (r) => r.name.toLowerCase(), runs: (r) => r.calls, total: (r) => r.totalMs, avg: avgMs, max: (r) => r.maxMs,
+    repl: (r) => r.replMs, matched: (r) => r.matched, changed: (r) => r.changed, skips: (r) => r.skipped, hits: (r) => r.hits, lit: (r) => fmtNeedles(r) ?? '',
+};
+let sortBy = null;
+let sortDesc = true;
+let nameFilter = '';
+
+const headerHtml = () => `<tr>
+            ${th('rank', '#')}${th('name', t`Script`)}
+            ${th('runs', t`Runs`, t`Regex runs that really happened`)}${th('total', t`Total ms`)}${th('avg', t`Avg`, t`Time per run, averaged`)}${th('max', t`Max`, t`Slowest single run`)}
+            ${th('repl', t`Replacer`, t`Time spent in the replacement (group filling, trim strings, macros), included in Total ms`)}${th('matched', t`Matched`, t`Runs where the pattern matched, even if the text came out the same`)}${th('changed', t`Changed`, t`Runs that changed the text`)}
+            ${th('skips', t`Skips`, t`Runs skipped by ② (the fixed text was absent)`)}${th('hits', t`Hits`, t`Results reused by ③`)}${th('lit', t`Literal`, t`The fixed text ② looks for before running this script: every literal joined by & must be present, one of those joined by |. Hover a cell for the shortest possible match.`)}${th('act', '')}
+          </tr>`;
 const td = (col, value, cls = '', title = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}"${title ? ` title="${esc(title)}"` : ''}>${value}</td>`;
 
 const settingsHtml = () => `
@@ -1146,15 +1162,13 @@ const settingsHtml = () => `
       </div>
       <div class="rpk-note rpk-measured" id="rpk_measure_result"></div>
 
-      <h4 class="rpk-section">${t`Per-script measurements (slowest first)`}</h4>
+      <div class="rpk-table-head">
+        <h4 class="rpk-section">${t`Per-script measurements (slowest first)`}</h4>
+        <input type="text" class="text_pole" id="rpk_filter" placeholder="${t`Filter by name`}" title="${t`Shows only the scripts whose name contains this. Click a column header to sort by it, again to flip the direction.`}">
+      </div>
       <div class="rpk-table-wrap">
         <table class="rpk-table" id="rpk_table">
-          <thead><tr>
-            ${th('rank', '#')}${th('name', t`Script`)}
-            ${th('runs', t`Runs`, t`Regex runs that really happened`)}${th('total', t`Total ms`)}${th('avg', t`Avg`, t`Time per run, averaged`)}${th('max', t`Max`, t`Slowest single run`)}
-            ${th('repl', t`Replacer`, t`Time spent in the replacement (group filling, trim strings, macros), included in Total ms`)}${th('matched', t`Matched`, t`Runs where the pattern matched, even if the text came out the same`)}${th('changed', t`Changed`, t`Runs that changed the text`)}
-            ${th('skips', t`Skips`, t`Runs skipped by ② (the fixed text was absent)`)}${th('hits', t`Hits`, t`Results reused by ③`)}${th('lit', t`Literal`, t`The fixed text ② looks for before running this script: every literal joined by & must be present, one of those joined by |. Hover a cell for the shortest possible match.`)}${th('act', '')}
-          </tr></thead>
+          <thead>${headerHtml()}</thead>
           <tbody></tbody>
         </table>
       </div>
@@ -1236,7 +1250,14 @@ function renderPanel() {
     const summary = lines.map(l => `<p>${l}</p>`).join('');
     setContent(ui.summary, summary);
 
-    ui.rows = s.rows.slice(0, 60);
+    setContent(ui.thead, headerHtml());
+    const ranks = new Map(s.rows.map((r, i) => [r, i + 1])); // by total time, whatever the sort
+    let rows = nameFilter ? s.rows.filter(r => r.name.toLowerCase().includes(nameFilter)) : s.rows;
+    if (sortBy) {
+        const key = SORT_KEYS[sortBy];
+        rows = rows.map((r, i) => [key(r, i), r]).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0) * (sortDesc ? -1 : 1)).map(([, r]) => r);
+    }
+    ui.rows = rows.slice(0, 60);
     setContent(ui.tbody, ui.rows.map((r, i) => {
         const cls = (s.total > 0 && r.totalMs / s.total >= 0.5) ? 'rpk-hot' : (r.heavy ? 'rpk-heavy' : '');
         const m = rowMeasures.get(r);
@@ -1244,13 +1265,13 @@ function renderPanel() {
             + `<span class="rpk-measure-row fa-solid fa-stopwatch" title="${t`Measure this chat without this script`}"></span>`
             + (r.ids.length ? ` <span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span> <span class="rpk-off fa-solid fa-power-off" title="${t`Turn this script off`}"></span>` : '');
         return `<tr class="${cls}${r.ids.length ? ' rpk-script' : ''}" title="${esc(r.src)}" data-i="${i}">
-          ${td('rank', i + 1)}${td('name', esc(r.name) + warnings(r, true).join(''))}
+          ${td('rank', ranks.get(r))}${td('name', esc(r.name) + warnings(r, true).join(''))}
           ${td('runs', r.calls)}${td('total', fmtMs(r.totalMs))}${td('avg', fmtMs(avgMs(r)))}${td('max', fmtMs(r.maxMs))}
           ${td('repl', fmtMs(r.replMs))}${td('matched', r.matched)}${td('changed', r.changed)}
           ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', fmtNeedles(r) ? esc(fmtNeedles(r)) : `<span class="rpk-dim">${t`none`}</span>`, 'rpk-lit', litTitle(r))}
           ${td('act', actions, 'rpk-act')}
         </tr>`;
-    }).join('') || `<tr><td colspan="13" class="rpk-dim rpk-empty">${t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
+    }).join('') || `<tr><td colspan="13" class="rpk-dim rpk-empty">${nameFilter && s.rows.length ? t`No script name contains "${nameFilter}".` : t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
 
     setContent(ui.note, !persistAvailable
         ? t`⑤ and the compromise mode need a newer SillyTavern (staging with MessageFormatter hooks).`
@@ -1280,7 +1301,7 @@ function scriptAction(r, off) {
 function bindUi() {
     const root = document.getElementById('regex_perf_kit');
     const find = (sel) => root.querySelector(sel);
-    ui = { summary: find('#rpk_summary'), tbody: find('#rpk_table tbody'), note: find('#rpk_persist_note'), usage: find('#rpk_usage'), measure: find('#rpk_measure_result'), rows: [] };
+    ui = { summary: find('#rpk_summary'), thead: find('#rpk_table thead'), tbody: find('#rpk_table tbody'), note: find('#rpk_persist_note'), usage: find('#rpk_usage'), measure: find('#rpk_measure_result'), rows: [] };
 
     for (const [id, key] of Object.entries(TOGGLES)) {
         const el = find('#' + id);
@@ -1337,6 +1358,17 @@ function bindUi() {
         measured = measureChat() ?? measured;
         if (measured) toastr.success(measureText(measured));
     }));
+    ui.thead.addEventListener('click', (e) => {
+        const col = e.target.closest('th')?.dataset.col;
+        if (!SORT_KEYS[col]) return;
+        if (sortBy === col) sortDesc = !sortDesc;
+        else [sortBy, sortDesc] = [col, col !== 'name' && col !== 'lit' && col !== 'rank']; // numbers largest first, text A to Z
+        renderPanel();
+    });
+    find('#rpk_filter').addEventListener('input', (e) => {
+        nameFilter = e.target.value.trim().toLowerCase();
+        renderPanel();
+    });
     ui.tbody.addEventListener('click', (e) => {
         const r = ui.rows[e.target.closest('tr[data-i]')?.dataset.i];
         if (!r) return;

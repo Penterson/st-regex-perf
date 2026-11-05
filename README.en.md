@@ -29,6 +29,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
 - The summary is a few sentences: how many regex runs really happened and how long they took, how many ②, ③, ④ (and ⑤) avoided, and the **time saved** (skipped runs × each script's average run time, so it can exceed the time spent: that is work that never ran). Until a run has been measured, no saving is shown.
 - `/regexperf` shows the report in a popup, `/regexperf text` returns it as text, `/regexperf reset` resets the stats.
 - **Measure on this chat** re-renders the current chat once with the features off and once on, and shows the time actually saved. The page is busy meanwhile; the measurement does not show up in the stats. Under the result (and in the text report) it lists the 5 slowest messages with the features off (index, length, ms).
+- The table is ordered by total time; click a column header to sort by that column, again to flip the direction (the # column keeps the rank by total time). The box above the table shows only scripts whose name contains what you type. Neither is saved.
 - Scripts taking **50% or more of the total time** are highlighted: turning off or fixing those helps most.
   - **Replacer** is the part of the total spent in SillyTavern's replacer (group filling, trim strings, macros). If it is large, the replacement is slow, not the pattern.
   - **Matched** counts the runs where the pattern matched (even if the text came out the same); **Changed** those that actually changed the text.
