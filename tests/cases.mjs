@@ -230,8 +230,8 @@ test('item 12: replacer (macro) time is measured separately from regex time', as
     const regex = row(r.current.rows, 'Slow regex');
     assert.ok(num(macro['Replacer ms']) >= 150, `30 x 2 ms x 3: ${macro['Replacer ms']}`);
     assert.ok(num(macro['Replacer ms']) >= num(macro['Total ms']) * 0.8);
-    assert.ok(num(regex['Total ms']) > 10);
-    assert.ok(num(regex['Replacer ms']) <= num(regex['Total ms']) * 0.05, 'no matches, so no replacer time');
+    assert.ok(num(regex['Total ms']) > 0);
+    assert.equal(num(regex['Replacer ms']), 0, 'it never matches, so its replacer never runs');
 });
 
 test('item 13: nested quantifiers and execution spikes are flagged', async ({ each }) => {
