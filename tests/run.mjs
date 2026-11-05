@@ -15,14 +15,14 @@ const VARIANTS = { none: 'none', baseline: 'baseline', current: 'st-regex-perf' 
 /**
  * Opens a fresh harness page.
  * @param {'none'|'baseline'|'current'} variant
- * @param {{locale?: string, hooks?: boolean, settings?: object}} [options]
+ * @param {{locale?: string, hooks?: boolean, settings?: object, prewrap?: boolean}} [options]
  */
-async function open(variant, { locale = 'en', hooks = true, settings } = {}) {
+async function open(variant, { locale = 'en', hooks = true, settings, prewrap = false } = {}) {
     const page = await browser.newPage();
     const errors = [];
     page.on('pageerror', (e) => errors.push(String(e)));
     page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()); });
-    const extra = (hooks ? '' : '&hooks=0') + (settings ? '&settings=' + encodeURIComponent(JSON.stringify(settings)) : '');
+    const extra = (hooks ? '' : '&hooks=0') + (settings ? '&settings=' + encodeURIComponent(JSON.stringify(settings)) : '') + (prewrap ? '&prewrap=1' : '');
     await page.goto(`${server.url}/?variant=${VARIANTS[variant]}&locale=${locale}${extra}`);
     await page.waitForFunction('window.__ready === true', { timeout: 20000 }).catch((e) => {
         throw new Error(`harness did not boot (${variant}): ${errors.join(' | ') || e.message}`);
