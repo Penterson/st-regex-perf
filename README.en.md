@@ -81,5 +81,6 @@ npm test
 `npm test` lints with SillyTavern's ESLint rules, fuzzes the literal extractor (`extractNeedle`; it fails if the regex matches
 text the prefilter skipped), and compares no extension / the baseline commit (`BASELINE` in `tests/server.mjs`) / the working
 tree in headless Chrome on SillyTavern's real regex engine (`RegexProvider`/`runRegexScript`). SillyTavern's files are downloaded
-at test time from the commit pinned in `tests/st-version.json` (they are AGPL, so they are not part of this repository). Set
-`CHROME_PATH` to choose the Chrome binary. GitHub Actions runs the same tests on every push and pull request.
+at test time from the commits pinned in `tests/st-version.json` (one release, one staging; they are AGPL, so they are not part of this
+repository). `ST_REF=release npm test` picks the other one (default staging); set `CHROME_PATH` to choose the Chrome binary. GitHub Actions
+runs the same tests against both commits on every push and pull request.

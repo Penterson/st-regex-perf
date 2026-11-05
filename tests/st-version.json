@@ -1,18 +1,38 @@
 {
-    "repo": "SillyTavern/SillyTavern",
-    "ref": "staging",
-    "commit": "ad29cbda62e92f145e44d7a10398a38af22ca986",
-    "files": [
-        ".eslintrc.cjs",
-        "public/lib/eventemitter.js",
-        "public/locales/lang.json",
-        "public/locales/ko-kr.json",
-        "public/script.js",
-        "public/scripts/events.js",
-        "public/scripts/extensions/regex/engine.js",
-        "public/scripts/extensions/regex/scriptTemplate.html",
-        "public/scripts/i18n.js",
-        "public/scripts/message-formatter.js",
-        "public/scripts/utils.js"
-    ]
+    "release": {
+        "repo": "SillyTavern/SillyTavern",
+        "ref": "release",
+        "commit": "06bde939fb1e9c4c8d8641d810f0a916b5bce127",
+        "files": [
+            ".eslintrc.cjs",
+            "public/lib/eventemitter.js",
+            "public/locales/lang.json",
+            "public/locales/ko-kr.json",
+            "public/script.js",
+            "public/scripts/events.js",
+            "public/scripts/extensions/regex/engine.js",
+            "public/scripts/extensions/regex/scriptTemplate.html",
+            "public/scripts/i18n.js",
+            "public/scripts/message-formatter.js",
+            "public/scripts/utils.js"
+        ]
+    },
+    "staging": {
+        "repo": "SillyTavern/SillyTavern",
+        "ref": "staging",
+        "commit": "ad29cbda62e92f145e44d7a10398a38af22ca986",
+        "files": [
+            ".eslintrc.cjs",
+            "public/lib/eventemitter.js",
+            "public/locales/lang.json",
+            "public/locales/ko-kr.json",
+            "public/script.js",
+            "public/scripts/events.js",
+            "public/scripts/extensions/regex/engine.js",
+            "public/scripts/extensions/regex/scriptTemplate.html",
+            "public/scripts/i18n.js",
+            "public/scripts/message-formatter.js",
+            "public/scripts/utils.js"
+        ]
+    }
 }
