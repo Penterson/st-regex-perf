@@ -84,7 +84,6 @@
     "Could not copy — use the /regexperf command to see the report in a popup.": "클립보드에 복사하지 못했습니다. /regexperf 명령으로 팝업에서 보세요.",
     "Removed ${0} persistent cache entries.": "영구 캐시 ${0}개를 삭제했습니다.",
     "Stats reset": "측정값 초기화 완료",
-    "<div>Shows the Regex Perf Kit report in a popup. <code>/regexperf reset</code> resets the stats, <code>/regexperf text</code> returns it as text.</div>": "<div>Regex Perf Kit 리포트를 팝업으로 표시합니다. <code>/regexperf reset</code> 으로 측정 초기화, <code>/regexperf text</code> 로 텍스트 반환.</div>",
     "(no name)": "(이름 없음)",
     "(unknown)": "(알 수 없음)",
     "Since: ${0} / chat messages: ${1}": "측정 시작: ${0} / 채팅 메시지 ${1}개",
@@ -138,5 +137,11 @@
     "Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.": "입력 대신 64비트 해시만 보관. 긴 채팅에서 메모리 절반, 대신 입력마다 해시 계산. 충돌(길이와 해시가 같은 두 입력)이 나면 다른 입력의 결과가 나올 수 있으나 64비트에서는 수십억 건이 필요.",
     "Filter by name": "이름으로 필터",
     "Shows only the scripts whose name contains this. Click a column header to sort by it, again to flip the direction.": "이름에 이 글자가 든 스크립트만 표시. 열 머리글 클릭: 그 열로 정렬, 다시 클릭: 방향 반전.",
-    "No script name contains \"${0}\".": "이름에 \"${0}\" 이 든 스크립트가 없습니다."
+    "No script name contains \"${0}\".": "이름에 \"${0}\" 이 든 스크립트가 없습니다.",
+    "<div>Shows the Regex Perf Kit report in a popup. <code>/regexperf reset</code> resets the stats, <code>/regexperf text</code> returns it as text, <code>/regexperf json</code> and <code>/regexperf csv</code> as data, <code>/regexperf measure</code> re-renders this chat with the features off and on, <code>/regexperf off &lt;script name&gt;</code> turns a script off.</div>": "<div>Regex Perf Kit 리포트를 팝업으로 표시합니다. <code>/regexperf reset</code> 측정 초기화, <code>/regexperf text</code> 텍스트로 반환, <code>/regexperf json</code> · <code>/regexperf csv</code> 데이터로 반환, <code>/regexperf measure</code> 이 채팅을 기능 끄고/켜고 다시 그려 측정, <code>/regexperf off &lt;스크립트 이름&gt;</code> 스크립트 끄기.</div>",
+    "Copy the report as JSON": "리포트를 JSON으로 복사",
+    "Copy the table as CSV": "표를 CSV로 복사",
+    "Usage: /regexperf off <script name>": "사용법: /regexperf off <스크립트 이름>",
+    "\"${0}\" matches several scripts: ${1}": "\"${0}\" 에 해당하는 스크립트가 여럿입니다: ${1}",
+    "Nothing to measure: the chat is empty.": "측정할 것이 없습니다. 채팅이 비어 있습니다."
 }

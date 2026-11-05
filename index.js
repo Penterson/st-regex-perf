@@ -1014,6 +1014,54 @@ function buildReportText() {
     return lines.join('\n');
 }
 
+/** The report as data (English keys), for /regexperf json and the JSON copy. */
+function buildReportData() {
+    const s = buildSummary();
+    return {
+        generatedAt: new Date().toISOString(),
+        since: new Date(statsSince).toISOString(),
+        chatMessages: s.chatLen,
+        scripts: s.counts,
+        totals: { calls: s.calls, totalMs: s.total, skipped: s.skipped, hits: s.hits, streamSkipped: s.streamSkipped, bypass: s.bypass, persistHits: persistStats.hits, persistStores: persistStats.stores, savedMs: s.calls ? s.saved : null },
+        memo: { entries: memoLru.size, bytes: memoBytes, maxMB: settings.memoMaxMB },
+        measured,
+        candidatesToDisable: s.ineffective,
+        orderConflicts: [...conflicts.values()].map(c => ({ earlier: c.earlier.name, later: c.later.name, count: c.count, confirmed: c.confirmed, sample: c.sample })),
+        rows: s.rows.map((r, i) => ({
+            rank: i + 1, name: r.name, pattern: r.src, runs: r.calls, totalMs: r.totalMs, avgMs: avgMs(r), maxMs: r.maxMs, replacerMs: r.replMs,
+            matched: r.matched, changed: r.changed, skips: r.skipped, hits: r.hits, streamSkips: r.streamSkipped,
+            literal: r.needle?.terms ?? [], literalReason: r.needle?.reason ?? null, minLength: r.needle?.minLen ?? 0, warnings: warnings(r), spike: r.spike,
+        })),
+    };
+}
+
+/** The report's table as CSV (RFC 4180 quoting), with the text report's translated header. */
+function buildReportCsv() {
+    const cell = (v) => {
+        const str = String(v ?? '');
+        return /[",\n\r]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+    };
+    const header = t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Matched | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`.split(' | ');
+    const lines = [header.map(cell).join(',')];
+    buildSummary().rows.forEach((r, i) => {
+        lines.push([i + 1, r.name, r.calls, r.totalMs, avgMs(r), r.maxMs, r.replMs, r.matched, r.changed, r.skipped, r.hits, r.streamSkipped, fmtNeedles(r) ?? '', r.needle?.minLen || '', warnings(r).join('; ')].map(cell).join(','));
+    });
+    return lines.join('\r\n');
+}
+
+/** Turns off the scripts whose name matches (exactly, else as the only one containing it); the message to show. */
+function turnOffByName(name) {
+    const want = name.trim().toLowerCase();
+    if (!want) return t`Usage: /regexperf off <script name>`;
+    const infos = [...ensureInfo().map.values()];
+    const found = infos.filter(r => r.name.toLowerCase() === want);
+    const hits = found.length ? found : infos.filter(r => r.name.toLowerCase().includes(want));
+    if (hits.length !== 1) return hits.length ? t`"${name}" matches several scripts: ${hits.map(r => r.name).join(', ')}` : t`"${name}" is not in the Regex extension's list.`;
+    scriptAction(hits[0], true);
+    renderPanel();
+    return t`Turned off: ${hits[0].name}`;
+}
+
 const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'spike'];
 const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false }; // what a measurement turns off
 
@@ -1156,6 +1204,8 @@ const settingsHtml = () => `
       <div class="rpk-buttons">
         <div class="menu_button rpk-primary" id="rpk_measure" title="${t`Re-renders this chat twice, with the features off and on, and shows the real difference. The page freezes for a moment.`}">${t`Measure on this chat`}</div>
         <div class="menu_button" id="rpk_copy">${t`Copy report`}</div>
+        <div class="menu_button rpk-minor" id="rpk_copy_json" title="${t`Copy the report as JSON`}">JSON</div>
+        <div class="menu_button rpk-minor" id="rpk_copy_csv" title="${t`Copy the table as CSV`}">CSV</div>
         <div class="menu_button" id="rpk_reset">${t`Reset stats`}</div>
         <div class="menu_button" id="rpk_refresh">${translate('Refresh', 'rpk_refresh')}</div>
         <div class="menu_button" id="rpk_clear_persist">${t`Clear saved results (this chat)`}</div>
@@ -1330,14 +1380,16 @@ function bindUi() {
 
     find('#rpk_refresh').addEventListener('click', () => { markDirty(); renderPanel(); });
     find('#rpk_reset').addEventListener('click', () => { resetStats(); renderPanel(); toastr.info(t`Stats reset.`); });
-    find('#rpk_copy').addEventListener('click', async () => {
-        try {
-            await navigator.clipboard.writeText(buildReportText());
-            toastr.success(t`Report copied to the clipboard.`);
-        } catch {
-            toastr.warning(t`Could not copy — use the /regexperf command to see the report in a popup.`);
-        }
-    });
+    for (const [id, build] of [['rpk_copy', buildReportText], ['rpk_copy_json', () => JSON.stringify(buildReportData(), null, 2)], ['rpk_copy_csv', buildReportCsv]]) {
+        find('#' + id).addEventListener('click', async () => {
+            try {
+                await navigator.clipboard.writeText(build());
+                toastr.success(t`Report copied to the clipboard.`);
+            } catch {
+                toastr.warning(t`Could not copy — use the /regexperf command to see the report in a popup.`);
+            }
+        });
+    }
     find('#rpk_clear_persist').addEventListener('click', async () => {
         const n = await clearPersistedCache();
         toastr.info(t`Removed ${n} persistent cache entries.`);
@@ -1393,11 +1445,21 @@ function registerSlash() {
     SlashCommandParser.addCommandObject(SlashCommand.fromProps({
         name: 'regexperf',
         callback: async (_named, unnamed) => {
-            const arg = String(unnamed ?? '').trim().toLowerCase();
+            const [, verb = '', rest = ''] = /^(\S*)\s*([\s\S]*)$/.exec(String(unnamed ?? '').trim());
+            const arg = verb.toLowerCase();
             if (arg === 'reset') {
                 resetStats();
                 renderPanel();
                 return t`Stats reset`;
+            }
+            if (arg === 'json') return JSON.stringify(buildReportData(), null, 2);
+            if (arg === 'csv') return buildReportCsv();
+            if (arg === 'off') return turnOffByName(rest);
+            if (arg === 'measure') {
+                if (liveStream()) return t`Wait until the generation finishes.`;
+                measured = measureChat() ?? measured;
+                renderPanel();
+                return measured ? measureText(measured) : t`Nothing to measure: the chat is empty.`;
             }
             const text = buildReportText();
             if (arg !== 'text' && typeof callGenericPopup === 'function') {
@@ -1407,12 +1469,12 @@ function registerSlash() {
         },
         unnamedArgumentList: SlashCommandArgument ? [
             SlashCommandArgument.fromProps({
-                description: 'reset | text',
+                description: 'reset | text | json | csv | measure | off <script name>',
                 typeList: [ARGUMENT_TYPE?.STRING ?? 'string'],
                 isRequired: false,
             }),
         ] : [],
-        helpString: t`<div>Shows the Regex Perf Kit report in a popup. <code>/regexperf reset</code> resets the stats, <code>/regexperf text</code> returns it as text.</div>`,
+        helpString: t`<div>Shows the Regex Perf Kit report in a popup. <code>/regexperf reset</code> resets the stats, <code>/regexperf text</code> returns it as text, <code>/regexperf json</code> and <code>/regexperf csv</code> as data, <code>/regexperf measure</code> re-renders this chat with the features off and on, <code>/regexperf off &lt;script name&gt;</code> turns a script off.</div>`,
     }));
 }
 

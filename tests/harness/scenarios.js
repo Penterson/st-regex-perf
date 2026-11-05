@@ -581,6 +581,47 @@ export async function insights(h, arg) {
     return { text: await report(h), badges };
 }
 
+/** Exports and slash verbs: JSON and CSV copies and commands, /regexperf measure, /regexperf off <name>. */
+export async function exports(h) {
+    const scripts = [
+        script({ scriptName: 'Alpha, "quoted"', findRegex: '/alpha/g', replaceString: 'A' }),
+        script({ scriptName: 'Beta', findRegex: '/beta/g', replaceString: 'B', markdownOnly: true }),
+        script({ scriptName: 'Betamax', findRegex: '/max/g', replaceString: 'M' }),
+    ];
+    await useScripts(h, scripts);
+    const template = await (await fetch('/scripts/extensions/regex/scriptTemplate.html')).text();
+    for (const s of scripts) { // SillyTavern's script list, as in rowActions()
+        const row = $(template).attr('id', s.id);
+        row.find('.disable_regex').prop('checked', !!s.disabled).on('input', function () { s.disabled = !!$(this).prop('checked'); });
+        row.find('.regex-toggle-on').on('click', () => row.find('.disable_regex').prop('checked', true).trigger('input'));
+        $('#saved_regex_scripts').append(row);
+    }
+    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: 'alpha beta max', extra: {} }] });
+    for (let i = 0; i < 3; i++) h.engine.getRegexedString(`alpha beta ${i}`, P.AI);
+    const cmd = h.commands.regexperf;
+    const run = (arg) => cmd.callback({}, arg);
+    const copied = [];
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (text) => { copied.push(text); } }, configurable: true });
+    const root = document.getElementById('regex_perf_kit');
+    for (const id of ['rpk_copy_json', 'rpk_copy_csv']) root.querySelector('#' + id)?.click();
+    await new Promise(r => setTimeout(r, 0));
+    return {
+        text: await run('text'),
+        json: await run('json'),
+        csv: await run('csv'),
+        copied,
+        measure: await run('measure'),
+        measureShown: root.querySelector('#rpk_measure_result').textContent,
+        offMissing: await run('off nope'),
+        offAmbiguous: await run('off beta'), // Beta and Betamax contain it...
+        offExact: await run('off BETA'), // ...but an exact (case-insensitive) name wins
+        offPartial: await run('off max'),
+        offNone: await run('off'),
+        disabled: scripts.map(s => !!s.disabled),
+        help: cmd.helpString,
+    };
+}
+
 /** Item 14. Clicking a table row opens the script in SillyTavern's regex editor; the row's off button disables it. */
 export async function rowActions(h) {
     const scripts = [script({ scriptName: 'Alpha', findRegex: '/alpha/g', replaceString: 'A' }), script({ scriptName: 'Beta', findRegex: '/beta/g', replaceString: 'B' })];
