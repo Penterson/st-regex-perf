@@ -34,6 +34,8 @@ const defaultSettings = {
     persistMaxLen: 60000,
     persistMaxMB: 8, // ⑤ per chat; beyond it, the oldest messages' results are dropped
     memoHashKeys: false, // ③ keyed by hash64(input) + length instead of the input: half the memory, see the Limits note
+    autoMeasure: false, // run "Measure on this chat" once after a chat opens
+    loadHintMs: 3000, // a chat whose first render takes longer gets a one-time hint about "# Messages to Load"
 };
 
 // ST keeps this object for the whole session, so it is resolved once instead of on every replace.
@@ -524,6 +526,11 @@ function buildInfo() {
 
 // ---- Instrumented RegExp ----
 
+// Regex calls come in bursts (a chat opening renders every message back to back); the burst that ends at
+// CHAT_CHANGED is the chat's first render, and its length decides the "# Messages to Load" hint.
+const BURST_GAP_MS = 1000;
+let burstStart = 0;
+let lastCall = -Infinity;
 const SPIKE_MS = 50; // a single run slower than this is flagged, with a sample of its input
 const SPIKE_HEAD = 80; // characters of the input kept in the sample
 const stats = new Map(); // pattern key -> counters, see getStat()
@@ -653,6 +660,8 @@ class PerfRegExp extends RegExp {
         const out = RegExp.prototype[Symbol.replace].call(native, str, fn);
         if (profile) {
             const dt = performance.now() - t0;
+            if (t0 - lastCall > BURST_GAP_MS) burstStart = t0;
+            lastCall = t0 + dt;
             stat.calls++;
             stat.totalMs += dt;
             stat.replMs += replMs;
@@ -1198,6 +1207,8 @@ const settingsHtml = () => `
           ${limit('persistMaxMB', t`⑤ Saved results per chat (MB)`, t`Beyond this, the oldest messages' results are dropped from the chat.`)}
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
           <label title="${t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`}"><span>${t`③ Key the cache by a hash of the input`}</span><input type="checkbox" id="rpk_memoHashKeys"></label>
+          ${limit('loadHintMs', t`Hint about "# Messages to Load" when opening a chat takes longer than (ms)`, t`Shown once per session as a toast.`)}
+          <label title="${t`Runs "Measure on this chat" once after a chat opens. The page freezes for a moment each time.`}"><span>${t`Measure automatically when a chat opens`}</span><input type="checkbox" id="rpk_autoMeasure"></label>
         </div>
       </details>
 
@@ -1245,9 +1256,9 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys' };
+const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
 // editable limits: setting -> [min, max]
-const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000] };
+const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], loadHintMs: [100, 600000] };
 
 let ui = null; // panel elements, cached by bindUi()
 const rendered = new WeakMap();
@@ -1495,9 +1506,24 @@ for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPE
         streamViews.clear();
     });
 }
+let loadHintShown = false; // once per session
 eventSource.on(event_types.CHAT_CHANGED, () => {
     markDirty();
     streamViews.clear();
+    const now = performance.now();
+    const loadMs = now - lastCall < BURST_GAP_MS ? lastCall - burstStart : 0; // the render burst that just ended
+    if (!loadHintShown && loadMs > settings.loadHintMs) {
+        loadHintShown = true;
+        toastr.info(t`Rendering this chat took ${(loadMs / 1000).toFixed(1)} s. A lower "# Messages to Load" (User Settings) opens chats faster.`, 'Regex Perf Kit', { timeOut: 15000 });
+    }
+    if (settings.autoMeasure && !liveStream()) {
+        setTimeout(() => { // once the page has settled
+            if (liveStream()) return;
+            measured = measureChat() ?? measured;
+            renderPanel();
+            if (measured) toastr.info(measureText(measured), 'Regex Perf Kit');
+        }, 500);
+    }
 });
 eventSource.on(event_types.SETTINGS_UPDATED, markDirty);
 if (event_types.PRESET_CHANGED) eventSource.on(event_types.PRESET_CHANGED, markDirty);

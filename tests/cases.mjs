@@ -414,6 +414,19 @@ test('exports and slash verbs: JSON and CSV (buttons and /regexperf), /regexperf
     assert.match(r.help, /\/regexperf json|\/regexperf csv|\/regexperf measure|\/regexperf off/);
 });
 
+test('chat open: optional auto-measure and a one-time hint when the first render was slow', async ({ each }) => {
+    const r = (await each('chatOpen', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.before, { auto: false, hintMs: 3000 }, 'defaults: off, 3 s');
+    assert.equal(r.quiet, 0, 'nothing at the defaults');
+    assert.deepEqual([r.afterHint.hints, r.afterHint.measures], [1, 0]);
+    assert.match(r.afterHint.text, /^Rendering this chat took 0\.\d s\. A lower "# Messages to Load" \(User Settings\) opens chats faster\.$/);
+    assert.deepEqual(r.second, { hints: 1, measures: 0 }, 'the hint is shown once per session');
+    assert.equal(r.auto.hints, 1);
+    assert.equal(r.auto.measures, 1, 'auto-measure ran once after the chat opened');
+    assert.match(r.auto.shown, /^This chat \(4 messages\)/);
+    assert.equal(r.auto.setting, true);
+});
+
 test('item 14: a table row opens its script in the regex editor; its off button disables the script', async ({ each }) => {
     const r = await each('rowActions', null, { variants: ['current'] });
     const [alpha, beta] = r.current.ids;
@@ -501,7 +514,7 @@ test('item 16: streaming compromise mode formats completed lines at most every N
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });

@@ -622,6 +622,37 @@ export async function exports(h) {
     };
 }
 
+/** Auto-measure after a chat opens (option, default off) and the one-time "# Messages to Load" hint. */
+export async function chatOpen(h) {
+    const root = document.getElementById('regex_perf_kit');
+    const box = root.querySelector('#rpk_autoMeasure');
+    const limit = root.querySelector('#rpk_loadHintMs');
+    if (!box || !limit) return null;
+    const before = { auto: h.extension_settings.regex_perf_kit.autoMeasure, hintMs: h.extension_settings.regex_perf_kit.loadHintMs };
+    await useScripts(h, [script({ scriptName: 'Slow macro', findRegex: '/@/g', replaceString: '{{slow}}', markdownOnly: true })]); // 2 ms per match
+    h.st.setState({ chat: Array.from({ length: 4 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: `${i} ${'@'.repeat(20)}`, extra: {} })) });
+    const open = async () => { // SillyTavern renders every message, then announces the chat
+        h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
+        await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+    };
+    await open();
+    const quiet = h.toasts.length; // defaults: no hint (3000 ms), no auto-measure
+    limit.value = '100';
+    limit.dispatchEvent(new Event('change'));
+    await open();
+    const hints = () => h.toasts.filter(([, m]) => m.startsWith('Rendering this chat took')).length;
+    const measures = () => h.toasts.filter(([, m]) => m.startsWith('This chat (')).length;
+    const afterHint = { hints: hints(), measures: measures(), text: h.toasts.at(-1)?.[1] };
+    await open();
+    const second = { hints: hints(), measures: measures() };
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    await open();
+    await new Promise(r => setTimeout(r, 700));
+    const auto = { hints: hints(), measures: measures(), shown: root.querySelector('#rpk_measure_result').textContent, setting: h.extension_settings.regex_perf_kit.autoMeasure };
+    return { before, quiet, afterHint, second, auto };
+}
+
 /** Item 14. Clicking a table row opens the script in SillyTavern's regex editor; the row's off button disables it. */
 export async function rowActions(h) {
     const scripts = [script({ scriptName: 'Alpha', findRegex: '/alpha/g', replaceString: 'A' }), script({ scriptName: 'Beta', findRegex: '/beta/g', replaceString: 'B' })];
