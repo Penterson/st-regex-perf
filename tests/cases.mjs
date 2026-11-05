@@ -191,8 +191,9 @@ test('extra: ⑤ persisted display output refreshes when the message depth or a 
     assert.deepEqual(r.current, r.none);
 });
 
-// Words the Korean UI keeps in English: product and SillyTavern setting names, units, the test's script names.
-const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|staging|regexperf|reset|text|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b/g;
+// Words the Korean UI keeps in English: product and SillyTavern setting names, slash command verbs, data formats,
+// units, the test's script names.
+const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|staging|regexperf|reset|text|json|csv|measure|\boff\b|JSON|CSV|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b/g;
 
 /** What the Korean panel must say (the plain-language wording of the panel redesign), as shown on screen. */
 const KO_PANEL = [
@@ -382,6 +383,37 @@ test('spike samples: the newest run over 50 ms keeps its input length and first 
     assert.match(long.badges['Slow macro']['⚡'], /on 101 characters, starting "@{80}"$/, 'the sample is cut at 80 characters');
 });
 
+test('exports and slash verbs: JSON and CSV (buttons and /regexperf), /regexperf measure, /regexperf off <name>', async ({ each }) => {
+    const r = (await each('exports', null, { variants: ['current'] })).current;
+    const data = JSON.parse(r.json);
+    const textRows = reportRows(r.text);
+    assert.equal(data.rows.length, textRows.length);
+    assert.deepEqual(data.rows.map(x => x.name), textRows.map(x => x.Script), 'same rows in the same order');
+    const alpha = data.rows.find(x => x.name === 'Alpha, "quoted"');
+    assert.equal(alpha.runs, 3);
+    assert.deepEqual(alpha.literal, [['alpha']]);
+    assert.equal(alpha.pattern, '/alpha/g');
+    assert.equal(data.totals.calls, Number(/Ran (\d+) times/.exec(r.text)[1]));
+    assert.equal(typeof data.generatedAt, 'string');
+    const csv = r.csv.split('\r\n');
+    assert.equal(csv[0], 'Rank,Script,Runs,Total ms,Avg ms,Max ms,Replacer ms,Matched,Changed,Skips,Hits,Stream skips,Literal,Min length,Warnings');
+    assert.equal(csv.length, 1 + textRows.length);
+    assert.ok(csv.some(l => l.includes('"Alpha, ""quoted""",3,')), `quoted name: ${csv[1]}`);
+    assert.ok(csv.some(l => l.includes(',"""alpha""",5,')), 'the literal column is quoted too');
+    assert.deepEqual(r.copied.map(c => c[0]), ['{', 'R'], 'the JSON and CSV buttons copy the same formats');
+    assert.deepEqual(Object.keys(JSON.parse(r.copied[0])), Object.keys(data));
+    assert.equal(r.copied[1].split('\r\n')[0], csv[0]);
+    assert.match(r.measure, /^This chat \(1 messages\): [\d.]+ ms with the features off/);
+    assert.match(r.measureShown, /^This chat \(1 messages\)/, 'the panel shows it too');
+    assert.equal(r.offMissing, '"nope" is not in the Regex extension\'s list.');
+    assert.equal(r.offAmbiguous, 'Turned off: Beta', 'an exact name wins over a longer one containing it');
+    assert.equal(r.offExact, 'Turned off: Beta');
+    assert.equal(r.offPartial, 'Turned off: Betamax', 'a unique partial match works');
+    assert.equal(r.offNone, 'Usage: /regexperf off <script name>');
+    assert.deepEqual(r.disabled, [false, true, true]);
+    assert.match(r.help, /\/regexperf json|\/regexperf csv|\/regexperf measure|\/regexperf off/);
+});
+
 test('item 14: a table row opens its script in the regex editor; its off button disables the script', async ({ each }) => {
     const r = await each('rowActions', null, { variants: ['current'] });
     const [alpha, beta] = r.current.ids;
@@ -477,13 +509,15 @@ test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ cle
         assert.deepEqual(r.current.checked, r.baseline.checked);
         assert.deepEqual(r.current.toggled, r.baseline.toggled);
         assert.deepEqual(r.current.stored, r.baseline.stored);
+        const verbs = ['reset | text | json | csv | measure | off <script name>']; // the argument help grew with the new verbs
+        assert.deepEqual(r.current.slash.args, verbs);
         if (locale === 'ko-kr') { // the baseline's UI is Korean in every locale
             assert.deepEqual(r.current.cleared, r.baseline.cleared);
-            assert.deepEqual(r.current.slash, r.baseline.slash);
+            assert.deepEqual({ ...r.current.slash, args: 0 }, { ...r.baseline.slash, args: 0 });
         } else {
             assert.deepEqual({ ...r.current.cleared, toast: 0 }, { ...r.baseline.cleared, toast: 0 });
             assert.equal(r.current.cleared.toast, 'Removed 1 persistent cache entries.');
-            assert.deepEqual({ ...r.current.slash, reset: 0 }, { ...r.baseline.slash, reset: 0 });
+            assert.deepEqual({ ...r.current.slash, reset: 0, args: 0 }, { ...r.baseline.slash, reset: 0, args: 0 });
             assert.equal(r.current.slash.reset, 'Stats reset');
         }
     }
