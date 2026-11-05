@@ -1197,7 +1197,7 @@ const settingsHtml = () => `
       <div class="rpk-note" id="rpk_persist_note"></div>
       <div class="rpk-note" id="rpk_usage"></div>
 
-      <details class="rpk-limits">
+      <details class="rpk-limits" data-section="limits">
         <summary>${t`Limits`}</summary>
         <div class="rpk-grid">
           ${limit('memoMaxEntries', t`③ Cache entries`, t`Oldest results are dropped beyond this many.`)}
@@ -1220,6 +1220,7 @@ const settingsHtml = () => `
         <div class="menu_button" id="rpk_reset">${t`Reset stats`}</div>
         <div class="menu_button" id="rpk_refresh">${translate('Refresh', 'rpk_refresh')}</div>
         <div class="menu_button" id="rpk_clear_persist">${t`Clear saved results (this chat)`}</div>
+        <div class="menu_button" id="rpk_reset_settings" title="${t`Turns every feature and limit back to its default.`}">${t`Reset settings`}</div>
       </div>
       <div class="rpk-note rpk-measured" id="rpk_measure_result"></div>
 
@@ -1233,7 +1234,7 @@ const settingsHtml = () => `
           <tbody></tbody>
         </table>
       </div>
-      <details class="rpk-tips rpk-legend">
+      <details class="rpk-tips rpk-legend" data-section="legend">
         <summary>${t`How to read the table`}</summary>
         <ul>
           <li>${t`Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.`}</li>
@@ -1244,7 +1245,7 @@ const settingsHtml = () => `
         </ul>
       </details>
 
-      <details class="rpk-tips">
+      <details class="rpk-tips" data-section="tips">
         <summary>${t`What SillyTavern's own settings can do`}</summary>
         <ul>
           <li>${t`<b>User Settings → "# Messages to Load"</b>: how many messages are rendered (= regex applied) when a chat opens. 0 = all. 50–100 makes loading much faster.`}</li>
@@ -1364,9 +1365,13 @@ function bindUi() {
     const find = (sel) => root.querySelector(sel);
     ui = { summary: find('#rpk_summary'), thead: find('#rpk_table thead'), tbody: find('#rpk_table tbody'), note: find('#rpk_persist_note'), usage: find('#rpk_usage'), measure: find('#rpk_measure_result'), rows: [] };
 
+    /** Shows the current settings in the toggles and limit fields (at start and after a reset). */
+    const syncControls = () => {
+        for (const [id, key] of Object.entries(TOGGLES)) find('#' + id).checked = !!settings[key];
+        for (const key of Object.keys(LIMITS)) find('#rpk_' + key).value = settings[key];
+    };
     for (const [id, key] of Object.entries(TOGGLES)) {
         const el = find('#' + id);
-        el.checked = !!settings[key];
         el.addEventListener('change', () => {
             settings[key] = el.checked;
             ctx().saveSettingsDebounced();
@@ -1378,7 +1383,7 @@ function bindUi() {
 
     for (const [key, [min, max]] of Object.entries(LIMITS)) {
         const el = find('#rpk_' + key);
-        Object.assign(el, { min, max, value: settings[key] });
+        Object.assign(el, { min, max });
         el.addEventListener('change', () => {
             const v = Number(el.value);
             if (el.value.trim() !== '' && Number.isFinite(v)) settings[key] = Math.min(max, Math.max(min, Math.round(v)));
@@ -1389,6 +1394,29 @@ function bindUi() {
         });
     }
 
+    syncControls();
+
+    // Open sections are remembered (settings.ui.<section>)
+    const uiState = (settings.ui ||= {});
+    for (const d of root.querySelectorAll('details[data-section]')) {
+        const name = d.dataset.section;
+        if (name in uiState) d.open = !!uiState[name];
+        d.addEventListener('toggle', () => {
+            if (uiState[name] === d.open) return;
+            uiState[name] = d.open;
+            ctx().saveSettingsDebounced();
+        });
+    }
+
+    find('#rpk_reset_settings').addEventListener('click', () => {
+        Object.assign(settings, defaultSettings); // settings.ui (open sections) is not a feature setting and stays
+        syncControls();
+        clearMemo();
+        trimMemo();
+        ctx().saveSettingsDebounced();
+        renderPanel();
+        toastr.info(t`Settings restored to their defaults.`);
+    });
     find('#rpk_refresh').addEventListener('click', () => { markDirty(); renderPanel(); });
     find('#rpk_reset').addEventListener('click', () => { resetStats(); renderPanel(); toastr.info(t`Stats reset.`); });
     for (const [id, build] of [['rpk_copy', buildReportText], ['rpk_copy_json', () => JSON.stringify(buildReportData(), null, 2)], ['rpk_copy_csv', buildReportCsv]]) {

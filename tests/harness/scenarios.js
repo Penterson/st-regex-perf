@@ -653,6 +653,37 @@ export async function chatOpen(h) {
     return { before, quiet, afterHint, second, auto };
 }
 
+/** "Reset settings" restores the defaults; open <details> sections are remembered in settings.ui. */
+export async function resetSettings(h) {
+    const root = document.getElementById('regex_perf_kit');
+    const button = root.querySelector('#rpk_reset_settings');
+    if (!button) return null;
+    const rpk = h.extension_settings.regex_perf_kit;
+    const sections = () => Object.fromEntries([...root.querySelectorAll('details[data-section]')].map(d => [d.dataset.section, d.open]));
+    const openAtStart = sections();
+    const change = (id, value) => {
+        const el = root.querySelector('#' + id);
+        if (typeof value === 'boolean') el.checked = value;
+        else el.value = String(value);
+        el.dispatchEvent(new Event('change'));
+    };
+    change('rpk_prefilter', false);
+    change('rpk_memoMaxEntries', 4);
+    change('rpk_persistMaxMB', 2);
+    const changed = { prefilter: rpk.prefilter, memoMaxEntries: rpk.memoMaxEntries, persistMaxMB: rpk.persistMaxMB };
+    const saves = h.st.counters.saveSettings;
+    button.click();
+    const after = { ...rpk };
+    const controls = { prefilter: root.querySelector('#rpk_prefilter').checked, memoMaxEntries: root.querySelector('#rpk_memoMaxEntries').value, persistMaxMB: root.querySelector('#rpk_persistMaxMB').value };
+    const limits = root.querySelector('details[data-section="limits"]');
+    limits.open = true;
+    await new Promise(r => setTimeout(r, 0)); // the toggle event is queued
+    const uiAfterOpen = JSON.parse(JSON.stringify(rpk.ui ?? null));
+    limits.open = false;
+    await new Promise(r => setTimeout(r, 0));
+    return { openAtStart, changed, after, controls, saved: h.st.counters.saveSettings - saves, uiAfterOpen, uiAfterClose: JSON.parse(JSON.stringify(rpk.ui ?? null)), toast: h.toasts.at(-1)?.[1] };
+}
+
 /** Item 14. Clicking a table row opens the script in SillyTavern's regex editor; the row's off button disables it. */
 export async function rowActions(h) {
     const scripts = [script({ scriptName: 'Alpha', findRegex: '/alpha/g', replaceString: 'A' }), script({ scriptName: 'Beta', findRegex: '/beta/g', replaceString: 'B' })];

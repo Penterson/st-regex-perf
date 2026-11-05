@@ -427,6 +427,22 @@ test('chat open: optional auto-measure and a one-time hint when the first render
     assert.equal(r.auto.setting, true);
 });
 
+test('reset settings restores the defaults; open sections are remembered across loads', async ({ each }) => {
+    const r = (await each('resetSettings', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.openAtStart, { limits: false, legend: false, tips: false }, 'closed by default');
+    assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistMaxMB: 2 });
+    const features = { ...r.after };
+    delete features.ui;
+    assert.deepEqual(features, { profiler: true, prefilter: true, memo: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000 }, 'defaultSettings');
+    assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistMaxMB: '8' }, 'the controls follow');
+    assert.ok(r.saved >= 1, 'saved');
+    assert.equal(r.toast, 'Settings restored to their defaults.');
+    assert.deepEqual(r.uiAfterOpen, { limits: true }, 'opening a section is remembered');
+    assert.deepEqual(r.uiAfterClose, { limits: false });
+    const again = (await each('resetSettings', null, { settings: { ui: { limits: true, tips: true } }, variants: ['current'] })).current;
+    assert.deepEqual(again.openAtStart, { limits: true, legend: false, tips: true }, 'remembered sections open on load');
+});
+
 test('item 14: a table row opens its script in the regex editor; its off button disables the script', async ({ each }) => {
     const r = await each('rowActions', null, { variants: ['current'] });
     const [alpha, beta] = r.current.ids;
@@ -514,7 +530,7 @@ test('item 16: streaming compromise mode formats completed lines at most every N
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
