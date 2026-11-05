@@ -83,4 +83,6 @@ text the prefilter skipped), and compares no extension / the baseline commit (`B
 tree in headless Chrome on SillyTavern's real regex engine (`RegexProvider`/`runRegexScript`). SillyTavern's files are downloaded
 at test time from the commits pinned in `tests/st-version.json` (one release, one staging; they are AGPL, so they are not part of this
 repository). `ST_REF=release npm test` picks the other one (default staging); set `CHROME_PATH` to choose the Chrome binary. GitHub Actions
-runs the same tests against both commits on every push and pull request.
+runs the same tests against both commits on every push and pull request, and `npm run bench -- --gate` fails when the warm re-render of a
+long chat, relative to no extension, is more than 20% slower than the ratio stored in `tests/bench-baseline.json` (`npm run bench -- --update`
+refreshes it; plain `npm run bench` only prints the comparison).
