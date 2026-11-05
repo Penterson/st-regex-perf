@@ -141,6 +141,20 @@ test('AND prefilter: every mandatory literal must be present; messages shorter t
     assert.equal(row(rows, 'Tag')['Min length'], '17');
 });
 
+test('shared literal check: one scan per literal per input across scripts; displayed messages keep theirs for re-renders', async ({ each }) => {
+    const want = Array(3).fill('no tags here but 2 and <D> ' + 'words '.repeat(50)); // D is case-sensitive
+    const save = await each('litMemo', { display: false });
+    for (const v of ['none', 'baseline', 'current']) assert.deepEqual(save[v].out, want, v);
+    assert.deepEqual(save.none.perRender, [0, 0, 0], 'plain SillyTavern scans nothing');
+    assert.deepEqual(save.baseline.perRender, [5, 5, 5], 'baseline: every script scans on every render');
+    assert.deepEqual(save.current.perRender, [3, 3, 3], 'save path: each of the three literals once per render ("<a>" is shared)');
+    const display = await each('litMemo', { display: true }, { variants: ['baseline', 'current'] });
+    for (const v of ['baseline', 'current']) assert.deepEqual(display[v].out, want, v);
+    assert.deepEqual(display.baseline.perRender, [5, 5, 5]);
+    assert.deepEqual(display.current.scans, { '<a>': 1, '<b>': 1, '<d>': 1 }, 'display path: each literal once');
+    assert.deepEqual(display.current.perRender, [3, 0, 0], 're-renders scan nothing');
+});
+
 test('item 6: the memo has a memory budget with LRU eviction', async ({ each }) => {
     const r = await each('memoBudget');
     for (const v of ['none', 'baseline', 'current']) assert.ok(r[v].ok, `${v} output`);
