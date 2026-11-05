@@ -120,5 +120,7 @@
     "Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${0} ms, <code>∅</code> ran ${1}+ times without ever matching.": "이름 옆 표시: <code>.*</code>는 긴 글에서 느려질 수 있는 패턴, <code>(a+)+</code>는 중첩 수량자, <code>⚡</code>는 한 번에 ${0} ms 초과 이력, <code>∅</code>는 ${1}번 넘게 돌았지만 매치 없음.",
     "Never matched in ${0}+ runs: <b>${1}</b>. Consider turning them off.": "${0}번 넘게 돌았지만 한 번도 매치하지 않은 스크립트: <b>${1}</b>. 꺼도 됩니다.",
     "Matched": "매치",
-    "Runs where the pattern matched, even if the text came out the same": "패턴이 매치된 실행 횟수 (텍스트가 그대로였어도 포함)"
+    "Runs where the pattern matched, even if the text came out the same": "패턴이 매치된 실행 횟수 (텍스트가 그대로였어도 포함)",
+    "Last spike: ${0} ms on ${1} characters, starting ${2}": "마지막 스파이크: ${1}글자 입력에 ${0} ms. 시작 부분 ${2}",
+    "Spikes (newest run over ${0} ms per script)": "스파이크 (스크립트별 ${0} ms 초과 최근 실행)"
 }

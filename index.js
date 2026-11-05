@@ -509,6 +509,8 @@ function buildInfo() {
 
 // ---- Instrumented RegExp ----
 
+const SPIKE_MS = 50; // a single run slower than this is flagged, with a sample of its input
+const SPIKE_HEAD = 80; // characters of the input kept in the sample
 const stats = new Map(); // pattern key -> counters, see getStat()
 let statsSince = Date.now();
 const persistStats = { hits: 0, stores: 0 };
@@ -547,6 +549,7 @@ function getStat(key, re) {
             src: '/' + re.source + '/' + re.flags,
             calls: 0, totalMs: 0, maxMs: 0, replMs: 0, matched: 0, changed: 0,
             skipped: 0, hits: 0, streamSkipped: 0, bypass: 0,
+            spike: null, // {ms, len, head}: the newest run over SPIKE_MS
             heavy: HEAVY_HINT.test(re.source),
             needle: null, // the needle the wrapper uses (and its nested flag), set with its meta
             ids: [], // scripts with this pattern
@@ -619,6 +622,7 @@ class PerfRegExp extends RegExp {
             stat.totalMs += dt;
             stat.replMs += replMs;
             if (dt > stat.maxMs) stat.maxMs = dt;
+            if (dt > SPIKE_MS) stat.spike = { ms: dt, len: str.length, head: str.slice(0, SPIKE_HEAD) };
             if (out !== str) stat.changed++;
             // A string replacer (not SillyTavern's) tells nothing: test short inputs, assume a match on long ones.
             if (matched || (fn === replacer && (out !== str || str.length > 2000 || native.test(str)))) stat.matched++;
@@ -803,7 +807,6 @@ async function clearPersistedCache() {
 
 // ---- Report ----
 
-const SPIKE_MS = 50; // a single run slower than this is flagged
 const INEFFECTIVE_RUNS = 20; // a script that ran this often without ever matching is a candidate to disable
 
 /** Milliseconds for display: an exact zero is "0", otherwise 2 / 1 / 0 decimals as the value grows. */
@@ -820,6 +823,8 @@ const fmtNeedles = (r) => {
 const avoided = (r) => r.skipped + r.hits + r.streamSkipped;
 const savedMs = (r) => avoided(r) * avgMs(r);
 const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.matched;
+/** The sample kept from a run over SPIKE_MS: how long the input was and how it started. */
+const spikeText = (sp) => t`Last spike: ${fmtMs(sp.ms)} ms on ${sp.len} characters, starting ${JSON.stringify(sp.head)}`;
 /** A pattern the extension has seen do anything: rows that never ran nor were skipped are left out of the table. */
 const active = (r) => r.calls + avoided(r) + r.bypass > 0;
 const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">${text}</span>`;
@@ -827,7 +832,7 @@ const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">$
 const warnings = (r, badges = false) => [
     r.heavy && (badges ? badge('.*', t`Contains .* or similar: may be slow on long text (backtracking)`) : t`.*-style`),
     r.needle?.nested && (badges ? badge('(a+)+', t`Nested quantifier such as (a+)+: can become extremely slow on long text`) : t`nested quantifier`),
-    r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)`) : t`spike`),
+    r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)` + (r.spike ? '\n' + spikeText(r.spike) : '')) : t`spike`),
     ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without ever matching: consider turning it off`) : t`no match`),
 ].filter(Boolean);
 
@@ -901,10 +906,15 @@ function buildReportText() {
     s.rows.forEach((r, i) => {
         lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${fmtMs(r.replMs)} | ${r.matched} | ${r.changed} | ${r.skipped} | ${r.hits} | ${r.streamSkipped} | ${fmtNeedles(r) ?? '- (' + needleReason(r) + ')'} | ${r.needle?.minLen || '-'} | ${warnings(r).join(', ')}`);
     });
+    const spikes = s.rows.filter(r => r.spike);
+    if (spikes.length) {
+        lines.push('', t`Spikes (newest run over ${SPIKE_MS} ms per script)`);
+        spikes.forEach(r => lines.push(`${r.name}: ${spikeText(r.spike)}`));
+    }
     return lines.join('\n');
 }
 
-const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass'];
+const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'spike'];
 const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false }; // what a measurement turns off
 
 /**
