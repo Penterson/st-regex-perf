@@ -443,6 +443,24 @@ test('reset settings restores the defaults; open sections are remembered across 
     assert.deepEqual(again.openAtStart, { limits: true, legend: false, tips: true }, 'remembered sections open on load');
 });
 
+test('other wrappers of RegexProvider.instance.get are noticed, at patch time and later, and warned about once', async ({ each }) => {
+    const clean = (await each('wrapperWarning', null, { variants: ['current'] })).current;
+    assert.equal(clean.out, 'y');
+    assert.doesNotMatch(clean.summary, /get\(\)/, 'no warning normally');
+    assert.deepEqual(clean.warns, []);
+    const pre = await each('wrapperWarning', null, { prewrap: true, variants: ['baseline', 'current'] });
+    assert.equal(pre.baseline.out, 'y');
+    assert.doesNotMatch(pre.baseline.summary, /get\(\)/, 'baseline cannot tell');
+    assert.equal(pre.current.out, 'y', 'still works');
+    assert.match(pre.current.summary, /⚠ Another extension had already replaced the regex engine's get\(\) when Regex Perf Kit loaded/);
+    assert.equal(pre.current.warns.length, 1, 'console.warn once');
+    assert.equal(pre.current.warnsAfterSecondRender, 1, 'and only once');
+    const later = (await each('wrapperWarning', { replaceLater: true }, { variants: ['current'] })).current;
+    assert.equal(later.out, 'y');
+    assert.match(later.summary, /⚠ Another extension replaced the regex engine's get\(\) after Regex Perf Kit/);
+    assert.equal(later.warns.length, 1);
+});
+
 test('item 14: a table row opens its script in the regex editor; its off button disables the script', async ({ each }) => {
     const r = await each('rowActions', null, { variants: ['current'] });
     const [alpha, beta] = r.current.ids;

@@ -69,7 +69,7 @@ No SillyTavern core file is modified.
 - ⑤ can make chat files larger. "Clear saved results (this chat)" removes its entries.
 - ⑤ stores display results, so values such as `{{random}}`, `{{time}}` or `{{getvar}}` in display scripts show what they were
   when stored. Script changes, renames (`{{user}}`/`{{char}}`) and message depth (min/max depth) are picked up automatically.
-- If a SillyTavern version has no `RegexProvider`, patching fails and the panel shows a warning (everything stays off, no side effects).
+- If a SillyTavern version has no `RegexProvider`, patching fails and the panel shows a warning (everything stays off, no side effects). If another extension had already replaced `RegexProvider.instance.get()`, or replaces it later, the panel and the console warn once.
 
 ## Development
 

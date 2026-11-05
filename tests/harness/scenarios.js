@@ -684,6 +684,25 @@ export async function resetSettings(h) {
     return { openAtStart, changed, after, controls, saved: h.st.counters.saveSettings - saves, uiAfterOpen, uiAfterClose: JSON.parse(JSON.stringify(rpk.ui ?? null)), toast: h.toasts.at(-1)?.[1] };
 }
 
+/** Other wrappers of RegexProvider.instance.get: one that was there first (?prewrap=1), or one installed later. */
+export async function wrapperWarning(h, arg) {
+    const replaceLater = !!arg?.replaceLater;
+    const root = document.getElementById('regex_perf_kit');
+    const inst = h.engine.RegexProvider.instance;
+    if (replaceLater) {
+        const prev = inst.get.bind(inst);
+        inst.get = (regexString) => prev(regexString); // a wrapper that still calls ours...
+        root?.querySelector('#rpk_refresh').click();
+    }
+    await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y' })]);
+    const out = h.engine.getRegexedString('x', P.AI);
+    root?.querySelector('#rpk_refresh').click();
+    const summary = root?.querySelector('#rpk_summary').textContent ?? '';
+    const warns = h.warnings.filter(w => w.includes('get()'));
+    root?.querySelector('#rpk_refresh').click();
+    return { out, summary, warns, warnsAfterSecondRender: h.warnings.filter(w => w.includes('get()')).length };
+}
+
 /** Item 14. Clicking a table row opens the script in SillyTavern's regex editor; the row's off button disables it. */
 export async function rowActions(h) {
     const scripts = [script({ scriptName: 'Alpha', findRegex: '/alpha/g', replaceString: 'A' }), script({ scriptName: 'Beta', findRegex: '/beta/g', replaceString: 'B' })];

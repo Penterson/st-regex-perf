@@ -1,6 +1,7 @@
 // Boots a SillyTavern-like page: real i18n, events, regex engine and message formatter, a getContext() built from
 // the stand-ins, then the extension variant named in ?variant= (none | baseline | st-regex-perf).
-// Options: ?locale=ko-kr (UI language), ?hooks=0 (no MessageFormatter, like older SillyTavern), ?settings=<json>.
+// Options: ?locale=ko-kr (UI language), ?hooks=0 (no MessageFormatter, like older SillyTavern), ?settings=<json>,
+// ?prewrap=1 (another extension has already wrapped RegexProvider.instance.get).
 const params = new URLSearchParams(location.search);
 const variant = params.get('variant') ?? 'none';
 localStorage.setItem('language', params.get('locale') ?? 'en');
@@ -57,9 +58,17 @@ globalThis.SillyTavern = {
 
 // ?settings=<json>: what the user had saved before the extension loads
 if (params.get('settings')) extension_settings.regex_perf_kit = JSON.parse(params.get('settings'));
+const warnings = [];
+const origWarn = console.warn;
+console.warn = (...args) => { warnings.push(args.map(String).join(' ')); origWarn(...args); };
+if (params.get('prewrap') === '1') { // another extension's wrapper, loaded first
+    const inst = engine.RegexProvider.instance;
+    const prev = inst.get.bind(inst);
+    inst.get = (regexString) => prev(regexString);
+}
 if (variant !== 'none') await import(`/scripts/extensions/third-party/${variant}/index.js`);
 await eventSource.emit(event_types.APP_READY);
 
-const h = { variant, st, engine, extension_settings, preset, eventSource, event_types, MessageFormatter, i18n, toasts, commands, popups, calls };
+const h = { variant, st, engine, extension_settings, preset, eventSource, event_types, MessageFormatter, i18n, toasts, commands, popups, calls, warnings };
 window.__run = async (name, arg) => (await import('/harness/scenarios.js'))[name](h, arg);
 window.__ready = true;

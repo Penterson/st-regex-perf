@@ -725,10 +725,12 @@ function patchProvider() {
         console.warn('[RegexPerf] RegexProvider.instance not found — this ST version is not supported.');
         return;
     }
+    // SillyTavern's get() is the class method; an own property on the instance is another extension's wrapper.
+    if (inst.get !== Object.getPrototypeOf(inst)?.get) warnWrapper(t`Another extension had already replaced the regex engine's get() when Regex Perf Kit loaded: its runs may be measured twice or not at all.`);
     const origGet = inst.get.bind(inst);
     const origClear = inst.clear.bind(inst);
 
-    inst.get = function (regexString) {
+    inst.get = patchedGet = function (regexString) {
         const base = origGet(regexString);
         if (!base) return null;
         const { map, version } = ensureInfo();
@@ -770,6 +772,18 @@ function patchProvider() {
     };
 
     patched = true;
+}
+
+let patchedGet = null; // our RegexProvider.instance.get, to notice a later replacement
+let wrapperWarning = ''; // shown once in the panel (and the console)
+function warnWrapper(text) {
+    if (wrapperWarning) return;
+    wrapperWarning = text;
+    console.warn('[RegexPerf] ' + text);
+}
+/** Checked now and then: if another extension replaced get() after us, our features no longer apply. */
+function checkWrapper() {
+    if (patched && RegexProvider.instance?.get !== patchedGet) warnWrapper(t`Another extension replaced the regex engine's get() after Regex Perf Kit: the features may no longer apply. Check the extension load order.`);
 }
 
 // ---- MessageFormatter hooks: ⑤ persisted display cache, ④ compromise mode ----
@@ -1308,6 +1322,8 @@ function renderPanel() {
         lines.push(t`Never matched in ${INEFFECTIVE_RUNS}+ runs: <b>${esc(s.ineffective.join(', '))}</b>. Consider turning them off.`);
     }
     if (!patched) lines.push(`<span class="rpk-warn">${t`⚠ Could not patch the regex engine — this SillyTavern version is not supported.`}</span>`);
+    checkWrapper();
+    if (wrapperWarning) lines.push(`<span class="rpk-warn">⚠ ${esc(wrapperWarning)}</span>`);
     lines.push(`<span class="rpk-dim rpk-since">${t`Since ${new Date(statsSince).toLocaleTimeString()}`}</span>`);
     const summary = lines.map(l => `<p>${l}</p>`).join('');
     setContent(ui.summary, summary);
@@ -1525,6 +1541,7 @@ if (extensionSettings.disabledExtensions?.includes('regex')) {
 patchProvider();
 eventSource.on(event_types.GENERATION_STARTED, (_type, _params, dryRun) => {
     if (dryRun) return;
+    checkWrapper();
     generating = true;
     streamViews.clear();
 });
