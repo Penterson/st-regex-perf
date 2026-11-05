@@ -89,15 +89,17 @@ const CONTROL_ESCAPES = { n: '\n', t: '\t', r: '\r', f: '\f', v: '\v' };
 const BAIL = Symbol('bail');
 
 /**
- * Parses a pattern once. needles: literals of which every match contains at least one (null if none is certain),
- * decided by test(str). nested: an unbounded quantifier inside an unboundedly repeated group, e.g. (a+)+.
+ * Parses a pattern once. Every match contains, for each of terms, at least one of its literals (a one-literal term
+ * is a mandatory run, a longer one comes from an alternation) and is at least minLen UTF-16 units long; test(str)
+ * checks both, needles is the single best term (null if none is certain). nested: an unbounded quantifier inside an
+ * unboundedly repeated group, e.g. (a+)+.
  * Conservative: classes, class escapes, backreferences, lookarounds and modifier groups contribute no literal, and
- * patterns with the v flag or a case modifier ((?i:), (?-i:)) get no needle at all. Literals in groups that must
- * match join the surrounding run; an alternation yields one needle per branch (any of them must occur), provided
+ * patterns with the v flag or a case modifier ((?i:), (?-i:)) get nothing at all. Literals in groups that must
+ * match join the surrounding run; an alternation yields one literal per branch (any of them must occur), provided
  * every branch has one.
  * @param {string} source RegExp.source
  * @param {string} flags RegExp.flags
- * @returns {{needles: string[] | null, test: ((str: string) => boolean) | null, nested: boolean}}
+ * @returns {{needles: string[] | null, terms: string[][], minLen: number, test: ((str: string) => boolean) | null, nested: boolean}}
  */
 export function extractNeedle(source, flags) {
     const u = flags.includes('u');
@@ -127,36 +129,46 @@ export function extractNeedle(source, flags) {
     const score = (set) => Math.min(...set.map(s => s.length));
     const better = (a, b) => !b || score(a) > score(b) || (score(a) === score(b) && a.length < b.length);
 
-    // {lit} for a literal character, {group, opaque} for a group, {lit: null} for anything else.
+    // {lit, len} for a literal character, {group, opaque, zero} for a group (zero: a lookaround, which consumes
+    // nothing), {lit: null, len} for anything else; len is the least number of UTF-16 units the atom matches.
+    const one = { lit: null, len: 1 };
+    const none = { lit: null, len: 0 };
     const atom = () => {
         const c = source[i];
         if (c === '\\') {
             const nx = source[i + 1];
             i += 2;
-            if (nx === undefined || 'dDwWsSbB'.includes(nx)) return { lit: null }; // classes, boundaries
+            if (nx === undefined) return none;
+            if ('dDwWsS'.includes(nx)) return one; // classes
+            if (nx === 'b' || nx === 'B') return none; // boundaries
             if (nx >= '0' && nx <= '9') { // backreference or (without u) a legacy octal escape: take every digit
                 while (source[i] >= '0' && source[i] <= '9') i++;
-                return { lit: null };
+                return none;
             }
-            if ('pPku'.includes(nx) && (source[i] === '{' || source[i] === '<')) { // \p{..} \u{..} \k<..>: skip the argument
-                const e = source.indexOf(source[i] === '<' ? '>' : '}', i + 1);
+            if ('pPku'.includes(nx) && (source[i] === '{' || source[i] === '<')) { // \p{..} \u{..} \k<..>
+                if (!u && nx !== 'k') return { lit: nx, len: 1 }; // without u, the letter itself; a {..} after it is a quantifier
+                const e = source.indexOf(source[i] === '<' ? '>' : '}', i + 1); // skip the argument
                 if (e !== -1) {
                     if (/[|()[\]\\]/.test(source.slice(i + 1, e))) throw BAIL; // without u these are literals around real syntax
                     i = e + 1;
                 }
-                return { lit: null };
+                return nx === 'k' ? none : one;
             }
-            const hex = { u: 4, x: 2 }[nx]; // \uXXXX \xXX: skip the digits (a lone \u or \x is not followed by them)
+            const hex = { u: 4, x: 2 }[nx]; // \uXXXX \xXX: skip the digits; without them (and u) it is the letter itself
             if (hex) {
                 const digits = source.slice(i, i + hex);
-                if (digits.length === hex && /^[0-9a-fA-F]+$/.test(digits)) i += hex;
-                return { lit: null };
+                if (digits.length === hex && /^[0-9a-fA-F]+$/.test(digits)) {
+                    i += hex;
+                    return one;
+                }
+                return u ? one : { lit: nx, len: 1 };
             }
             if (nx === 'c') {
                 if (/[a-zA-Z]/.test(source[i] ?? '')) i++;
-                return { lit: null };
+                return one;
             }
-            return { lit: CONTROL_ESCAPES[nx] ?? nx }; // \n \t \r \f \v, or an escaped character
+            const lit = CONTROL_ESCAPES[nx] ?? nx; // \n \t \r \f \v, or an escaped character
+            return { lit, len: lit.length };
         }
         if (c === '[') {
             let j = i + 1;
@@ -167,11 +179,12 @@ export function extractNeedle(source, flags) {
                 j++;
             }
             i = j + 1;
-            return { lit: null };
+            return one;
         }
         if (c === '(') {
             i++;
             let opaque = false;
+            let zero = false;
             if (source[i] === '?') {
                 i++;
                 if (source[i] === ':') {
@@ -182,71 +195,89 @@ export function extractNeedle(source, flags) {
                 } else { // (?= (?! (?<= (?<! lookarounds, (?i: (?-s: modifiers
                     opaque = true;
                     const m = /^(?:<?[=!]|[a-z]*(?:-[a-z]*)?:)/.exec(source.slice(i, i + 16));
+                    zero = !!m && !m[0].endsWith(':');
                     i += m ? m[0].length : 0;
                 }
             }
             const group = alternation();
             if (source[i] !== ')') throw BAIL;
             i++;
-            return { group, opaque };
+            return { group, opaque, zero };
         }
-        if ('.^${'.includes(c)) { // a '{' that is not a quantifier is a literal without u: break the run anyway
+        if (c === '^' || c === '$') {
             i++;
-            return { lit: null };
+            return none;
+        }
+        if (c === '.' || c === '{') { // a '{' that is not a quantifier is a literal without u: break the run anyway
+            i++;
+            return one;
         }
         const start = i;
         const pair = u && c >= '\uD800' && c <= '\uDBFF' && source[i + 1] >= '\uDC00' && source[i + 1] <= '\uDFFF';
         i += pair ? 2 : 1;
-        return { lit: source.slice(start, i) }; // with u, a surrogate pair is one character
+        const lit = source.slice(start, i); // with u, a surrogate pair is one character
+        return { lit, len: lit.length };
     };
 
     // Summary of a sequence: pre/suf = literal run at its start/end, full = the whole sequence is one literal run,
-    // best = best needle set inside it, inf = it contains an unbounded quantifier.
+    // best = best needle set inside it, terms = every term a match of it must satisfy, len = its least match
+    // length, inf = it contains an unbounded quantifier.
     const sequence = () => {
         let cur = '';
         let pre = null;
         let best = null;
         let inf = false;
+        let len = 0;
+        const terms = [];
         const consider = (set) => { if (set && better(set, best)) best = set; };
         const end = () => {
             pre ??= cur;
-            if (cur) consider([cur]);
+            if (cur) {
+                consider([cur]);
+                terms.push([cur]);
+            }
             cur = '';
         };
         while (i < n && source[i] !== '|' && source[i] !== ')') {
             const a = atom();
             const q = quant();
+            const reps = q ? q.min : 1;
             if (q?.inf) inf = true;
             if (a.group) {
                 const g = a.group;
+                if (!a.zero) len += g.len * reps;
                 if (g.inf) {
                     inf = true;
                     if (q?.inf) nested = true;
                 }
-                if (a.opaque || q?.min === 0) {
+                if (a.opaque || reps === 0) {
                     end();
                 } else {
                     cur += g.pre;
                     if (q || !g.full) { // the first repetition continues the run before it, the last one starts the run after it
                         end();
                         consider(g.best);
+                        terms.push(...g.terms);
                         cur = g.suf;
                     }
                 }
-            } else if (a.lit === null || q?.min === 0) {
-                end();
             } else {
-                cur += a.lit;
-                if (q) { // "ab+c": "ab" and "bc"
+                len += a.len * reps;
+                if (a.lit === null || reps === 0) {
                     end();
-                    cur = a.lit;
+                } else {
+                    cur += a.lit;
+                    if (q) { // "ab+c": "ab" and "bc"
+                        end();
+                        cur = a.lit;
+                    }
                 }
             }
         }
         const full = pre === null;
         const suf = cur;
         end();
-        return { pre, suf, full, best, inf };
+        return { pre, suf, full, best, inf, len, terms };
     };
 
     const alternation = () => {
@@ -256,30 +287,60 @@ export function extractNeedle(source, flags) {
             seqs.push(sequence());
         }
         if (seqs.length === 1) return seqs[0];
-        const best = seqs.every(s => s.best) ? [...new Set(seqs.flatMap(s => s.best))] : null;
-        return { pre: '', suf: '', full: false, best: best?.length <= 16 ? best : null, inf: seqs.some(s => s.inf) };
+        const union = seqs.every(s => s.best) ? [...new Set(seqs.flatMap(s => s.best))] : null;
+        const best = union?.length <= 16 ? union : null;
+        return { pre: '', suf: '', full: false, best, inf: seqs.some(s => s.inf), len: Math.min(...seqs.map(s => s.len)), terms: best ? [best] : [] };
     };
 
-    let needles = null;
+    let top = null;
     try {
         // (?i:) / (?-i:) groups: V8 (13.x) has been seen to match literals outside such a group case-insensitively
         // after many regexes ran in the same page, which the spec does not allow. Such patterns are left to the engine.
         if (flags.includes('v') || /\(\?[a-z-]*i[a-z-]*:/.test(source)) throw BAIL;
-        const top = alternation();
+        top = alternation();
         if (i < n) throw BAIL;
-        needles = top.best;
     } catch (e) {
         if (e !== BAIL) throw e;
     }
-    if (!needles) return { needles: null, test: null, nested };
-    // With the i flag, escaped copies of the needles under the pattern's i/u flags decide: they fold case exactly
-    // like the pattern itself (toLowerCase() does not: σ/ς/Σ, µ/μ, ſ/s ...).
-    if (flags.includes('i')) {
-        const re = new RegExp(needles.map(s => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')).join('|'), u ? 'iu' : 'i');
-        return { needles, test: (str) => re.test(str), nested };
+    if (!top) return { needles: null, terms: [], minLen: 0, test: null, nested };
+    const terms = pruneTerms(top.terms);
+    const minLen = top.len;
+    const needles = top.best;
+    if (!terms.length && !minLen) return { needles, terms, minLen, test: null, nested };
+    let has;
+    if (!terms.length) {
+        has = null;
+    } else if (flags.includes('i')) {
+        // With the i flag, escaped copies of the literals under the pattern's i/u flags decide: they fold case exactly
+        // like the pattern itself (toLowerCase() does not: σ/ς/Σ, µ/μ, ſ/s ...).
+        const res = terms.map(set => new RegExp(set.map(s => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')).join('|'), u ? 'iu' : 'i'));
+        has = res.length === 1 ? (str) => res[0].test(str) : (str) => res.every(re => re.test(str));
+    } else if (terms.length === 1 && terms[0].length === 1) {
+        const [[lit]] = terms;
+        has = (str) => str.includes(lit);
+    } else {
+        has = (str) => terms.every(set => set.some(s => str.includes(s)));
     }
-    const [one] = needles;
-    return { needles, test: needles.length === 1 ? (str) => str.includes(one) : (str) => needles.some(s => str.includes(s)), nested };
+    const test = !minLen ? has : !has ? (str) => str.length >= minLen : (str) => str.length >= minLen && has(str);
+    return { needles, terms, minLen, test, nested };
+}
+
+/**
+ * Drops terms another term implies (a literal inside a longer mandatory literal, an alternation one of whose
+ * literals is inside a mandatory one) and caps the count, so a check stays a few scans.
+ * @param {string[][]} terms
+ */
+function pruneTerms(terms) {
+    const singles = [];
+    for (const s of [...new Set(terms.filter(t => t.length === 1).map(t => t[0]))].sort((a, b) => b.length - a.length)) {
+        if (!singles.some(k => k.includes(s))) singles.push(s);
+    }
+    const sets = [];
+    for (const set of terms.filter(t => t.length > 1)) {
+        const key = JSON.stringify(set);
+        if (!singles.some(k => set.some(s => k.includes(s))) && !sets.some(o => JSON.stringify(o) === key)) sets.push(set);
+    }
+    return [...singles.slice(0, 6).map(s => [s]), ...sets.slice(0, 2)];
 }
 
 // .*  .+  [\s\S]*  [^]*  (.|\n)*  [\w\W]* — likely heavy backtracking
@@ -668,7 +729,13 @@ const INEFFECTIVE_RUNS = 20; // a script that ran this often without changing th
 /** Milliseconds for display: an exact zero is "0", otherwise 2 / 1 / 0 decimals as the value grows. */
 const fmtMs = (x) => (x === 0 ? '0' : x.toFixed(x >= 100 ? 0 : x >= 10 ? 1 : 2));
 const avgMs = (r) => (r.calls ? r.totalMs / r.calls : 0);
-const fmtNeedles = (r) => r.needle?.needles?.map(s => JSON.stringify(s)).join(' | ');
+/** The prefilter's terms as text: literals joined by & must all occur, those joined by | need one ("a" & ("b" | "c")). */
+const fmtNeedles = (r) => {
+    const terms = r.needle?.terms;
+    if (!terms?.length) return undefined;
+    const q = (set) => set.map(s => JSON.stringify(s)).join(' | ');
+    return terms.map(set => (set.length > 1 && terms.length > 1 ? `(${q(set)})` : q(set))).join(' & ');
+};
 // every call the prefilter, the memo or the streaming skip avoided would have cost the script's average run
 const avoided = (r) => r.skipped + r.hits + r.streamSkipped;
 const savedMs = (r) => avoided(r) * avgMs(r);
@@ -750,9 +817,9 @@ function buildReportText() {
     if (measured) lines.push(measureText(measured));
     if (s.top) lines.push(t`#1 "${s.top.name}" takes ${s.topShare.toFixed(0)}% of the total time`);
     if (s.ineffective.length) lines.push(t`Candidates to disable (ran ${INEFFECTIVE_RUNS}+ times, never changed the text): ${s.ineffective.join(', ')}`);
-    lines.push('', t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Changed | Skips | Hits | Stream skips | Literal | Warnings`);
+    lines.push('', t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`);
     s.rows.forEach((r, i) => {
-        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${fmtMs(r.replMs)} | ${r.changed} | ${r.skipped} | ${r.hits} | ${r.streamSkipped} | ${fmtNeedles(r) ?? '-'} | ${warnings(r).join(', ')}`);
+        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${fmtMs(r.replMs)} | ${r.changed} | ${r.skipped} | ${r.hits} | ${r.streamSkipped} | ${fmtNeedles(r) ?? '-'} | ${r.needle?.minLen || '-'} | ${warnings(r).join(', ')}`);
     });
     return lines.join('\n');
 }
@@ -827,7 +894,7 @@ const limit = (key, name, title) => `<label${title ? ` title="${title}"` : ''}><
 
 // Table cells carry a column class so the narrow layout can hide columns; headers explain themselves on hover.
 const th = (col, text, title) => `<th class="rpk-col-${col}"${title ? ` title="${esc(title)}"` : ''}>${text}</th>`;
-const td = (col, value, cls = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}">${value}</td>`;
+const td = (col, value, cls = '', title = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}"${title ? ` title="${esc(title)}"` : ''}>${value}</td>`;
 
 const settingsHtml = () => `
 <div id="regex_perf_kit" class="regex-perf-kit">
@@ -880,7 +947,7 @@ const settingsHtml = () => `
             ${th('rank', '#')}${th('name', t`Script`)}
             ${th('runs', t`Runs`, t`Regex runs that really happened`)}${th('total', t`Total ms`)}${th('avg', t`Avg`, t`Time per run, averaged`)}${th('max', t`Max`, t`Slowest single run`)}
             ${th('repl', t`Replacer`, t`Time spent in the replacement (group filling, trim strings, macros), included in Total ms`)}${th('changed', t`Changed`, t`Runs that changed the text`)}
-            ${th('skips', t`Skips`, t`Runs skipped by ② (the fixed text was absent)`)}${th('hits', t`Hits`, t`Results reused by ③`)}${th('lit', t`Literal`, t`The fixed text ② looks for before running this script`)}${th('act', '')}
+            ${th('skips', t`Skips`, t`Runs skipped by ② (the fixed text was absent)`)}${th('hits', t`Hits`, t`Results reused by ③`)}${th('lit', t`Literal`, t`The fixed text ② looks for before running this script: every literal joined by & must be present, one of those joined by |. Hover a cell for the shortest possible match.`)}${th('act', '')}
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -965,7 +1032,7 @@ function renderPanel() {
           ${td('rank', i + 1)}${td('name', esc(r.name) + warnings(r, true).join(''))}
           ${td('runs', r.calls)}${td('total', fmtMs(r.totalMs))}${td('avg', fmtMs(avgMs(r)))}${td('max', fmtMs(r.maxMs))}
           ${td('repl', fmtMs(r.replMs))}${td('changed', r.changed)}
-          ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', r.needle?.needles ? esc(fmtNeedles(r)) : `<span class="rpk-dim">${t`none`}</span>`, 'rpk-lit')}
+          ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', fmtNeedles(r) ? esc(fmtNeedles(r)) : `<span class="rpk-dim">${t`none`}</span>`, 'rpk-lit', r.needle?.minLen ? t`Shortest possible match: ${r.needle.minLen} characters. ② skips shorter messages.` : '')}
           ${td('act', actions, 'rpk-act')}
         </tr>`;
     }).join('') || `<tr><td colspan="12" class="rpk-dim rpk-empty">${t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);

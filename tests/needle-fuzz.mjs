@@ -29,4 +29,4 @@ console.log(`  ok  ${cases.checked} hand-checked cases` + (cases.unsupported.len
 
 const seed = Number(process.env.FUZZ_SEED ?? Math.floor(Math.random() * 2 ** 31));
 const r = fuzz(extractNeedle, { seed, patterns: Number(process.env.FUZZ_PATTERNS ?? 40000) });
-console.log(`  ok  fuzz seed ${r.seed}: ${r.valid} valid patterns, ${r.skips} prefilter skips, ${r.matched} matches, no skipped match`);
+console.log(`  ok  fuzz seed ${r.seed}: ${r.valid} valid patterns, ${r.skips} prefilter skips (${r.lenSkips} by length, ${r.andSkips} by a mandatory term), ${r.matched} matches, no skipped match`);
