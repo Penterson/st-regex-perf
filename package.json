@@ -6,9 +6,10 @@
     "scripts": {
         "lint": "eslint .",
         "fetch-st": "node tests/fetch-st.mjs",
+        "test:eslint-sync": "node tests/eslint-sync.mjs",
         "test:fuzz": "node tests/needle-fuzz.mjs",
         "test:browser": "node tests/run.mjs",
-        "test": "npm run lint && npm run test:fuzz && npm run test:browser"
+        "test": "npm run lint && npm run test:eslint-sync && npm run test:fuzz && npm run test:browser"
     },
     "devDependencies": {
         "eslint": "^8.57.1",
@@ -17,6 +18,6 @@
         "puppeteer-core": "^24.0.0"
     },
     "engines": {
-        "node": ">=20"
+        "node": ">=22"
     }
 }
