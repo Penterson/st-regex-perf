@@ -148,12 +148,12 @@ test('shared literal check: one scan per literal per input across scripts; displ
     for (const v of ['none', 'baseline', 'current']) assert.deepEqual(save[v].out, want, v);
     assert.deepEqual(save.none.perRender, [0, 0, 0], 'plain SillyTavern scans nothing');
     assert.deepEqual(save.baseline.perRender, [5, 5, 5], 'baseline: every script scans on every render');
-    assert.deepEqual(save.current.perRender, [3, 3, 3], 'save path: each of the three literals once per render ("<a>" is shared)');
+    assert.deepEqual(save.current.perRender, [4, 4, 4], 'save path: each of the three literals once per render ("<a>" is shared), plus the order-conflict check of "<b>" on the input A2 changed');
     const display = await each('litMemo', { display: true }, { variants: ['baseline', 'current'] });
     for (const v of ['baseline', 'current']) assert.deepEqual(display[v].out, want, v);
     assert.deepEqual(display.baseline.perRender, [5, 5, 5]);
-    assert.deepEqual(display.current.scans, { '<a>': 1, '<b>': 1, '<d>': 1 }, 'display path: each literal once');
-    assert.deepEqual(display.current.perRender, [3, 0, 0], 're-renders scan nothing');
+    assert.deepEqual(display.current.scans, { '<a>': 1, '<b>': 2, '<d>': 1 }, 'display path: each literal once ("<b>" also on the input A2 changed, for the order-conflict check)');
+    assert.deepEqual(display.current.perRender, [4, 0, 0], 're-renders scan nothing');
 });
 
 test('item 6: the memo has a memory budget with LRU eviction', async ({ each }) => {

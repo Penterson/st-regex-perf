@@ -592,7 +592,7 @@ class PerfRegExp extends RegExp {
         // a displayed message comes back on every re-render: its literal answers are kept (save-time inputs do not)
         if (settings.prefilter && test && !test(str, markdownOnly || displayPass)) {
             stat.skipped++;
-            if (prevOut === str && prevIn !== str && prevStat !== stat) noteConflict(prevStat, stat, prevIn, test, this._native);
+            if (prevOut === str && prevIn !== str && prevStat !== stat) noteConflict(prevStat, stat, prevIn, test, this._native, markdownOnly || displayPass);
             prevStat = stat;
             prevIn = prevOut = str;
             return str;
@@ -666,8 +666,11 @@ const CONFLICT_TEST_MAX = 4000; // the later pattern is really run on inputs up 
  * The later script was skipped on the earlier one's output although its needle was in the earlier one's input: the
  * earlier script removed it. Confirmed by running the later pattern on that input when it is short.
  */
-function noteConflict(earlier, later, input, test, native) {
-    if (!test(input)) return;
+function noteConflict(earlier, later, input, test, native, keep) {
+    const seen = [litIn, litSeen]; // the check looks at another input; the current one stays the fast path
+    const had = test(input, keep);
+    [litIn, litSeen] = seen;
+    if (!had) return;
     let confirmed = null;
     if (input.length <= CONFLICT_TEST_MAX) {
         native.lastIndex = 0;
