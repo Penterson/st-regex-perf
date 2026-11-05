@@ -4,6 +4,13 @@
 
 Speeds up SillyTavern's built-in Regex extension **without changing a single character of your regex scripts**.
 
+<p align="center">
+  <img src="docs/screenshot-desktop.png" alt="The panel on a desktop: summary, features, limits, measurement buttons and the per-script table" width="760">
+</p>
+<p align="center">
+  <img src="docs/screenshot-mobile.png" alt="The panel on a phone: the narrow layout hides the Avg, Replacer and Literal columns" width="300">
+</p>
+
 | Feature | Default | What it does |
 |---|---|---|
 | ① Measure run time (profiler) | ON | Per script: runs, total / max ms, the part spent in the replacement (macros), and how often a run actually changed the text. Finds the slowest scripts and the ones that do nothing. |
@@ -82,7 +89,8 @@ npm test
 text the prefilter skipped), and compares no extension / the baseline commit (`BASELINE` in `tests/server.mjs`) / the working
 tree in headless Chrome on SillyTavern's real regex engine (`RegexProvider`/`runRegexScript`). SillyTavern's files are downloaded
 at test time from the commits pinned in `tests/st-version.json` (one release, one staging; they are AGPL, so they are not part of this
-repository). `ST_REF=release npm test` picks the other one (default staging); set `CHROME_PATH` to choose the Chrome binary. GitHub Actions
+repository). `ST_REF=release npm test` picks the other one (default staging); set `CHROME_PATH` to choose the Chrome binary. `npm run screenshots` regenerates the README's panel
+screenshots (`docs/`) from the harness. GitHub Actions
 runs the same tests against both commits on every push and pull request, and `npm run bench -- --gate` fails when the warm re-render of a
 long chat, relative to no extension, is more than 20% slower than the ratio stored in `tests/bench-baseline.json` (`npm run bench -- --update`
 refreshes it; plain `npm run bench` only prints the comparison).

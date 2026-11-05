@@ -1,11 +1,17 @@
 // Boots a SillyTavern-like page: real i18n, events, regex engine and message formatter, a getContext() built from
 // the stand-ins, then the extension variant named in ?variant= (none | baseline | st-regex-perf).
 // Options: ?locale=ko-kr (UI language), ?hooks=0 (no MessageFormatter, like older SillyTavern), ?settings=<json>,
-// ?prewrap=1 (another extension has already wrapped RegexProvider.instance.get).
+// ?prewrap=1 (another extension has already wrapped RegexProvider.instance.get), ?theme=1 (SillyTavern-like styling and
+// the extension's stylesheet, for screenshots).
 const params = new URLSearchParams(location.search);
 const variant = params.get('variant') ?? 'none';
 localStorage.setItem('language', params.get('locale') ?? 'en');
 
+if (params.get('theme') === '1') {
+    for (const href of ['/harness/theme.css', `/scripts/extensions/third-party/${variant}/style.css`]) {
+        document.head.insertAdjacentHTML('beforeend', `<link rel="stylesheet" href="${href}">`);
+    }
+}
 const st = await import('/script.js');
 const { extension_settings } = await import('/scripts/extensions.js');
 const { preset } = await import('/scripts/preset-manager.js');

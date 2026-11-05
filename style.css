@@ -328,8 +328,19 @@
 
 @container (max-width: 400px) {
     .regex-perf-kit .rpk-table .rpk-col-changed,
-    .regex-perf-kit .rpk-table .rpk-col-max {
+    .regex-perf-kit .rpk-table .rpk-col-matched,
+    .regex-perf-kit .rpk-table .rpk-col-max,
+    .regex-perf-kit .rpk-act .rpk-row-ms {
         display: none;
+    }
+
+    .regex-perf-kit .rpk-table th,
+    .regex-perf-kit .rpk-table td {
+        padding-right: 5px;
+    }
+
+    .regex-perf-kit .rpk-act span {
+        padding: 0 2px;
     }
 }
 

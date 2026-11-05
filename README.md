@@ -4,6 +4,13 @@
 
 정규식 스크립트를 **한 글자도 건드리지 않고** 정규식 확장의 체감 속도를 올리는 확장입니다.
 
+<p align="center">
+  <img src="docs/screenshot-desktop.png" alt="데스크톱 패널: 요약, 기능, 한도, 측정 버튼, 스크립트별 표" width="760">
+</p>
+<p align="center">
+  <img src="docs/screenshot-mobile.png" alt="모바일 패널: 좁은 폭에서는 평균·치환·리터럴 열을 숨김" width="300">
+</p>
+
 | 기능 | 기본값 | 설명 |
 |---|---|---|
 | ① 프로파일러 | ON | 스크립트마다 몇 번 실행되고 얼마나 걸렸는지(총/최대 ms, 그중 치환문·매크로에 쓴 시간, 텍스트를 실제로 바꾼 횟수)를 재서 표로 보여줍니다. 가장 느린 스크립트와 효과 없는 스크립트를 찾아줍니다. |
@@ -78,4 +85,4 @@ npm test
 `npm test`는 ST의 ESLint 규칙으로 린트하고, 리터럴 추출기(`extractNeedle`)를 퍼징하고(프리필터가 건너뛴 텍스트에서 정규식이 매치하면 실패),
 headless Chrome에서 ST의 실제 정규식 엔진(`RegexProvider`/`runRegexScript`)으로 확장 없음 / 기준 커밋(`tests/server.mjs`의 `BASELINE`) / 현재 코드의 결과를 비교합니다.
 ST 파일은 `tests/st-version.json`에 고정된 커밋(release와 staging 하나씩)에서 테스트할 때 내려받습니다(AGPL이라 저장소에 포함하지 않음). `ST_REF=release npm test`로 다른 쪽을 고를 수 있고(기본 staging), Chrome 위치는 `CHROME_PATH`로 지정할 수 있습니다.
-GitHub Actions가 푸시와 PR마다 두 커밋 모두에 대해 같은 테스트를 돌리고, `npm run bench -- --gate`로 긴 채팅의 재렌더링(warm) 시간이 확장 없음 대비 `tests/bench-baseline.json`의 비율보다 20% 넘게 느려지면 실패시킵니다(`npm run bench -- --update`로 기준 갱신, `npm run bench`는 비교 출력만).
+`npm run screenshots`는 README의 패널 스크린샷(`docs/`)을 하네스에서 다시 만듭니다. GitHub Actions가 푸시와 PR마다 두 커밋 모두에 대해 같은 테스트를 돌리고, `npm run bench -- --gate`로 긴 채팅의 재렌더링(warm) 시간이 확장 없음 대비 `tests/bench-baseline.json`의 비율보다 20% 넘게 느려지면 실패시킵니다(`npm run bench -- --update`로 기준 갱신, `npm run bench`는 비교 출력만).
