@@ -940,6 +940,24 @@ export async function ux(h) {
     return { initial, ids, checked, toggled, slash, stored, cleared, note: root.querySelector('#rpk_persist_note').textContent };
 }
 
+/** tests/screenshots.mjs: a realistic session in the panel (the corpus chat, a measurement, a per-row stopwatch). */
+export async function screenshot(h) {
+    const corpus = await import('./corpus.js');
+    applyProfile(h, { persist: true });
+    h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: Array.from({ length: 8 }, () => corpus.CHAT()).flat() });
+    await useScripts(h, [...corpus.SCRIPTS(), script({ scriptName: 'Digits', findRegex: '/\\d{4,}/g', replaceString: '####', markdownOnly: true })]);
+    for (let k = 0; k < 3; k++) h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, m.is_system, m.is_user, i));
+    h.st.chat.forEach((m) => h.engine.getRegexedString(m.mes, P.AI));
+    const root = document.getElementById('regex_perf_kit');
+    root.querySelector('#rpk_measure').click();
+    await new Promise(r => setTimeout(r, 80));
+    root.querySelector('#rpk_table tbody tr[data-i="0"] .rpk-measure-row')?.click();
+    await new Promise(r => setTimeout(r, 80));
+    root.querySelector('details[data-section="limits"]').open = true;
+    root.querySelector('#rpk_refresh').click();
+    return root.getBoundingClientRect().height;
+}
+
 /** tests/bench.mjs: cold and warm display renders of a long chat, and the save path on it. */
 export async function bench(h) {
     const corpus = await import('./corpus.js');

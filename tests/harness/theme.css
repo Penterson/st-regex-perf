@@ -1,0 +1,74 @@
+/* A SillyTavern-like look for the screenshots (tests/screenshots.mjs): its colours, variables and the few classes the
+   panel uses. Not loaded by the tests. */
+:root {
+    --SmartThemeBodyColor: rgb(220, 220, 210);
+    --SmartThemeBlurTintColor: rgba(23, 23, 23, 0.96);
+    --warning: #f0a040;
+    color-scheme: dark;
+}
+
+body {
+    margin: 0;
+    padding: 14px;
+    background: #1b1b1b;
+    color: var(--SmartThemeBodyColor);
+    font-family: "Noto Sans", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 15px;
+}
+
+#extensions_settings2 {
+    max-width: 1000px;
+}
+
+.inline-drawer-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    margin-bottom: 6px;
+}
+
+.menu_button {
+    display: inline-block;
+    padding: 5px 10px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: rgba(255, 255, 255, 0.06);
+    color: inherit;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+
+.text_pole {
+    padding: 4px 6px;
+    border: 1px solid rgba(255, 255, 255, 0.25);
+    background: rgba(0, 0, 0, 0.3);
+    color: inherit;
+    font: inherit;
+}
+
+input[type="checkbox"] {
+    accent-color: #b7a26b;
+}
+
+details summary {
+    list-style: none;
+}
+
+details summary::before {
+    content: "▸ ";
+}
+
+details[open] summary::before {
+    content: "▾ ";
+}
+
+/* Font Awesome stand-ins */
+.fa-solid::before {
+    font-style: normal;
+}
+
+.fa-circle-chevron-down::before { content: "⌄"; }
+.fa-pencil::before { content: "✎"; }
+.fa-power-off::before { content: "⏻"; }
+.fa-stopwatch::before { content: "⏱"; }

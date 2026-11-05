@@ -10,7 +10,8 @@
         "test:fuzz": "node tests/needle-fuzz.mjs",
         "test:browser": "node tests/run.mjs",
         "test": "npm run lint && npm run test:eslint-sync && npm run test:fuzz && npm run test:browser",
-        "bench": "node tests/bench.mjs"
+        "bench": "node tests/bench.mjs",
+        "screenshots": "node tests/screenshots.mjs"
     },
     "devDependencies": {
         "eslint": "^8.57.1",

@@ -284,13 +284,14 @@ test('item 9: "Measure on this chat" renders with the features off and on and sh
 test('per-row stopwatch: re-renders the chat without that script and shows the ms it costs inline; stats restored', async ({ each }) => {
     const r = await each('rowMeasure', null, { variants: ['baseline', 'current'] });
     assert.equal(r.baseline, null, 'baseline has no stopwatch');
-    const m = /^−([\d.]+) ms$/.exec(r.current.text);
+    const m = /^([−+])([\d.]+) ms$/.exec(r.current.text);
     assert.ok(m, `inline difference: ${JSON.stringify(r.current.text)}`);
+    assert.equal(m[1], '−', 'the chat is faster without the slow script');
     const t = /renders in ([\d.]+) ms instead of ([\d.]+) ms/.exec(r.current.title);
     assert.ok(t, r.current.title);
     const [without, with_] = t.slice(1).map(Number);
     assert.ok(with_ > without * 1.5, `the slow script dominates: ${r.current.title}`);
-    assert.ok(Math.abs(Number(m[1]) - (with_ - without)) <= 0.1 + with_ * 0.01, 'shown difference = with - without');
+    assert.ok(Math.abs(Number(m[2]) - (with_ - without)) <= 0.1 + with_ * 0.01, 'shown difference = with - without');
     assert.equal(r.current.boldHas, false, 'only the measured row shows a time');
     assert.ok(r.current.toasts.includes('Measuring...'));
     assert.ok(r.current.statsUnchanged, 'measuring does not count as activity');
@@ -543,6 +544,19 @@ test('item 16: streaming compromise mode formats completed lines at most every N
     assert.deepEqual(off.none.filter(x => typeof x === 'number'), [1, 1, 1, 1], 'plain SillyTavern formats every chunk');
     assert.deepEqual(off.current, off.baseline, 'off by default: same as the baseline (display scripts skipped while live)');
     assert.equal(off.current.at(-1), final);
+});
+
+test('release hygiene: manifest version in the changelog, auto_update on, screenshots present and linked', async () => {
+    const read = (f) => readFileSync(new URL('../' + f, import.meta.url), 'utf8');
+    const manifest = JSON.parse(read('manifest.json'));
+    assert.match(manifest.version, /^\d+\.\d+\.\d+$/);
+    assert.equal(manifest.auto_update, true);
+    assert.match(manifest.homePage, /^https:\/\/github\.com\/Penterson\/st-regex-perf$/);
+    assert.match(read('CHANGELOG.md'), new RegExp(`^## ${manifest.version.replace(/\./g, '\\.')} — \\d{4}-\\d{2}-\\d{2}$`, 'm'), 'the changelog has an entry for this version');
+    for (const shot of ['docs/screenshot-desktop.png', 'docs/screenshot-mobile.png']) {
+        assert.ok(read(shot).length > 10000, shot);
+        for (const readme of ['README.md', 'README.en.md']) assert.ok(read(readme).includes(`src="${shot}"`), `${readme} shows ${shot}`);
+    }
 });
 
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
