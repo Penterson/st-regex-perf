@@ -8,7 +8,7 @@ export const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
 /** Asserts two record lists ([label, value][]) are identical, naming the first differing record. */
-export function sameRecords(a, b, what, skip = () => false) {
+function sameRecords(a, b, what, skip = () => false) {
     assert.equal(a.length, b.length, `${what}: record count`);
     let compared = 0;
     for (let i = 0; i < a.length; i++) {
@@ -23,11 +23,11 @@ export function sameRecords(a, b, what, skip = () => false) {
 }
 
 for (const profile of ['default', 'allOn', 'allOff', 'tinyMemo', 'compromise']) {
-    test(`equivalence (${profile}): main and this branch give SillyTavern's own output`, async ({ each }) => {
+    test(`equivalence (${profile}): baseline and current give SillyTavern's own output`, async ({ each }) => {
         const r = await each('equivalence', { profile });
         const live = (label) => label.startsWith('live display');
-        // With streaming skip on, display scripts are skipped while live by design: compare those renders with main
-        // only (compromise mode, new on this branch, formats them partially: compare it with neither).
+        // With streaming skip on, display scripts are skipped while live by design: compare those renders with the
+        // baseline only (compromise mode, which the baseline lacks, formats them partially: compare it with neither).
         const vsNone = profile === 'allOff' ? () => false : live;
         const n = sameRecords(r.none.records, r.current.records, 'none vs current', vsNone);
         sameRecords(r.baseline.records, r.current.records, 'baseline vs current', profile === 'compromise' ? live : () => false);
@@ -52,28 +52,28 @@ test('harness: every variant boots and the extension patches the engine', async 
 test('item 1: case-insensitive prefilter decides like the regex engine (σ/Σ/ς, µ/μ, ſ)', async ({ each }) => {
     const r = await each('caseFold');
     assert.deepEqual(r.none, ['ΟΔΟ[sigma]', 'οδο[sigma]', 'a 5[micrometre] grain', '[sun]day', '[sophia]']);
-    assert.notDeepEqual(r.baseline, r.none, 'main skips these (bug reproduced)');
+    assert.notDeepEqual(r.baseline, r.none, 'baseline skips these (bug reproduced)');
     assert.deepEqual(r.current, r.none);
 });
 
 test('item 2: an edited replacement is used after a chat reload or preset switch without clear()', async ({ each }) => {
     const r = await each('staleEdit');
     assert.deepEqual(r.none, ['A there', 'B there', 'C there']);
-    assert.notDeepEqual(r.baseline, r.none, 'main returns the old cached output (bug reproduced)');
+    assert.notDeepEqual(r.baseline, r.none, 'baseline returns the old cached output (bug reproduced)');
     assert.deepEqual(r.current, r.none);
 });
 
 test('item 3: matched text containing {{macros}} or <USER> is not served from the memo', async ({ each }) => {
     const r = await each('macroInMatch');
     assert.deepEqual(r.none, ['Hi (Ann) and (Ann)', 'Hi Ann', ' waves', 'Hi (Bob) and (Bob)', 'Hi Bob', 'Cat waves', 'Roll (1)', 'Roll (2)']);
-    assert.notDeepEqual(r.baseline, r.none, 'main reuses the first result (bug reproduced)');
+    assert.notDeepEqual(r.baseline, r.none, 'baseline reuses the first result (bug reproduced)');
     assert.deepEqual(r.current, r.none);
 });
 
-test('item 4: ⑧ persisted display output refreshes after a persona or character rename', async ({ each }) => {
+test('item 4: ⑤ persisted display output refreshes after a persona or character rename', async ({ each }) => {
     const r = await each('persistNames');
     assert.deepEqual(r.none, ['Ann and Cat  waves', 'Ann and Cat  waves', 'Bob and Cat  waves', 'Bob and Kit Cat waves']);
-    assert.notDeepEqual(r.baseline, r.none, 'main keeps the old names (bug reproduced)');
+    assert.notDeepEqual(r.baseline, r.none, 'baseline keeps the old names (bug reproduced)');
     assert.deepEqual(r.current, r.none);
 });
 
@@ -82,12 +82,12 @@ test('item 5: escaped-substitution scripts are recognized, memoized and stream-s
     assert.equal(r.none.first, '<b>hello</b>');
     assert.equal(r.current.first, r.none.first);
     assert.equal(r.none.live, '<b>hello</b>');
-    // main: unknown script, so no memo and no streaming skip
+    // baseline: unknown script, so no memo and no streaming skip
     assert.ok(r.baseline.second > 0);
     assert.equal(r.baseline.live, '<b>hello</b>');
     assert.match(r.baseline.report, /\(알 수 없음\)/);
-    assert.match(r.baseline.report, /^\d+ \| \(알 수 없음\) \|.*\| - \|/m, 'main shows no literal for the unknown /abc/');
-    // this branch: second render is a memo hit, display script skipped while streaming, named row, real literal
+    assert.match(r.baseline.report, /^\d+ \| \(알 수 없음\) \|.*\| - \|/m, 'baseline shows no literal for the unknown /abc/');
+    // current: second render is a memo hit, display script skipped while streaming, named row, real literal
     assert.equal(r.current.second, 0);
     assert.equal(r.current.live, 'Dr. A (B): hello');
     assert.match(r.current.report, /^\d+ \| Escaped char \|/m);
@@ -104,9 +104,9 @@ test('item 8: extractNeedle cases and differential fuzz in Chrome (prefilter nev
 test('item 8: group and alternation literals prefilter; optional astral characters under u are not needles', async ({ each }) => {
     const r = await each('needleCoverage');
     assert.deepEqual(r.none.out, ['He said <q>hi</q> and left.', 'a b ']);
-    assert.notDeepEqual(r.baseline.out, r.none.out, 'main skips the 💬? script (bug reproduced)');
+    assert.notDeepEqual(r.baseline.out, r.none.out, 'baseline skips the 💬? script (bug reproduced)');
     assert.deepEqual(r.current.out, r.none.out);
-    assert.ok(r.baseline.groupRuns > 0 && r.baseline.altRuns > 0, 'main has no needle for these');
+    assert.ok(r.baseline.groupRuns > 0 && r.baseline.altRuns > 0, 'baseline has no needle for these');
     assert.equal(r.current.groupRuns, 0, 'group literal prefilters');
     assert.equal(r.current.altRuns, 0, 'alternation prefilters');
 });
@@ -114,7 +114,7 @@ test('item 8: group and alternation literals prefilter; optional astral characte
 test('item 6: the memo has a memory budget with LRU eviction', async ({ each }) => {
     const r = await each('memoBudget');
     for (const v of ['none', 'baseline', 'current']) assert.ok(r[v].ok, `${v} output`);
-    assert.equal(r.baseline.runsFirst, 0, 'main keeps all 100 x 10k-char entries (count cap only)');
+    assert.equal(r.baseline.runsFirst, 0, 'baseline keeps all 100 x 10k-char entries (count cap only)');
     assert.equal(r.current.runsFirst, 1, 'the oldest entry was evicted by the 1 MB budget');
     assert.equal(r.current.runsLast, 0, 'the newest entry is still cached');
 });
@@ -122,31 +122,31 @@ test('item 6: the memo has a memory budget with LRU eviction', async ({ each }) 
 test('item 7: no getContext() per display script outside a generation; exact check during one', async ({ each }) => {
     const r = await each('streamingCheck');
     assert.deepEqual([r.none.idle, r.none.live, r.none.finished, r.none.afterStop], ['AB', 'AB', 'AB', 'AB']);
-    assert.ok(r.baseline.idleContexts > 0, 'main builds the context for every display script');
+    assert.ok(r.baseline.idleContexts > 0, 'baseline builds the context for every display script');
     assert.equal(r.current.idleContexts, 0);
     assert.equal(r.current.dryRunContexts, 0, 'dry runs never stream');
     assert.equal(r.current.idle, 'AB');
     assert.equal(r.current.live, 'ab', 'display scripts are skipped while the stream is live');
     assert.equal(r.current.finished, 'AB');
-    assert.equal(r.baseline.afterStop, 'ab', 'main keeps skipping after the generation stopped');
+    assert.equal(r.baseline.afterStop, 'ab', 'baseline keeps skipping after the generation stopped');
     assert.equal(r.current.afterStop, 'AB', 'finished messages get their display scripts');
 });
 
 test('extra: scripts sharing a pattern keep their own replacement and streaming behavior', async ({ each }) => {
     const r = await each('sharedPattern');
     assert.deepEqual(r.none, ['A  B', 'A <details><thinking>x</thinking></details> B', 'bar']);
-    assert.notDeepEqual(r.baseline, r.none, 'main serves one script the other one\'s memo entry (bug reproduced)');
+    assert.notDeepEqual(r.baseline, r.none, 'baseline serves one script the other one\'s memo entry (bug reproduced)');
     assert.deepEqual(r.current, r.none);
 });
 
-test('extra: ⑧ persisted display output refreshes when the message depth or a script\'s placement changes', async ({ each }) => {
+test('extra: ⑤ persisted display output refreshes when the message depth or a script\'s placement changes', async ({ each }) => {
     const r = await each('persistDepth');
     assert.deepEqual(r.none, ['Hi <meter>', 'Yo!', 'Hi [HP]', 'Next <meter>', 'Yo!!']);
-    assert.notDeepEqual(r.baseline, r.none, 'main shows the stored depth-0 output and the old placement (bug reproduced)');
+    assert.notDeepEqual(r.baseline, r.none, 'baseline shows the stored depth-0 output and the old placement (bug reproduced)');
     assert.deepEqual(r.current, r.none);
 });
 
-/** Baseline Korean text that this branch replaces on purpose (the panel redesign, renumbered features). */
+/** Baseline Korean text replaced on purpose (the panel redesign, renumbered features). */
 const KO_CHANGED = [
     /표시용 #, 프롬프트용 #/, // the summary now counts scripts by origin (global / preset / scoped)
     /^(회 \/|ms · 프리필터 스킵|· 캐시 히트|· 스트리밍 스킵|· 영구캐시 히트|· 절약 추정 ≈|ms|· 채팅 #개)$/, // the run counters are tiles now
@@ -157,13 +157,13 @@ const changed = (text) => KO_CHANGED.some(x => (x instanceof RegExp ? x.test(tex
 // Words the Korean UI keeps in English: product and SillyTavern setting names, units, the test's script names.
 const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|markdownOnly|staging|extra|regexperf|reset|text|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b/g;
 
-test('item 17: Korean locale keeps main\'s Korean UI text; nothing is left untranslated', async ({ each }) => {
+test('item 17: Korean locale keeps the baseline\'s Korean UI text; nothing is left untranslated', async ({ each }) => {
     const r = await each('uiTexts', null, { locale: 'ko-kr', variants: ['baseline', 'current'] });
-    // timings differ between runs; features were renumbered ① ② ③ ④ ⑤ in screen order (main: ① ④ ② ⑥ ⑧)
+    // timings differ between runs; features were renumbered ① ② ③ ④ ⑤ in screen order (baseline: ① ④ ② ⑥ ⑧)
     const norm = (s) => s.replace(/\d+(?:\.\d+)?/g, '#').replace(/[①②③④⑤⑥⑦⑧]/g, '').trim();
     const now = new Set(r.current.texts.map(norm));
     const missing = r.baseline.texts.map(norm).filter(s => !now.has(s) && !changed(s) && /[가-힣]/.test(s));
-    assert.deepEqual(missing, [], 'Korean panel strings from main that are gone');
+    assert.deepEqual(missing, [], 'Korean panel strings from the baseline that are gone');
     const report = r.current.report.replace(/[①②③④⑤⑥⑦⑧]/g, '#');
     for (const line of r.baseline.report.split('\n').slice(1)) {
         const fixed = line.replace(/\d[\d.:/ ]*|"[^"]*"|[①②③④⑤⑥⑦⑧]/g, '#').split(/[#|]/).map(s => s.trim()).filter(s => /[가-힣]/.test(s) && !/표시용|프롬프트용/.test(s));
@@ -193,7 +193,7 @@ test('item 17: every Korean string resolves under SillyTavern\'s real ko-kr.json
 
 test('item 9: "Measure on this chat" renders with the features off and on and shows the time saved', async ({ each }) => {
     const r = await each('measure', null, { variants: ['baseline', 'current'] });
-    assert.equal(r.baseline, null, 'main has no such button');
+    assert.equal(r.baseline, null, 'baseline has no such button');
     const m = /\((\d+)\D+\): ([\d.]+) ms .*?, ([\d.]+) ms .*?([-\d.]+) ms .*?\(([-\d]+)%\)/.exec(r.current.text);
     assert.ok(m, r.current.text);
     const [messages, off, on, saved, pct] = m.slice(1).map(Number);
@@ -255,7 +255,7 @@ test('item 14: a table row opens its script in the regex editor; its off button 
     assert.equal(r.current.unknownHasActions, false, 'patterns that are not scripts get no actions');
 });
 
-test('item 15: memo and ⑧ limits are editable (validated) and memo / ⑧ usage is shown', async ({ each }) => {
+test('item 15: memo and ⑤ limits are editable (validated) and memo / ⑤ usage is shown', async ({ each }) => {
     const r = await each('limits', null, { variants: ['baseline', 'current'] });
     assert.deepEqual(r.baseline.found, [false, false, false, false]);
     assert.deepEqual(r.current.found, [true, true, true, true]);
@@ -276,11 +276,11 @@ test('item 16: streaming compromise mode formats completed lines at most every N
         final,
     ]);
     assert.deepEqual(off.none.filter(x => typeof x === 'number'), [1, 1, 1, 1], 'plain SillyTavern formats every chunk');
-    assert.deepEqual(off.current, off.baseline, 'off by default: same as main (display scripts skipped while live)');
+    assert.deepEqual(off.current, off.baseline, 'off by default: same as the baseline (display scripts skipped while live)');
     assert.equal(off.current.at(-1), final);
 });
 
-test('unchanged vs main: settings, controls, toggles, /regexperf and ⑧ clearing behave as before', async ({ each }) => {
+test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
         const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs'];
@@ -291,7 +291,7 @@ test('unchanged vs main: settings, controls, toggles, /regexperf and ⑧ clearin
         assert.deepEqual(r.current.checked, r.baseline.checked);
         assert.deepEqual(r.current.toggled, r.baseline.toggled);
         assert.deepEqual(r.current.stored, r.baseline.stored);
-        if (locale === 'ko-kr') { // main's UI is Korean in every locale
+        if (locale === 'ko-kr') { // the baseline's UI is Korean in every locale
             assert.deepEqual(r.current.cleared, r.baseline.cleared);
             assert.deepEqual(r.current.slash, r.baseline.slash);
         } else {
@@ -303,7 +303,7 @@ test('unchanged vs main: settings, controls, toggles, /regexperf and ⑧ clearin
     }
 });
 
-test('unchanged vs main: saved user settings are kept as they are', async ({ each }) => {
+test('unchanged vs baseline: saved user settings are kept as they are', async ({ each }) => {
     const saved = { profiler: false, prefilter: false, memo: false, memoMaxEntries: 10, memoMaxLen: 99, streamingSkip: false, persist: true, persistMaxLen: 7 };
     const r = await each('ux', null, { settings: saved, variants: ['baseline', 'current'] });
     for (const [k, v] of Object.entries(saved)) {
@@ -313,7 +313,7 @@ test('unchanged vs main: saved user settings are kept as they are', async ({ eac
     assert.deepEqual(r.current.checked, r.baseline.checked);
 });
 
-test('unchanged vs main: without MessageFormatter hooks ⑧ is disabled with a note', async ({ each }) => {
+test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with a note', async ({ each }) => {
     const r = await each('ux', null, { hooks: false, variants: ['baseline', 'current'] });
     assert.deepEqual(r.current.checked, r.baseline.checked);
     assert.equal(r.current.checked.rpk_persist.disabled, true);

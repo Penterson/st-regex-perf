@@ -1,4 +1,5 @@
-// Timing comparison of no extension / main / the working tree (median of 7 fresh pages each). Not a pass/fail test.
+// Timing comparison of no extension / the baseline commit / the working tree (median of 7 fresh pages each).
+// Not a pass/fail test.
 // "save": getRegexedString() on 1500 unique inputs (the memo never hits); "display": messageFormatting() over a
 // 240-message chat, first render (cold), re-render (warm), and the save path on it.
 import puppeteer from 'puppeteer-core';

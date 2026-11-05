@@ -64,7 +64,6 @@ No SillyTavern core file is modified.
 - ⑤ can make chat files larger. "Clear persistent cache (this chat)" removes its entries.
 - ⑤ stores display results, so values such as `{{random}}`, `{{time}}` or `{{getvar}}` in display scripts show what they were
   when stored. Script changes, renames (`{{user}}`/`{{char}}`) and message depth (min/max depth) are picked up automatically.
-  This version changes the storage key, so existing ⑤ entries are recomputed once.
 - If a SillyTavern version has no `RegexProvider`, patching fails and the panel shows a warning (everything stays off, no side effects).
 
 ## Development

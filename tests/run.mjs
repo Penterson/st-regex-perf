@@ -1,5 +1,6 @@
 // Browser tests: boots the harness in headless Chrome once per variant and compares what SillyTavern's real
-// regex engine produces with no extension ("none"), with main ("baseline") and with the working tree ("current").
+// regex engine produces with no extension ("none"), with the BASELINE commit ("baseline") and with the working
+// tree ("current").
 // Usage: node tests/run.mjs [name regex]   Chrome: $CHROME_PATH, else google-chrome / chromium on PATH.
 import puppeteer from 'puppeteer-core';
 import { fetchSt } from './fetch-st.mjs';
