@@ -643,6 +643,28 @@ export async function limits(h) {
     return { found, values, usage: root.querySelector('#rpk_usage')?.textContent ?? '' };
 }
 
+/** ③ hashed keys: with the Limits toggle on, entries hold no input (half the memory) and still serve exact results. */
+export async function memoHash(h) {
+    const root = document.getElementById('regex_perf_kit');
+    const box = root.querySelector('#rpk_memoHashKeys');
+    if (!box) return null;
+    await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y' })]);
+    const long = 'x'.repeat(10000);
+    const inputs = Array.from({ length: 20 }, (_, i) => `${String(i).padStart(2, '0')} ${long}`); // same length, different text
+    const usage = () => Number(/cache: \d+ entries, ([\d.]+) of/.exec((root.querySelector('#rpk_refresh').click(), root.querySelector('#rpk_usage').textContent))[1]);
+    const run = (str) => executionsBySource(() => h.engine.getRegexedString(str, P.AI)).x ?? 0;
+    const plain = { out: inputs.map(str => h.engine.getRegexedString(str, P.AI)) };
+    plain.rerun = inputs.map(run);
+    plain.mb = usage();
+    box.checked = true;
+    box.dispatchEvent(new Event('change'));
+    const hashed = { cleared: run(inputs[0]), out: inputs.map(str => h.engine.getRegexedString(str, P.AI)) };
+    hashed.rerun = inputs.map(run);
+    hashed.mb = usage();
+    hashed.setting = h.extension_settings.regex_perf_kit.memoHashKeys;
+    return { plain, hashed };
+}
+
 /** ⑤ key: two same-length messages with the same fnv1a hash must not share a stored result; old keys are recomputed. */
 export async function persistKey(h) {
     applyProfile(h, { persist: true });
