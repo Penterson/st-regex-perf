@@ -135,7 +135,7 @@ test('AND prefilter: every mandatory literal must be present; messages shorter t
     const rows = reportRows(r.current.report);
     assert.equal(row(rows, 'Both').Literal, '"xab" & "aby"');
     assert.equal(row(rows, 'Both')['Min length'], '4');
-    assert.equal(row(rows, 'Five').Literal, '-');
+    assert.match(row(rows, 'Five').Literal, /^- \(Only classes/);
     assert.equal(row(rows, 'Five')['Min length'], '5');
     assert.equal(row(rows, 'Tag').Literal, '"</status>" & "<status>"');
     assert.equal(row(rows, 'Tag')['Min length'], '17');
@@ -216,6 +216,16 @@ test('numbers: the panel never shows a saved-time estimate without measured runs
     assert.match(r.current.after.figures.saved, /^[\d.]+ ms$/);
     assert.equal(r.current.after.figures.runs, '2');
     assert.doesNotMatch(r.current.after.panel, /\b0\.00\b/, 'exact zeros are shown as 0');
+});
+
+test('missing literals are explained: the Literal cell tooltip and the report say why ② cannot prefilter', async ({ each }) => {
+    const en = await each('uiTexts', null, { locale: 'en', variants: ['current'] });
+    assert.match(en.current.litTitles.Digits, /^Only classes, escapes or wildcards: no literal character\nShortest possible match: 1 characters/);
+    assert.equal(en.current.litTitles.Greedy, 'Shortest possible match: 2 characters. ② skips shorter messages.');
+    assert.equal(row(reportRows(en.current.report), 'Digits').Literal, '- (Only classes, escapes or wildcards: no literal character)');
+    const ko = await each('uiTexts', null, { locale: 'ko-kr', variants: ['current'] });
+    assert.match(ko.current.litTitles.Digits, /^문자 클래스/);
+    assert.match(reportRows(ko.current.report).find(x => x['스크립트'] === 'Digits')['리터럴'], /^- \(문자 클래스/);
 });
 
 test('item 17: English locale shows no Korean', async ({ each }) => {

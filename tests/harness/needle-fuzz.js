@@ -73,6 +73,25 @@ export const TERMS = [
     ['\\d{5}', '', []],
 ];
 
+/** [pattern, flags, expected reason code for having no needle (null: it has one)] */
+export const REASONS = [
+    ['abc', '', null],
+    ['', '', 'empty'],
+    ['\\d+', '', 'class-only'],
+    ['[abc].*', 'g', 'class-only'],
+    ['a*', '', 'optional'],
+    ['(?:abc)?\\d', '', 'optional'],
+    ['(?=abc)\\w+', '', 'lookaround'],
+    ['(?<!x)\\d', '', 'lookaround'],
+    ['foo|\\d+', '', 'branch'],
+    ['(?:foo|\\d+)\\s', '', 'branch'],
+    ['foo|', '', 'branch'],
+    [Array.from({ length: 17 }, (_, k) => 'w' + k).join('|'), '', 'too-many'],
+    ['abc', 'v', 'v-flag'],
+    ['x(?i:abc)', '', 'case-modifier'],
+    ['(\\p{a)|b}', 'u', 'syntax'],
+];
+
 /** [pattern, flags, expected minimum match length in UTF-16 units] */
 export const MINLEN = [
     ['\\d{5}', '', 5],
@@ -132,6 +151,10 @@ export function runCases(extractNeedle) {
         const got = extractNeedle(source, flags).terms;
         if (!same(got, want)) throw new Error(`extractNeedle(/${source}/${flags}).terms = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
     }
+    for (const [source, flags, want] of REASONS) {
+        const got = extractNeedle(source, flags).reason;
+        if (got !== want) throw new Error(`extractNeedle(/${source}/${flags}).reason = ${got}, want ${want}`);
+    }
     for (const [source, flags, want] of MINLEN) {
         const got = extractNeedle(source, flags).minLen;
         if (got !== want) throw new Error(`extractNeedle(/${source}/${flags}).minLen = ${got}, want ${want}`);
@@ -144,7 +167,7 @@ export function runCases(extractNeedle) {
         }
         if (want > 0 && re.test('x'.repeat(want - 1))) throw new Error(`/${source}/${flags} matches a string shorter than ${want}`);
     }
-    return { checked: CASES.length + NESTED.length + TERMS.length + MINLEN.length - unsupported.length, unsupported };
+    return { checked: CASES.length + NESTED.length + TERMS.length + REASONS.length + MINLEN.length - unsupported.length, unsupported };
 }
 
 // Characters whose case folding differs between toLowerCase() and the regex engine, astral characters, syntax

@@ -91,21 +91,24 @@ const BAIL = Symbol('bail');
 /**
  * Parses a pattern once. Every match contains, for each of terms, at least one of its literals (a one-literal term
  * is a mandatory run, a longer one comes from an alternation) and is at least minLen UTF-16 units long; test(str)
- * checks both, needles is the single best term (null if none is certain). nested: an unbounded quantifier inside an
- * unboundedly repeated group, e.g. (a+)+.
+ * checks both, needles is the single best term (null if none is certain, with a NEEDLE_REASONS code in reason).
+ * nested: an unbounded quantifier inside an unboundedly repeated group, e.g. (a+)+.
  * Conservative: classes, class escapes, backreferences, lookarounds and modifier groups contribute no literal, and
  * patterns with the v flag or a case modifier ((?i:), (?-i:)) get nothing at all. Literals in groups that must
  * match join the surrounding run; an alternation yields one literal per branch (any of them must occur), provided
  * every branch has one.
  * @param {string} source RegExp.source
  * @param {string} flags RegExp.flags
- * @returns {{needles: string[] | null, terms: string[][], minLen: number, test: ((str: string) => boolean) | null, nested: boolean}}
+ * @returns {{needles: string[] | null, reason: string | null, terms: string[][], minLen: number, test: ((str: string) => boolean) | null, nested: boolean}}
  */
 export function extractNeedle(source, flags) {
     const u = flags.includes('u');
     const n = source.length;
     let i = 0;
     let nested = false;
+    let lits = 0; // literal characters outside lookarounds and modifier groups
+    let opaqueLits = 0; // literal characters inside them
+    let opaque = 0; // depth inside such groups
 
     // Quantifier at i, with its lazy '?': {min, inf} or null.
     const quant = () => {
@@ -146,7 +149,7 @@ export function extractNeedle(source, flags) {
                 return none;
             }
             if ('pPku'.includes(nx) && (source[i] === '{' || source[i] === '<')) { // \p{..} \u{..} \k<..>
-                if (!u && nx !== 'k') return { lit: nx, len: 1 }; // without u, the letter itself; a {..} after it is a quantifier
+                if (!u && nx !== 'k') return literal(nx); // without u, the letter itself; a {..} after it is a quantifier
                 const e = source.indexOf(source[i] === '<' ? '>' : '}', i + 1); // skip the argument
                 if (e !== -1) {
                     if (/[|()[\]\\]/.test(source.slice(i + 1, e))) throw BAIL; // without u these are literals around real syntax
@@ -161,14 +164,13 @@ export function extractNeedle(source, flags) {
                     i += hex;
                     return one;
                 }
-                return u ? one : { lit: nx, len: 1 };
+                return u ? one : literal(nx);
             }
             if (nx === 'c') {
                 if (/[a-zA-Z]/.test(source[i] ?? '')) i++;
                 return one;
             }
-            const lit = CONTROL_ESCAPES[nx] ?? nx; // \n \t \r \f \v, or an escaped character
-            return { lit, len: lit.length };
+            return literal(CONTROL_ESCAPES[nx] ?? nx); // \n \t \r \f \v, or an escaped character
         }
         if (c === '[') {
             let j = i + 1;
@@ -183,7 +185,7 @@ export function extractNeedle(source, flags) {
         }
         if (c === '(') {
             i++;
-            let opaque = false;
+            let hidden = false; // lookarounds and modifier groups contribute no literal
             let zero = false;
             if (source[i] === '?') {
                 i++;
@@ -193,16 +195,18 @@ export function extractNeedle(source, flags) {
                     const e = source.indexOf('>', i);
                     i = e === -1 ? n : e + 1;
                 } else { // (?= (?! (?<= (?<! lookarounds, (?i: (?-s: modifiers
-                    opaque = true;
+                    hidden = true;
                     const m = /^(?:<?[=!]|[a-z]*(?:-[a-z]*)?:)/.exec(source.slice(i, i + 16));
                     zero = !!m && !m[0].endsWith(':');
                     i += m ? m[0].length : 0;
                 }
             }
+            if (hidden) opaque++;
             const group = alternation();
+            if (hidden) opaque--;
             if (source[i] !== ')') throw BAIL;
             i++;
-            return { group, opaque, zero };
+            return { group, opaque: hidden, zero };
         }
         if (c === '^' || c === '$') {
             i++;
@@ -215,7 +219,11 @@ export function extractNeedle(source, flags) {
         const start = i;
         const pair = u && c >= '\uD800' && c <= '\uDBFF' && source[i + 1] >= '\uDC00' && source[i + 1] <= '\uDFFF';
         i += pair ? 2 : 1;
-        const lit = source.slice(start, i); // with u, a surrogate pair is one character
+        return literal(source.slice(start, i)); // with u, a surrogate pair is one character
+    };
+    const literal = (lit) => {
+        if (opaque) opaqueLits++;
+        else lits++;
         return { lit, len: lit.length };
     };
 
@@ -228,6 +236,7 @@ export function extractNeedle(source, flags) {
         let best = null;
         let inf = false;
         let len = 0;
+        let why = null; // why a mandatory group inside has no needle
         const terms = [];
         const consider = (set) => { if (set && better(set, best)) best = set; };
         const end = () => {
@@ -260,6 +269,7 @@ export function extractNeedle(source, flags) {
                         terms.push(...g.terms);
                         cur = g.suf;
                     }
+                    why ??= g.why;
                 }
             } else {
                 len += a.len * reps;
@@ -277,7 +287,7 @@ export function extractNeedle(source, flags) {
         const full = pre === null;
         const suf = cur;
         end();
-        return { pre, suf, full, best, inf, len, terms };
+        return { pre, suf, full, best, inf, len, terms, why: best ? null : why };
     };
 
     const alternation = () => {
@@ -289,24 +299,29 @@ export function extractNeedle(source, flags) {
         if (seqs.length === 1) return seqs[0];
         const union = seqs.every(s => s.best) ? [...new Set(seqs.flatMap(s => s.best))] : null;
         const best = union?.length <= 16 ? union : null;
-        return { pre: '', suf: '', full: false, best, inf: seqs.some(s => s.inf), len: Math.min(...seqs.map(s => s.len)), terms: best ? [best] : [] };
+        const why = best ? null : union ? 'too-many' : 'branch';
+        return { pre: '', suf: '', full: false, best, inf: seqs.some(s => s.inf), len: Math.min(...seqs.map(s => s.len)), terms: best ? [best] : [], why };
     };
 
     let top = null;
+    let reason = null;
     try {
         // (?i:) / (?-i:) groups: V8 (13.x) has been seen to match literals outside such a group case-insensitively
         // after many regexes ran in the same page, which the spec does not allow. Such patterns are left to the engine.
-        if (flags.includes('v') || /\(\?[a-z-]*i[a-z-]*:/.test(source)) throw BAIL;
+        if (flags.includes('v')) reason = 'v-flag';
+        else if (/\(\?[a-z-]*i[a-z-]*:/.test(source)) reason = 'case-modifier';
+        if (reason) throw BAIL;
         top = alternation();
         if (i < n) throw BAIL;
     } catch (e) {
         if (e !== BAIL) throw e;
     }
-    if (!top) return { needles: null, terms: [], minLen: 0, test: null, nested };
+    if (!top) return { needles: null, reason: reason ?? 'syntax', terms: [], minLen: 0, test: null, nested };
     const terms = pruneTerms(top.terms);
     const minLen = top.len;
     const needles = top.best;
-    if (!terms.length && !minLen) return { needles, terms, minLen, test: null, nested };
+    if (!needles) reason = !source ? 'empty' : top.why ?? (lits ? 'optional' : opaqueLits ? 'lookaround' : 'class-only');
+    if (!terms.length && !minLen) return { needles, reason, terms, minLen, test: null, nested };
     let has;
     if (!terms.length) {
         has = null;
@@ -322,8 +337,22 @@ export function extractNeedle(source, flags) {
         has = (str) => terms.every(set => set.some(s => str.includes(s)));
     }
     const test = !minLen ? has : !has ? (str) => str.length >= minLen : (str) => str.length >= minLen && has(str);
-    return { needles, terms, minLen, test, nested };
+    return { needles, reason, terms, minLen, test, nested };
 }
+
+/** Why a pattern has no needle (extractNeedle().reason), in words. */
+const NEEDLE_REASONS = {
+    'v-flag': () => t`Patterns with the v flag are not analyzed`,
+    'case-modifier': () => t`Patterns with a case modifier group such as (?i:) are not analyzed`,
+    'syntax': () => t`Unsupported syntax: the pattern could not be analyzed`,
+    'empty': () => t`Empty pattern`,
+    'branch': () => t`An alternation branch has no literal, so no single literal is certain`,
+    'too-many': () => t`The alternation has more than 16 literals`,
+    'class-only': () => t`Only classes, escapes or wildcards: no literal character`,
+    'lookaround': () => t`Literals occur only inside lookarounds or modifier groups`,
+    'optional': () => t`Every literal is optional or repeated zero or more times`,
+};
+const needleReason = (r) => (r.needle?.reason ? NEEDLE_REASONS[r.needle.reason]() : '');
 
 /**
  * Drops terms another term implies (a literal inside a longer mandatory literal, an alternation one of whose
@@ -819,7 +848,7 @@ function buildReportText() {
     if (s.ineffective.length) lines.push(t`Candidates to disable (ran ${INEFFECTIVE_RUNS}+ times, never changed the text): ${s.ineffective.join(', ')}`);
     lines.push('', t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`);
     s.rows.forEach((r, i) => {
-        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${fmtMs(r.replMs)} | ${r.changed} | ${r.skipped} | ${r.hits} | ${r.streamSkipped} | ${fmtNeedles(r) ?? '-'} | ${r.needle?.minLen || '-'} | ${warnings(r).join(', ')}`);
+        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${fmtMs(r.replMs)} | ${r.changed} | ${r.skipped} | ${r.hits} | ${r.streamSkipped} | ${fmtNeedles(r) ?? '- (' + needleReason(r) + ')'} | ${r.needle?.minLen || '-'} | ${warnings(r).join(', ')}`);
     });
     return lines.join('\n');
 }
@@ -989,6 +1018,11 @@ function setContent(el, value, prop = 'innerHTML') {
     el[prop] = value;
 }
 
+/** The Literal cell's tooltip: why there is no literal, and the shortest possible match. */
+const litTitle = (r) => [
+    !fmtNeedles(r) && needleReason(r),
+    r.needle?.minLen && t`Shortest possible match: ${r.needle.minLen} characters. ② skips shorter messages.`,
+].filter(Boolean).join('\n');
 /** A key figure in the summary; the tests read it by its key. */
 const fig = (key, value) => `<b data-k="${key}">${value}</b>`;
 
@@ -1032,7 +1066,7 @@ function renderPanel() {
           ${td('rank', i + 1)}${td('name', esc(r.name) + warnings(r, true).join(''))}
           ${td('runs', r.calls)}${td('total', fmtMs(r.totalMs))}${td('avg', fmtMs(avgMs(r)))}${td('max', fmtMs(r.maxMs))}
           ${td('repl', fmtMs(r.replMs))}${td('changed', r.changed)}
-          ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', fmtNeedles(r) ? esc(fmtNeedles(r)) : `<span class="rpk-dim">${t`none`}</span>`, 'rpk-lit', r.needle?.minLen ? t`Shortest possible match: ${r.needle.minLen} characters. ② skips shorter messages.` : '')}
+          ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', fmtNeedles(r) ? esc(fmtNeedles(r)) : `<span class="rpk-dim">${t`none`}</span>`, 'rpk-lit', litTitle(r))}
           ${td('act', actions, 'rpk-act')}
         </tr>`;
     }).join('') || `<tr><td colspan="12" class="rpk-dim rpk-empty">${t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
