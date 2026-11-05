@@ -33,6 +33,7 @@ const defaultSettings = {
     persist: false,
     persistMaxLen: 60000,
     persistMaxMB: 8, // ⑤ per chat; beyond it, the oldest messages' results are dropped
+    memoHashKeys: false, // ③ keyed by hash64(input) + length instead of the input: half the memory, see the Limits note
 };
 
 // ST keeps this object for the whole session, so it is resolved once instead of on every replace.
@@ -539,9 +540,11 @@ const conflicts = new Map(); // "earlierKey\0laterKey" -> {earlier, later, count
 let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
 let displayPass = false; // set by the formatter hooks while a message is being formatted for display
 
-// ③ Memo: memoPrefix -> Map(input -> entry). Keying by the input string itself (its hash is cached and the same
-// string object flows through consecutive scripts) avoids building a new key per call. memoLru orders all
-// entries, least recently used first; memoBytes is their estimated size (2 bytes per UTF-16 unit).
+// ③ Memo: memoPrefix -> Map(key -> entry). The key is the input string itself (its hash is cached and the same
+// string object flows through consecutive scripts, so no key is built per call) or, with memoHashKeys, its 64-bit
+// hash and length: the entry then holds no input, which halves the memory, at the cost of hashing every input and
+// of trusting 64 bits + length to tell inputs apart (a collision would return another input's result). memoLru
+// orders all entries, least recently used first; memoBytes is their estimated size (2 bytes per UTF-16 unit).
 const memo = new Map();
 const memoLru = new Set();
 let memoBytes = 0;
@@ -557,7 +560,7 @@ function trimMemo() {
     while (memoLru.size && (memoLru.size > settings.memoMaxEntries || memoBytes > maxBytes)) {
         const old = memoLru.values().next().value;
         memoLru.delete(old);
-        old.bucket.delete(old.str);
+        old.bucket.delete(old.key);
         memoBytes -= old.size;
     }
 }
@@ -613,11 +616,13 @@ class PerfRegExp extends RegExp {
         }
 
         let bucket;
+        let memoKey;
         // Matched text with macros is substituted again after the groups are inserted, so it is not memoized.
         if (settings.memo && memoPrefix && str.length <= settings.memoMaxLen && !hasMacro(str)) {
             bucket = memo.get(memoPrefix);
             if (!bucket) memo.set(memoPrefix, bucket = new Map());
-            const hit = bucket.get(str);
+            memoKey = settings.memoHashKeys ? hash64(str) + ':' + str.length : str;
+            const hit = bucket.get(memoKey);
             if (hit) {
                 memoLru.delete(hit); // mark as most recently used
                 memoLru.add(hit);
@@ -662,10 +667,10 @@ class PerfRegExp extends RegExp {
         prevIn = str;
         prevOut = out;
 
-        const size = (str.length + out.length) * 2;
+        const size = ((memoKey === str ? str.length : memoKey?.length ?? 0) + out.length) * 2;
         if (bucket && size <= settings.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
-            const entry = { bucket, str, out, size };
-            bucket.set(str, entry);
+            const entry = { bucket, key: memoKey, out, size };
+            bucket.set(memoKey, entry);
             memoLru.add(entry);
             memoBytes += size;
             trimMemo();
@@ -1128,6 +1133,7 @@ const settingsHtml = () => `
           ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved in the chat.`)}
           ${limit('persistMaxMB', t`⑤ Saved results per chat (MB)`, t`Beyond this, the oldest messages' results are dropped from the chat.`)}
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
+          <label title="${t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`}"><span>${t`③ Key the cache by a hash of the input`}</span><input type="checkbox" id="rpk_memoHashKeys"></label>
         </div>
       </details>
 
@@ -1175,7 +1181,7 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist' };
+const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys' };
 // editable limits: setting -> [min, max]
 const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000] };
 
@@ -1282,7 +1288,7 @@ function bindUi() {
         el.addEventListener('change', () => {
             settings[key] = el.checked;
             ctx().saveSettingsDebounced();
-            if (key === 'memo' && !el.checked) clearMemo();
+            if ((key === 'memo' && !el.checked) || key === 'memoHashKeys') clearMemo(); // entries keyed the other way are useless
             renderPanel();
         });
     }

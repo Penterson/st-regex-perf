@@ -133,5 +133,7 @@
     "Order conflict: <b>${0}</b> runs first and removes what <b>${1}</b> looks for (${2} times). Swap them or merge them.": "순서 충돌: <b>${0}</b> 가 먼저 실행되어 <b>${1}</b> 이 찾는 글자를 지웁니다 (${2}회). 순서를 바꾸거나 하나로 합치면 됩니다.",
     "⑤ saved in this chat: ${0} messages, ≈${1} KB of ${2} MB": "⑤ 이 채팅에 저장: 메시지 ${0}개, ≈${1} KB / ${2} MB",
     "⑤ Saved results per chat (MB)": "⑤ 채팅당 저장 용량 (MB)",
-    "Beyond this, the oldest messages' results are dropped from the chat.": "초과 시 오래된 메시지의 결과부터 채팅에서 삭제."
+    "Beyond this, the oldest messages' results are dropped from the chat.": "초과 시 오래된 메시지의 결과부터 채팅에서 삭제.",
+    "③ Key the cache by a hash of the input": "③ 캐시 키를 입력의 해시로",
+    "Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.": "입력 대신 64비트 해시만 보관. 긴 채팅에서 메모리 절반, 대신 입력마다 해시 계산. 충돌(길이와 해시가 같은 두 입력)이 나면 다른 입력의 결과가 나올 수 있으나 64비트에서는 수십억 건이 필요."
 }

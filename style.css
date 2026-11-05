@@ -152,6 +152,11 @@
     margin: 2px 0;
 }
 
+.regex-perf-kit .rpk-limits input[type="checkbox"] {
+    width: auto;
+    margin-right: 2.5em;
+}
+
 /* ---- buttons ---- */
 
 .regex-perf-kit .rpk-buttons {

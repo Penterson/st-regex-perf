@@ -399,6 +399,19 @@ test('item 15: memo and ⑤ limits are editable (validated) and memo / ⑤ usage
     assert.match(r.current.usage, /in this chat: 3 messages, ≈0 KB of 8 MB/);
 });
 
+test('③ hashed keys (Limits toggle, default off): exact results from half the memory; toggling clears the cache', async ({ each }) => {
+    const r = await each('memoHash', null, { variants: ['baseline', 'current'] });
+    assert.equal(r.baseline, null, 'baseline has no such toggle');
+    const want = Array.from({ length: 20 }, (_, i) => `${String(i).padStart(2, '0')} ${'y'.repeat(10000)}`);
+    assert.deepEqual(r.current.plain.out, want);
+    assert.deepEqual(r.current.hashed.out, want, 'same-length inputs each get their own result');
+    assert.deepEqual(r.current.plain.rerun, Array(20).fill(0), 'all hits');
+    assert.deepEqual(r.current.hashed.rerun, Array(20).fill(0), 'all hits with hashed keys too');
+    assert.equal(r.current.hashed.cleared, 1, 'toggling cleared the cache: the first input ran again');
+    assert.ok(r.current.hashed.mb < r.current.plain.mb * 0.55, `half the memory: ${r.current.hashed.mb} vs ${r.current.plain.mb} MB`);
+    assert.equal(r.current.hashed.setting, true, 'saved as a setting');
+});
+
 test('⑤ key: 64 bits of the text, so same-length fnv1a collisions do not share a result; old-format entries are recomputed', async ({ each }) => {
     const r = await each('persistKey');
     assert.deepEqual(r.none.out, ['zhj0tclp', 'ti0fsnfk', 'ti0fsnfk']);
@@ -439,7 +452,7 @@ test('item 16: streaming compromise mode formats completed lines at most every N
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
