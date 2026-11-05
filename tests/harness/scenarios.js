@@ -386,6 +386,34 @@ export async function uiTexts(h) {
     };
 }
 
+/** The panel's headline numbers as shown: stat tiles by label, the estimate, the table rows and the empty-table text. */
+function panelNumbers() {
+    const root = document.getElementById('regex_perf_kit');
+    root.querySelector('#rpk_refresh').click();
+    const tiles = Object.fromEntries([...root.querySelectorAll('.rpk-stat')].map(el => [el.querySelector('.rpk-stat-label').textContent, el.querySelector('.rpk-stat-value').textContent]));
+    const rows = [...root.querySelectorAll('#rpk_table tbody tr[data-i]')];
+    return {
+        tiles,
+        saved: tiles['Time saved (estimate)'],
+        rows: rows.length,
+        skipped: rows[0]?.querySelector('.rpk-col-skips')?.textContent,
+        empty: root.querySelector('#rpk_table tbody .rpk-empty')?.textContent ?? '',
+        panel: root.querySelector('#rpk_summary').textContent + root.querySelector('#rpk_table').textContent,
+    };
+}
+
+/** Numbers that used to mislead: an estimate of 0.00 ms before anything ran, and rows for patterns that never ran. */
+export async function numbers(h) {
+    await useScripts(h, [script({ scriptName: 'Tagged', findRegex: '/<tag>/g', replaceString: '' })]);
+    h.engine.getRegexedString('', P.USER); // compiles (wraps) the pattern without running it on anything
+    const before = panelNumbers();
+    for (let i = 0; i < 3; i++) h.engine.getRegexedString(`no tag here ${i}`, P.AI); // prefiltered: skipped, never run
+    const skippedOnly = panelNumbers();
+    for (let i = 0; i < 2; i++) h.engine.getRegexedString(`<tag> ${i}`, P.AI);
+    const after = panelNumbers();
+    return { before, skippedOnly, after };
+}
+
 /** Item 17. Keys whose translation in this locale is not the expected value (e.g. SillyTavern already translates them). */
 export function translations(h, entries) {
     return entries.filter(([key, value]) => h.i18n.translate(key) !== value);

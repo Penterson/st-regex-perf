@@ -1,3 +1,9 @@
+.regex-perf-kit {
+    container-type: inline-size;
+}
+
+/* ---- summary ---- */
+
 .regex-perf-kit .rpk-summary {
     font-size: 0.9em;
     line-height: 1.5;
@@ -13,7 +19,7 @@
 
 .regex-perf-kit .rpk-stats {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
     gap: 6px;
     margin-top: 8px;
 }
@@ -25,21 +31,40 @@
     border-radius: 6px;
     background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 8%, transparent);
     line-height: 1.3;
+    min-width: 0;
+}
+
+.regex-perf-kit .rpk-stat-saved {
+    background: color-mix(in srgb, var(--okColor, #5cb85c) 18%, transparent);
 }
 
 .regex-perf-kit .rpk-stat-value {
-    font-size: 1.25em;
+    font-size: 1.3em;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
 }
 
 .regex-perf-kit .rpk-stat-label {
     font-size: 0.85em;
-    opacity: 0.75;
+    opacity: 0.8;
 }
 
+.regex-perf-kit .rpk-stat-detail {
+    font-size: 0.78em;
+    opacity: 0.6;
+    margin-top: 2px;
+    line-height: 1.35;
+}
+
+.regex-perf-kit .rpk-since {
+    font-size: 0.85em;
+    margin: 4px 0 2px;
+}
+
+/* ---- sections ---- */
+
 .regex-perf-kit .rpk-section {
-    margin: 12px 0 4px;
+    margin: 14px 0 4px;
     font-size: 0.85em;
     font-weight: 600;
     text-transform: uppercase;
@@ -47,9 +72,11 @@
     opacity: 0.7;
 }
 
+/* ---- features ---- */
+
 .regex-perf-kit .rpk-features {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
     gap: 4px 16px;
 }
 
@@ -65,6 +92,25 @@
 
 .regex-perf-kit .rpk-feature:hover {
     background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 6%, transparent);
+}
+
+.regex-perf-kit .rpk-feature-group {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+/* an option of the feature above it */
+.regex-perf-kit .rpk-feature.rpk-sub {
+    margin-left: 22px;
+    padding-top: 2px;
+    border-left: 2px solid color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 25%, transparent);
+    border-radius: 0 6px 6px 0;
+}
+
+.regex-perf-kit .rpk-feature.rpk-sub .rpk-feature-name {
+    font-weight: 500;
+    font-size: 0.95em;
 }
 
 .regex-perf-kit .rpk-feature input {
@@ -100,6 +146,12 @@
     min-height: 1em;
 }
 
+.regex-perf-kit .rpk-note:empty {
+    display: none;
+}
+
+/* ---- limits ---- */
+
 .regex-perf-kit .rpk-limits {
     margin: 8px 0 4px;
     font-size: 0.9em;
@@ -112,7 +164,7 @@
 
 .regex-perf-kit .rpk-limits .rpk-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
     gap: 2px 12px;
     margin-top: 4px;
 }
@@ -126,14 +178,17 @@
 
 .regex-perf-kit .rpk-limits input {
     width: 7em;
+    flex: 0 0 auto;
     margin: 2px 0;
 }
+
+/* ---- buttons ---- */
 
 .regex-perf-kit .rpk-buttons {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    margin: 8px 0;
+    margin: 10px 0 6px;
 }
 
 .regex-perf-kit .rpk-buttons .menu_button {
@@ -142,6 +197,22 @@
     white-space: nowrap;
     writing-mode: horizontal-tb;
 }
+
+.regex-perf-kit .rpk-buttons .rpk-primary {
+    font-weight: 600;
+    border-color: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 45%, transparent);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 10%, transparent);
+}
+
+.regex-perf-kit .rpk-measured:not(:empty) {
+    opacity: 1;
+    padding: 6px 10px;
+    border-radius: 6px;
+    border-left: 3px solid var(--okColor, #5cb85c);
+    background: color-mix(in srgb, var(--okColor, #5cb85c) 12%, transparent);
+}
+
+/* ---- table ---- */
 
 .regex-perf-kit .rpk-table-wrap {
     max-height: 320px;
@@ -171,13 +242,19 @@
     background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.6));
 }
 
-.regex-perf-kit .rpk-table th:nth-child(2),
-.regex-perf-kit .rpk-table td:nth-child(2),
-.regex-perf-kit .rpk-table .rpk-lit {
+.regex-perf-kit .rpk-table th[title] {
+    cursor: help;
+    text-decoration: underline dotted;
+    text-underline-offset: 3px;
+}
+
+.regex-perf-kit .rpk-table .rpk-col-name,
+.regex-perf-kit .rpk-table .rpk-col-lit,
+.regex-perf-kit .rpk-table .rpk-empty {
     text-align: left;
 }
 
-.regex-perf-kit .rpk-table td:nth-child(2),
+.regex-perf-kit .rpk-table td.rpk-col-name,
 .regex-perf-kit .rpk-table td.rpk-lit {
     max-width: 220px;
     overflow: hidden;
@@ -187,6 +264,11 @@
 .regex-perf-kit .rpk-table td.rpk-lit {
     max-width: 160px;
     font-family: monospace;
+}
+
+.regex-perf-kit .rpk-table td.rpk-empty {
+    white-space: normal;
+    padding: 10px 8px;
 }
 
 .regex-perf-kit .rpk-table tr.rpk-script {
@@ -200,10 +282,7 @@
 .regex-perf-kit .rpk-hot td {
     color: var(--warning, #f0a040);
     font-weight: 600;
-}
-
-.regex-perf-kit .rpk-heavy td:nth-child(2) {
-    opacity: 0.95;
+    background: color-mix(in srgb, var(--warning, #f0a040) 10%, transparent);
 }
 
 .regex-perf-kit .rpk-badge {
@@ -212,6 +291,7 @@
     padding: 0 4px;
     border-radius: 4px;
     background: rgba(240, 160, 64, 0.25);
+    cursor: help;
 }
 
 .regex-perf-kit .rpk-act span {
@@ -224,6 +304,27 @@
     opacity: 1;
 }
 
+/* Narrow drawers (phones, a slim extensions column): keep the columns that answer "what is slow and what was
+   skipped", and leave the averages, replacer time and literal to the text report. */
+@container (max-width: 560px) {
+    .regex-perf-kit .rpk-table .rpk-col-avg,
+    .regex-perf-kit .rpk-table .rpk-col-repl,
+    .regex-perf-kit .rpk-table .rpk-col-lit {
+        display: none;
+    }
+
+    .regex-perf-kit .rpk-table td.rpk-col-name {
+        max-width: 150px;
+    }
+}
+
+@container (max-width: 400px) {
+    .regex-perf-kit .rpk-table .rpk-col-changed,
+    .regex-perf-kit .rpk-table .rpk-col-max {
+        display: none;
+    }
+}
+
 .regex-perf-kit .rpk-warn {
     color: var(--warning, #f0a040);
 }
@@ -232,9 +333,15 @@
     opacity: 0.6;
 }
 
+/* ---- legend and tips ---- */
+
 .regex-perf-kit .rpk-tips {
-    margin-top: 10px;
+    margin-top: 8px;
     font-size: 0.85em;
+}
+
+.regex-perf-kit .rpk-legend {
+    margin-top: 6px;
 }
 
 .regex-perf-kit .rpk-tips ul {
