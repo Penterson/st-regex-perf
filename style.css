@@ -10,6 +10,14 @@
     padding-top: 2px;
 }
 
+/* SillyTavern rounds its buttons and fields; inside this panel they are square. */
+.regex-perf-kit .menu_button,
+.regex-perf-kit .text_pole,
+.regex-perf-kit input,
+.regex-perf-kit .rpk-table thead th {
+    border-radius: 0;
+}
+
 /* ---- summary: a few sentences ---- */
 
 .regex-perf-kit .rpk-summary {
