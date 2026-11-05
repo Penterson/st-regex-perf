@@ -702,7 +702,7 @@ function buildSummary() {
         top,
         topShare: top && total > 0 ? top.totalMs / total * 100 : 0,
         usage: t`③ memory cache: ${memoLru.size} entries, ${(memoBytes / 1048576).toFixed(1)} of ${settings.memoMaxMB} MB`
-            + (persistAvailable ? ' · ' + persistUsage(chat) : ''),
+            + (persistAvailable ? '. ' + persistUsage(chat) : ''),
     };
 }
 
@@ -726,7 +726,7 @@ const measureText = (m) => t`This chat (${m.messages} messages): ${fmtMs(m.off)}
 /** "global 3/40 · preset 2/8 · scoped 0/0": active/total per script origin. */
 const typeCounts = (c) => {
     const [g, p, s] = ['global', 'preset', 'scoped'].map(k => c.types[k] ?? { active: 0, total: 0 });
-    return [t`global ${g.active}/${g.total}`, t`preset ${p.active}/${p.total}`, t`scoped ${s.active}/${s.total}`].join(' · ');
+    return [t`global ${g.active}/${g.total}`, t`preset ${p.active}/${p.total}`, t`scoped ${s.active}/${s.total}`].join(', ');
 };
 
 function buildReportText() {
@@ -806,7 +806,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, c => ESCAPES[c]);
 // translations, so a key SillyTavern already translates differently gets its own id (translate(text, id)).
 const KO = {
     'Measuring...': '측정 중...',
-    'Features': '최적화 기능',
+    'Features': '기능',
     'Per-script measurements (slowest first)': '스크립트별 측정 (느린 순)',
     'Since ${0}': '측정 시작 ${0}',
     // features
@@ -846,30 +846,25 @@ const KO = {
     'rpk_refresh': '새로고침',
     'Clear saved results (this chat)': '저장된 결과 삭제 (이 채팅)',
     // summary
-    'Active scripts <b>${0}</b>/${1}': '활성 스크립트 <b>${0}</b>/${1}',
+    '${0} of ${1} scripts active (${2}). ${3} messages in this chat.': '스크립트 ${1}개 중 ${0}개 활성 (${2}). 이 채팅의 메시지 ${3}개.',
+    'Patterns to look at: no fixed text ${0}, .*-style ${1}, nested quantifiers ${2}.': '눈여겨볼 패턴: 고정 문구 없음 ${0}, .* 계열 ${1}, 중첩 수량자 ${2}.',
+    'prefilter ${0}, cache ${1}, streaming ${2}': '프리필터 ${0}, 캐시 ${1}, 스트리밍 ${2}',
+    'Regex ran ${0} times, ${1} in total.': '정규식을 ${0}회 실행해 ${1}가 걸렸습니다.',
+    '${0} runs were skipped (${1}), saving about ${2}.': '${0}회는 실행하지 않았습니다 (${1}). 약 ${2}를 아꼈습니다.',
+    '${0} runs were skipped (${1}). The time saved is known once some runs have been measured.': '${0}회는 실행하지 않았습니다 (${1}). 아낀 시간은 실행이 측정된 뒤에 계산됩니다.',
+    'Slowest: <b>${0}</b>, ${1}% of the time.': '가장 느린 스크립트는 <b>${0}</b>, 전체 시간의 ${1}%입니다.',
+    'Never changed the text in ${0}+ runs: <b>${1}</b>. Consider turning them off.': '${0}회 넘게 실행됐지만 텍스트를 바꾼 적이 없는 스크립트: <b>${1}</b>. 꺼도 됩니다.',
     'global ${0}/${1}': '글로벌 ${0}/${1}',
     'preset ${0}/${1}': '프리셋 ${0}/${1}',
     'scoped ${0}/${1}': '범위 지정 ${0}/${1}',
-    '${0} messages in this chat': '이 채팅의 메시지 ${0}개',
-    'no fixed text (② cannot skip them) <b>${0}</b>': '고정 문구 없음 (②로 건너뛸 수 없음) <b>${0}</b>',
-    'may be slow (<code>.*</code>-style) <b>${0}</b>': '느릴 수 있음 (<code>.*</code> 계열) <b>${0}</b>',
-    'nested quantifiers <b>${0}</b>': '중첩 수량자 <b>${0}</b>',
-    'Runs': '실행',
-    'regex runs actually executed': '실제로 실행된 정규식 횟수',
-    'Time spent': '실행에 쓴 시간',
-    'Runs skipped': '건너뛴 실행',
-    'prefilter ${0} · cache ${1} · streaming ${2}': '프리필터 ${0} · 캐시 ${1} · 스트리밍 ${2}',
     'saved results ${0}': '저장된 결과 ${0}',
-    'Time saved (estimate)': '절약 추정',
-    '${0} skipped runs × average run time': '건너뛴 ${0}회 × 평균 실행 시간',
-    'needs measured runs first': '측정된 실행이 아직 없음',
-    'Slowest script: <b>${0}</b> — ${1}% of the total': '가장 느린 스크립트: <b>${0}</b> — 전체의 ${1}%',
     'Turning it off or fixing it helps the most.': '이 스크립트를 끄거나 고치면 효과가 가장 큽니다.',
-    'Candidates to turn off: <b>${0}</b> (ran ${1}+ times, never changed the text)': '끄기 후보: <b>${0}</b> (${1}회 이상 실행했지만 텍스트를 한 번도 바꾸지 않음)',
     '⚠ Could not patch the regex engine — this SillyTavern version is not supported.': '⚠ 정규식 엔진 패치 실패 — 이 ST 버전은 지원되지 않습니다.',
     'No runs measured yet. Render a message or reopen the chat.': '아직 측정된 실행이 없습니다. 메시지를 렌더링하거나 채팅을 다시 열어보세요.',
     // table
     'Script': '스크립트',
+    'Runs': '실행',
+    'Regex runs that really happened': '실제로 실행된 정규식 횟수',
     'Total ms': '총 ms',
     'Avg': '평균',
     'Max': '최대',
@@ -890,7 +885,7 @@ const KO = {
     'Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.': '총 시간이 긴 순서입니다. 강조된 행은 전체 정규식 시간의 절반 이상을 차지하므로, 고치거나 끄면 효과가 가장 큽니다.',
     '<b>Runs</b> are real regex executions; <b>Skips</b> and <b>Hits</b> are runs avoided by ② and ③. A script with 0 runs and many skips never had to run at all.': '<b>실행</b>은 실제 정규식 실행, <b>스킵</b>과 <b>히트</b>는 ②와 ③이 피한 실행입니다. 실행 0에 스킵이 많은 스크립트는 아예 돌아갈 필요가 없었던 것입니다.',
     '<b>Replacer</b> is the part of Total ms spent in the replacement; if it is large, the replacement (macros) is slow, not the pattern.': '<b>치환</b>은 총 ms 중 치환문에 쓴 시간입니다. 이 값이 크면 패턴이 아니라 치환문(매크로)이 느린 것입니다.',
-    'Badges: <code>.*</code> may be slow on long text · <code>(a+)+</code> nested quantifier · <code>⚡</code> one run over ${0} ms · <code>∅</code> ran ${1}+ times without changing anything.': '배지: <code>.*</code> 긴 텍스트에서 느릴 수 있음 · <code>(a+)+</code> 중첩 수량자 · <code>⚡</code> 한 번에 ${0} ms 초과 · <code>∅</code> ${1}회 이상 실행했지만 변경 없음.',
+    'Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${0} ms, <code>∅</code> ran ${1}+ times without changing anything.': '이름 뒤 표시: <code>.*</code> 긴 텍스트에서 느릴 수 있음, <code>(a+)+</code> 중첩 수량자, <code>⚡</code> 한 번에 ${0} ms 초과, <code>∅</code> ${1}회 이상 실행했지만 변경 없음.',
     'Click a row to open the script in the Regex extension; the power icon turns it off.': '행을 누르면 정규식 확장에서 그 스크립트가 열리고, 전원 아이콘은 스크립트를 끕니다.',
     'Contains .* or similar: may be slow on long text (backtracking)': '.* 같은 패턴 포함: 긴 텍스트에서 느릴 수 있음 (백트래킹)',
     'Nested quantifier such as (a+)+: can become extremely slow on long text': '(a+)+ 같은 중첩 수량자: 긴 텍스트에서 극도로 느려질 수 있음',
@@ -955,7 +950,7 @@ const settingsHtml = () => `
     <div class="inline-drawer-content">
       <div class="rpk-summary" id="rpk_summary">${t`Measuring...`}</div>
 
-      <div class="rpk-section">${t`Features`}</div>
+      <h4 class="rpk-section">${t`Features`}</h4>
       <div class="rpk-features">
         ${feature('rpk_profiler', t`① Measure run time (profiler)`, t`Counts how often each script runs and how long it takes, for the table below. Costs almost nothing.`)}
         ${feature('rpk_prefilter', t`② Skip runs that cannot match (literal prefilter)`, t`If the message does not even contain the fixed text a script looks for (such as &lt;/status&gt;), the regex is not run. The result is exactly the same.`)}
@@ -989,12 +984,12 @@ const settingsHtml = () => `
       </div>
       <div class="rpk-note rpk-measured" id="rpk_measure_result"></div>
 
-      <div class="rpk-section">${t`Per-script measurements (slowest first)`}</div>
+      <h4 class="rpk-section">${t`Per-script measurements (slowest first)`}</h4>
       <div class="rpk-table-wrap">
         <table class="rpk-table" id="rpk_table">
           <thead><tr>
             ${th('rank', '#')}${th('name', t`Script`)}
-            ${th('runs', t`Runs`, t`regex runs actually executed`)}${th('total', t`Total ms`)}${th('avg', t`Avg`, t`Time per run, averaged`)}${th('max', t`Max`, t`Slowest single run`)}
+            ${th('runs', t`Runs`, t`Regex runs that really happened`)}${th('total', t`Total ms`)}${th('avg', t`Avg`, t`Time per run, averaged`)}${th('max', t`Max`, t`Slowest single run`)}
             ${th('repl', t`Replacer`, t`Time spent in the replacement (group filling, trim strings, macros), included in Total ms`)}${th('changed', t`Changed`, t`Runs that changed the text`)}
             ${th('skips', t`Skips`, t`Runs skipped by ② (the fixed text was absent)`)}${th('hits', t`Hits`, t`Results reused by ③`)}${th('lit', t`Literal`, t`The fixed text ② looks for before running this script`)}${th('act', '')}
           </tr></thead>
@@ -1007,7 +1002,7 @@ const settingsHtml = () => `
           <li>${t`Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.`}</li>
           <li>${t`<b>Runs</b> are real regex executions; <b>Skips</b> and <b>Hits</b> are runs avoided by ② and ③. A script with 0 runs and many skips never had to run at all.`}</li>
           <li>${t`<b>Replacer</b> is the part of Total ms spent in the replacement; if it is large, the replacement (macros) is slow, not the pattern.`}</li>
-          <li>${t`Badges: <code>.*</code> may be slow on long text · <code>(a+)+</code> nested quantifier · <code>⚡</code> one run over ${SPIKE_MS} ms · <code>∅</code> ran ${INEFFECTIVE_RUNS}+ times without changing anything.`}</li>
+          <li>${t`Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${SPIKE_MS} ms, <code>∅</code> ran ${INEFFECTIVE_RUNS}+ times without changing anything.`}</li>
           <li>${t`Click a row to open the script in the Regex extension; the power icon turns it off.`}</li>
         </ul>
       </details>
@@ -1039,8 +1034,8 @@ function setContent(el, value, prop = 'innerHTML') {
 }
 
 const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">${text}</span>`;
-/** A stat tile: big value, label, and an optional detail line under it. */
-const tile = (label, value, detail = '', cls = '') => `<div class="rpk-stat${cls ? ' ' + cls : ''}" title="${esc(detail)}"><span class="rpk-stat-value">${value}</span><span class="rpk-stat-label">${label}</span>${detail ? `<span class="rpk-stat-detail">${detail}</span>` : ''}</div>`;
+/** A key figure in the summary; the tests read it by its key. */
+const fig = (key, value) => `<b data-k="${key}">${value}</b>`;
 
 function renderPanel() {
     if (!ui) return;
@@ -1048,29 +1043,29 @@ function renderPanel() {
     const c = s.counts;
     const skips = s.skipped + s.hits + s.streamSkipped;
     const td = (col, value, cls = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}">${value}</td>`;
-    let summary = '<div class="rpk-scripts">' + [
-        t`Active scripts <b>${c.active}</b>/${c.total}` + ` <span class="rpk-dim">(${typeCounts(c)})</span>`,
-        t`${s.chatLen} messages in this chat`,
-    ].join(' · ') + '</div><div class="rpk-scripts rpk-dim">' + [
-        t`no fixed text (② cannot skip them) <b>${c.noNeedle}</b>`,
-        t`may be slow (<code>.*</code>-style) <b>${c.heavy}</b>`,
-        t`nested quantifiers <b>${c.nested}</b>`,
-    ].join(' · ') + '</div><div class="rpk-stats">' + [
-        tile(t`Runs`, s.calls, t`regex runs actually executed`),
-        tile(t`Time spent`, fmtMs(s.total) + ' ms'),
-        tile(t`Runs skipped`, skips + s.bypass, t`prefilter ${s.skipped} · cache ${s.hits} · streaming ${s.streamSkipped}` + (persistAvailable ? ' · ' + t`saved results ${s.bypass}` : '')),
-        s.calls
-            ? tile(t`Time saved (estimate)`, '≈' + fmtMs(s.saved) + ' ms', t`${skips} skipped runs × average run time`, 'rpk-stat-saved')
-            : tile(t`Time saved (estimate)`, '—', t`needs measured runs first`),
-    ].join('') + `</div><div class="rpk-dim rpk-since">${t`Since ${new Date(statsSince).toLocaleTimeString()}`}</div>`;
+    const lines = [];
+    lines.push(t`${c.active} of ${c.total} scripts active (${typeCounts(c)}). ${s.chatLen} messages in this chat.`);
+    if (c.noNeedle || c.heavy || c.nested) {
+        lines.push(`<span class="rpk-dim">${t`Patterns to look at: no fixed text ${c.noNeedle}, .*-style ${c.heavy}, nested quantifiers ${c.nested}.`}</span>`);
+    }
+    const breakdown = t`prefilter ${s.skipped}, cache ${s.hits}, streaming ${s.streamSkipped}` + (persistAvailable ? ', ' + t`saved results ${s.bypass}` : '');
+    if (!s.calls && !skips && !s.bypass) {
+        lines.push(`<span class="rpk-dim">${t`No runs measured yet. Render a message or reopen the chat.`}</span>`);
+    } else {
+        lines.push(t`Regex ran ${fig('runs', s.calls)} times, ${fig('ms', fmtMs(s.total) + ' ms')} in total.`);
+        lines.push(s.calls
+            ? t`${fig('skipped', skips + s.bypass)} runs were skipped (${breakdown}), saving about ${fig('saved', fmtMs(s.saved) + ' ms')}.`
+            : t`${fig('skipped', skips + s.bypass)} runs were skipped (${breakdown}). The time saved is known once some runs have been measured.`);
+    }
     if (s.top && s.calls > 0) {
-        const hot = s.topShare >= 50;
-        summary += `<div class="${hot ? 'rpk-warn' : ''}">${t`Slowest script: <b>${esc(s.top.name)}</b> — ${s.topShare.toFixed(0)}% of the total`}${hot ? ' · ' + t`Turning it off or fixing it helps the most.` : ''}</div>`;
+        lines.push(t`Slowest: <b>${esc(s.top.name)}</b>, ${s.topShare.toFixed(0)}% of the time.` + (s.topShare >= 50 ? ' ' + t`Turning it off or fixing it helps the most.` : ''));
     }
     if (s.ineffective.length) {
-        summary += `<div class="rpk-warn">${t`Candidates to turn off: <b>${esc(s.ineffective.join(', '))}</b> (ran ${INEFFECTIVE_RUNS}+ times, never changed the text)`}</div>`;
+        lines.push(t`Never changed the text in ${INEFFECTIVE_RUNS}+ runs: <b>${esc(s.ineffective.join(', '))}</b>. Consider turning them off.`);
     }
-    if (!patched) summary += `<div class="rpk-warn">${t`⚠ Could not patch the regex engine — this SillyTavern version is not supported.`}</div>`;
+    if (!patched) lines.push(`<span class="rpk-warn">${t`⚠ Could not patch the regex engine — this SillyTavern version is not supported.`}</span>`);
+    lines.push(`<span class="rpk-dim rpk-since">${t`Since ${new Date(statsSince).toLocaleTimeString()}`}</span>`);
+    const summary = lines.map(l => `<p>${l}</p>`).join('');
     setContent(ui.summary, summary);
 
     ui.rows = s.rows.slice(0, 60);

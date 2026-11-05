@@ -1,149 +1,106 @@
+/* Quiet by design: the panel inherits SillyTavern's colours and type, and uses spacing and alignment rather than
+   boxes to structure itself. The only emphasis is bold for the few figures and names that matter. */
+
 .regex-perf-kit {
     container-type: inline-size;
+    line-height: 1.5;
 }
 
-/* ---- summary ---- */
+.regex-perf-kit .inline-drawer-content {
+    padding-top: 2px;
+}
+
+/* ---- summary: a few sentences ---- */
 
 .regex-perf-kit .rpk-summary {
-    font-size: 0.9em;
-    line-height: 1.5;
-    margin: 6px 0 10px;
-    padding: 8px 10px;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 6%, transparent);
+    margin: 4px 0 2px;
+    font-size: 0.92em;
 }
 
-.regex-perf-kit .rpk-scripts {
-    margin-bottom: 2px;
+.regex-perf-kit .rpk-summary p {
+    margin: 0 0 3px;
 }
 
-.regex-perf-kit .rpk-stats {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 6px;
-    margin-top: 8px;
-}
-
-.regex-perf-kit .rpk-stat {
-    display: flex;
-    flex-direction: column;
-    padding: 6px 8px;
-    border-radius: 6px;
-    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 8%, transparent);
-    line-height: 1.3;
-    min-width: 0;
-}
-
-.regex-perf-kit .rpk-stat-saved {
-    background: color-mix(in srgb, var(--okColor, #5cb85c) 18%, transparent);
-}
-
-.regex-perf-kit .rpk-stat-value {
-    font-size: 1.3em;
-    font-weight: 600;
+.regex-perf-kit .rpk-summary b,
+.regex-perf-kit .rpk-table td {
     font-variant-numeric: tabular-nums;
-}
-
-.regex-perf-kit .rpk-stat-label {
-    font-size: 0.85em;
-    opacity: 0.8;
-}
-
-.regex-perf-kit .rpk-stat-detail {
-    font-size: 0.78em;
-    opacity: 0.6;
-    margin-top: 2px;
-    line-height: 1.35;
 }
 
 .regex-perf-kit .rpk-since {
     font-size: 0.85em;
-    margin: 4px 0 2px;
 }
 
 /* ---- sections ---- */
 
 .regex-perf-kit .rpk-section {
-    margin: 14px 0 4px;
-    font-size: 0.85em;
+    margin: 18px 0 6px;
+    font-size: 0.92em;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    opacity: 0.7;
+    opacity: 0.85;
 }
 
 /* ---- features ---- */
 
 .regex-perf-kit .rpk-features {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
-    gap: 4px 16px;
-}
-
-.regex-perf-kit .rpk-feature {
     display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    margin: 0;
-    padding: 5px 6px;
-    border-radius: 6px;
-    cursor: pointer;
-}
-
-.regex-perf-kit .rpk-feature:hover {
-    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 6%, transparent);
+    flex-direction: column;
+    gap: 10px;
+    max-width: 72ch;
 }
 
 .regex-perf-kit .rpk-feature-group {
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 10px;
 }
 
-/* an option of the feature above it */
+.regex-perf-kit .rpk-feature {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin: 0;
+    cursor: pointer;
+}
+
 .regex-perf-kit .rpk-feature.rpk-sub {
-    margin-left: 22px;
-    padding-top: 2px;
-    border-left: 2px solid color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 25%, transparent);
-    border-radius: 0 6px 6px 0;
-}
-
-.regex-perf-kit .rpk-feature.rpk-sub .rpk-feature-name {
-    font-weight: 500;
-    font-size: 0.95em;
+    margin-left: 26px;
 }
 
 .regex-perf-kit .rpk-feature input {
     flex: 0 0 auto;
-    margin: 3px 0 0;
+    margin: 4px 0 0;
 }
 
 .regex-perf-kit .rpk-feature-text {
     display: flex;
     flex-direction: column;
     min-width: 0;
+    max-width: 60ch;
 }
 
 .regex-perf-kit .rpk-feature-name {
     font-weight: 600;
 }
 
+.regex-perf-kit .rpk-feature.rpk-sub .rpk-feature-name {
+    font-weight: 500;
+}
+
 .regex-perf-kit .rpk-feature-desc {
-    font-size: 0.85em;
-    opacity: 0.75;
-    line-height: 1.4;
+    font-size: 0.88em;
+    opacity: 0.7;
+    line-height: 1.45;
 }
 
 .regex-perf-kit .rpk-feature:has(input:disabled) {
-    opacity: 0.5;
+    opacity: 0.45;
     cursor: default;
 }
 
 .regex-perf-kit .rpk-note {
-    font-size: 0.85em;
-    opacity: 0.8;
-    margin: 4px 0;
-    min-height: 1em;
+    font-size: 0.88em;
+    opacity: 0.7;
+    margin: 8px 0 0;
 }
 
 .regex-perf-kit .rpk-note:empty {
@@ -153,31 +110,31 @@
 /* ---- limits ---- */
 
 .regex-perf-kit .rpk-limits {
-    margin: 8px 0 4px;
-    font-size: 0.9em;
+    margin: 12px 0 0;
+    font-size: 0.92em;
 }
 
-.regex-perf-kit .rpk-limits summary,
-.regex-perf-kit .rpk-tips summary {
+.regex-perf-kit details summary {
     cursor: pointer;
+    opacity: 0.85;
 }
 
 .regex-perf-kit .rpk-limits .rpk-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-    gap: 2px 12px;
-    margin-top: 4px;
+    gap: 2px 28px;
+    margin: 6px 0 0 14px;
 }
 
 .regex-perf-kit .rpk-limits label {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 6px;
+    gap: 8px;
 }
 
 .regex-perf-kit .rpk-limits input {
-    width: 7em;
+    width: 6.5em;
     flex: 0 0 auto;
     margin: 2px 0;
 }
@@ -188,7 +145,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    margin: 10px 0 6px;
+    margin: 14px 0 4px;
 }
 
 .regex-perf-kit .rpk-buttons .menu_button {
@@ -198,18 +155,9 @@
     writing-mode: horizontal-tb;
 }
 
-.regex-perf-kit .rpk-buttons .rpk-primary {
-    font-weight: 600;
-    border-color: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 45%, transparent);
-    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 10%, transparent);
-}
-
 .regex-perf-kit .rpk-measured:not(:empty) {
     opacity: 1;
-    padding: 6px 10px;
-    border-radius: 6px;
-    border-left: 3px solid var(--okColor, #5cb85c);
-    background: color-mix(in srgb, var(--okColor, #5cb85c) 12%, transparent);
+    margin-top: 8px;
 }
 
 /* ---- table ---- */
@@ -217,23 +165,25 @@
 .regex-perf-kit .rpk-table-wrap {
     max-height: 320px;
     overflow: auto;
-    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
-    border-radius: 6px;
 }
 
 .regex-perf-kit .rpk-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: 0.82em;
-    font-variant-numeric: tabular-nums;
+    font-size: 0.85em;
 }
 
 .regex-perf-kit .rpk-table th,
 .regex-perf-kit .rpk-table td {
-    padding: 4px 6px;
+    padding: 5px 8px 5px 0;
     text-align: right;
     white-space: nowrap;
-    border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.08));
+    border-bottom: 1px solid color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 12%, transparent);
+}
+
+.regex-perf-kit .rpk-table th {
+    font-weight: 500;
+    opacity: 0.7;
 }
 
 .regex-perf-kit .rpk-table thead th {
@@ -244,8 +194,10 @@
 
 .regex-perf-kit .rpk-table th[title] {
     cursor: help;
-    text-decoration: underline dotted;
-    text-underline-offset: 3px;
+}
+
+.regex-perf-kit .rpk-table .rpk-col-rank {
+    opacity: 0.5;
 }
 
 .regex-perf-kit .rpk-table .rpk-col-name,
@@ -264,11 +216,13 @@
 .regex-perf-kit .rpk-table td.rpk-lit {
     max-width: 160px;
     font-family: monospace;
+    opacity: 0.75;
 }
 
 .regex-perf-kit .rpk-table td.rpk-empty {
     white-space: normal;
-    padding: 10px 8px;
+    padding: 10px 0;
+    opacity: 0.6;
 }
 
 .regex-perf-kit .rpk-table tr.rpk-script {
@@ -276,27 +230,25 @@
 }
 
 .regex-perf-kit .rpk-table tr.rpk-script:hover td {
-    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 6%, transparent);
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 5%, transparent);
 }
 
+/* the script that takes half or more of the time */
 .regex-perf-kit .rpk-hot td {
-    color: var(--warning, #f0a040);
     font-weight: 600;
-    background: color-mix(in srgb, var(--warning, #f0a040) 10%, transparent);
 }
 
 .regex-perf-kit .rpk-badge {
     font-family: monospace;
     font-size: 0.85em;
-    padding: 0 4px;
-    border-radius: 4px;
-    background: rgba(240, 160, 64, 0.25);
+    margin-left: 2px;
+    opacity: 0.55;
     cursor: help;
 }
 
 .regex-perf-kit .rpk-act span {
     padding: 0 3px;
-    opacity: 0.7;
+    opacity: 0.4;
     cursor: pointer;
 }
 
@@ -336,17 +288,15 @@
 /* ---- legend and tips ---- */
 
 .regex-perf-kit .rpk-tips {
-    margin-top: 8px;
-    font-size: 0.85em;
-}
-
-.regex-perf-kit .rpk-legend {
-    margin-top: 6px;
+    margin-top: 10px;
+    font-size: 0.88em;
 }
 
 .regex-perf-kit .rpk-tips ul {
-    margin: 6px 0 0 16px;
+    margin: 6px 0 0 14px;
     padding: 0;
+    max-width: 70ch;
+    opacity: 0.8;
 }
 
 .regex-perf-kit .rpk-tips li {

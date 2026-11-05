@@ -386,15 +386,15 @@ export async function uiTexts(h) {
     };
 }
 
-/** The panel's headline numbers as shown: stat tiles by label, the estimate, the table rows and the empty-table text. */
+/** The panel's headline numbers as shown: the summary's key figures by key, the table rows and the empty-table text. */
 function panelNumbers() {
     const root = document.getElementById('regex_perf_kit');
     root.querySelector('#rpk_refresh').click();
-    const tiles = Object.fromEntries([...root.querySelectorAll('.rpk-stat')].map(el => [el.querySelector('.rpk-stat-label').textContent, el.querySelector('.rpk-stat-value').textContent]));
+    const figures = Object.fromEntries([...root.querySelectorAll('#rpk_summary [data-k]')].map(el => [el.dataset.k, el.textContent]));
     const rows = [...root.querySelectorAll('#rpk_table tbody tr[data-i]')];
     return {
-        tiles,
-        saved: tiles['Time saved (estimate)'],
+        figures,
+        summary: root.querySelector('#rpk_summary').textContent,
         rows: rows.length,
         skipped: rows[0]?.querySelector('.rpk-col-skips')?.textContent,
         empty: root.querySelector('#rpk_table tbody .rpk-empty')?.textContent ?? '',

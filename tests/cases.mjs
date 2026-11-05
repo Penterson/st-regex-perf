@@ -155,14 +155,15 @@ const KO_PANEL = [
     '④ 스트리밍 중에는 표시용 스크립트 쉬기', '④ 절충 모드: 완성된 줄은 스트리밍 중에도 꾸미기', '⑤ 결과를 채팅 파일에 저장 (영구 캐시)',
     '예: </status>', // the example tag in ②'s description survives HTML insertion
     '한도', '이 채팅으로 측정', '리포트 복사', '측정 초기화', '새로고침', '저장된 결과 삭제 (이 채팅)',
-    '실행', '실행에 쓴 시간', '건너뛴 실행', '절약 추정', '측정 시작', '표 읽는 법', '설정만으로 할 수 있는 것',
+    '회 실행해', '회는 실행하지 않았습니다', '측정 시작', '표 읽는 법', '설정만으로 할 수 있는 것',
     '스크립트', '총 ms', '평균', '최대', '치환', '변경', '스킵', '히트', '고정 문구',
 ];
 
 test('item 17: Korean locale shows the plain-language panel in Korean; nothing is left untranslated', async ({ each }) => {
     const r = await each('uiTexts', null, { locale: 'ko-kr', variants: ['current'] });
     const all = r.current.all;
-    for (const text of KO_PANEL) assert.ok(all.includes(text), `panel text "${text}"`);
+    const shown = r.current.texts.join('\n') + '\n' + all; // texts: before the stats reset, so the run sentences are there
+    for (const text of KO_PANEL) assert.ok(shown.includes(text), `panel text "${text}"`);
     assert.match(r.current.report, /^측정 시작: .*채팅 메시지 \d+개$/m);
     assert.match(r.current.report, /절약 추정: (?:≈[\d.]+ ms \(건너뛴 \d+회 × 스크립트별 평균 실행 시간\)|아직 계산할 수 없음 \(측정된 실행 없음\))/);
     assert.match(r.current.report, /^순위 \| 스크립트 \| 실행 \| /m);
@@ -173,14 +174,17 @@ test('item 17: Korean locale shows the plain-language panel in Korean; nothing i
 
 test('numbers: the panel never shows a saved-time estimate without measured runs, and hides patterns that did nothing', async ({ each }) => {
     const r = await each('numbers', null, { variants: ['current'] });
-    assert.equal(r.current.before.saved, '—', 'no runs yet: the estimate is a dash, not 0.00 ms');
+    assert.equal(r.current.before.figures.saved, undefined, 'no runs yet: no estimate at all');
+    assert.match(r.current.before.summary, /No runs measured yet/);
     assert.equal(r.current.before.rows, 0, 'wrapped but never run or skipped: no table rows');
     assert.match(r.current.before.empty, /No runs measured yet/);
-    assert.equal(r.current.skippedOnly.saved, '—', 'only prefilter skips, no measured run: still no estimate');
+    assert.equal(r.current.skippedOnly.figures.saved, undefined, 'only prefilter skips, no measured run: still no estimate');
+    assert.match(r.current.skippedOnly.summary, /once some runs have been measured/);
+    assert.equal(r.current.skippedOnly.figures.skipped, '3');
     assert.equal(r.current.skippedOnly.rows, 1, 'a script that was skipped is listed');
     assert.equal(r.current.skippedOnly.skipped, '3');
-    assert.match(r.current.after.saved, /^≈[\d.]+ ms$/);
-    assert.equal(r.current.after.tiles.Runs, '2');
+    assert.match(r.current.after.figures.saved, /^[\d.]+ ms$/);
+    assert.equal(r.current.after.figures.runs, '2');
     assert.doesNotMatch(r.current.after.panel, /\b0\.00\b/, 'exact zeros are shown as 0');
 });
 
