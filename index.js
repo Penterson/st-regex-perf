@@ -51,6 +51,9 @@ function fnv1a(str) {
     return (h >>> 0).toString(36);
 }
 
+const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' };
+const esc = (s) => String(s).replace(/[&<>"']/g, c => ESCAPES[c]);
+
 // Set from GENERATION_STARTED until GENERATION_ENDED / GENERATION_STOPPED, so the exact check (which builds the
 // whole getContext() object) only runs while a generation can be streaming. Without those events: always check.
 let generating = !(event_types.GENERATION_STARTED && event_types.GENERATION_ENDED && event_types.GENERATION_STOPPED);
@@ -665,13 +668,14 @@ const INEFFECTIVE_RUNS = 20; // a script that ran this often without changing th
 /** Milliseconds for display: an exact zero is "0", otherwise 2 / 1 / 0 decimals as the value grows. */
 const fmtMs = (x) => (x === 0 ? '0' : x.toFixed(x >= 100 ? 0 : x >= 10 ? 1 : 2));
 const avgMs = (r) => (r.calls ? r.totalMs / r.calls : 0);
-const fmtNeedles = (r) => r.needle?.needles?.map(s => JSON.stringify(s)).join(' | ') ?? null;
+const fmtNeedles = (r) => r.needle?.needles?.map(s => JSON.stringify(s)).join(' | ');
 // every call the prefilter, the memo or the streaming skip avoided would have cost the script's average run
 const avoided = (r) => r.skipped + r.hits + r.streamSkipped;
 const savedMs = (r) => avoided(r) * avgMs(r);
 const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.changed;
 /** A pattern the extension has seen do anything: rows that never ran nor were skipped are left out of the table. */
 const active = (r) => r.calls + avoided(r) + r.bypass > 0;
+const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">${text}</span>`;
 /** A row's warnings: words for the report, or badges for the panel. */
 const warnings = (r, badges = false) => [
     r.heavy && (badges ? badge('.*', t`Contains .* or similar: may be slow on long text (backtracking)`) : t`.*-style`),
@@ -754,6 +758,7 @@ function buildReportText() {
 }
 
 const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass'];
+const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false }; // what a measurement turns off
 
 /**
  * Renders every message of the current chat as SillyTavern displays it (messageFormatting), first with the
@@ -772,12 +777,12 @@ function measureChat() {
         });
         return performance.now() - t0;
     };
-    const user = { profiler: settings.profiler, prefilter: settings.prefilter, memo: settings.memo, persist: settings.persist };
+    const user = Object.fromEntries(Object.keys(FEATURES_OFF).map(k => [k, settings[k]]));
     const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => st[c])]));
     const savedPersist = { ...persistStats };
     let off, on;
     try {
-        Object.assign(settings, { profiler: false, prefilter: false, memo: false, persist: false });
+        Object.assign(settings, FEATURES_OFF);
         off = render();
         Object.assign(settings, user, { profiler: false });
         on = render();
@@ -792,15 +797,11 @@ function measureChat() {
 function resetStats() {
     stats.clear();
     statsSince = Date.now();
-    persistStats.hits = 0;
-    persistStats.stores = 0;
+    persistStats.hits = persistStats.stores = 0;
     wrapped.clear(); // wrappers hold their stat object; new ones link to fresh stats
 }
 
 // ---- UI ----
-
-const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' };
-const esc = (s) => String(s).replace(/[&<>"']/g, c => ESCAPES[c]);
 
 // UI text is English; Korean locales get the Korean wording below. addLocaleData() never overrides SillyTavern's own
 // translations, so a key SillyTavern already translates differently gets its own id (translate(text, id)).
@@ -937,8 +938,9 @@ const feature = (id, name, desc, { labelId = '', sub = false } = {}) => `
 /** A number field for LIMITS[key]; bindUi() finds it as #rpk_<key>. */
 const limit = (key, name, title) => `<label${title ? ` title="${title}"` : ''}><span>${name}</span><input type="number" class="text_pole" id="rpk_${key}"></label>`;
 
-/** A table header cell with an explanation on hover and a column class for the narrow layout. */
+// Table cells carry a column class so the narrow layout can hide columns; headers explain themselves on hover.
 const th = (col, text, title) => `<th class="rpk-col-${col}"${title ? ` title="${esc(title)}"` : ''}>${text}</th>`;
+const td = (col, value, cls = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}">${value}</td>`;
 
 const settingsHtml = () => `
 <div id="regex_perf_kit" class="regex-perf-kit">
@@ -1033,7 +1035,6 @@ function setContent(el, value, prop = 'innerHTML') {
     el[prop] = value;
 }
 
-const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">${text}</span>`;
 /** A key figure in the summary; the tests read it by its key. */
 const fig = (key, value) => `<b data-k="${key}">${value}</b>`;
 
@@ -1042,7 +1043,6 @@ function renderPanel() {
     const s = buildSummary();
     const c = s.counts;
     const skips = s.skipped + s.hits + s.streamSkipped;
-    const td = (col, value, cls = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}">${value}</td>`;
     const lines = [];
     lines.push(t`${c.active} of ${c.total} scripts active (${typeCounts(c)}). ${s.chatLen} messages in this chat.`);
     if (c.noNeedle || c.heavy || c.nested) {
