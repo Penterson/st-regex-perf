@@ -643,6 +643,29 @@ export async function limits(h) {
     return { found, values, usage: root.querySelector('#rpk_usage')?.textContent ?? '' };
 }
 
+/** ⑤ budget: beyond persistMaxMB per chat, the oldest messages' stored results are dropped first. */
+export async function persistBudget(h) {
+    applyProfile(h, { persist: true, persistMaxMB: 1, persistMaxLen: 100000 });
+    await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
+    const body = 'x'.repeat(50000); // each stored result is ≈50 KB: 1 MB holds 20 of them
+    h.st.setState({ chat: Array.from({ length: 26 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: `${i} ${body}`, extra: {} })) });
+    h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
+    const stored = h.st.chat.map(m => !!m.extra.regex_perf_cache);
+    const chars = h.st.chat.reduce((a, m) => a + (m.extra.regex_perf_cache ? m.extra.regex_perf_cache.k.length + (m.extra.regex_perf_cache.v?.length ?? 0) : 0), 0);
+    const root = document.getElementById('regex_perf_kit');
+    root.querySelector('#rpk_refresh').click();
+    const set = (id, value) => {
+        const el = root.querySelector('#' + id);
+        if (!el) return false;
+        el.value = String(value);
+        el.dispatchEvent(new Event('change'));
+        return true;
+    };
+    const usage = root.querySelector('#rpk_usage')?.textContent ?? ''; // the baseline has no usage line
+    const hasLimit = set('rpk_persistMaxMB', 2);
+    return { stored, chars, usage, hasLimit, limit: h.extension_settings.regex_perf_kit.persistMaxMB };
+}
+
 /** Item 16. Compromise mode: while streaming, display scripts format the completed lines at most every N ms. */
 export async function streamThrottle(h, { throttle }) {
     applyProfile(h, { streamingThrottle: throttle, streamingThrottleMs: 500 });

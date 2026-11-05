@@ -32,6 +32,7 @@ const defaultSettings = {
     streamingThrottleMs: 500,
     persist: false,
     persistMaxLen: 60000,
+    persistMaxMB: 8, // ⑤ per chat; beyond it, the oldest messages' results are dropped
 };
 
 // ST keeps this object for the whole session, so it is resolved once instead of on every replace.
@@ -830,6 +831,7 @@ function installPersistHooks() {
         p.msg.extra ||= {};
         p.msg.extra[EXTRA_KEY] = mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes };
         persistStats.stores++;
+        trimPersisted(ctx().chat);
         return mes;
     }, { stage: mf.stage.AFTER_REGEX, order: mf.order?.EARLIEST ?? 0 });
 }
@@ -912,7 +914,27 @@ function buildSummary() {
     };
 }
 
-/** ⑤ storage in this chat (only scanned when the hooks exist). */
+/** Size of a ⑤ entry, in characters (about its bytes in the chat file). */
+const persistSize = (e) => String(e.k).length + (e.v?.length ?? 0);
+
+/** Drops ⑤ entries from the oldest messages until the chat is within persistMaxMB. */
+function trimPersisted(chat) {
+    if (!chat) return;
+    let chars = 0;
+    for (const m of chat) {
+        const e = m?.extra?.[EXTRA_KEY];
+        if (e) chars += persistSize(e);
+    }
+    const max = settings.persistMaxMB * 1048576;
+    for (let i = 0; chars > max && i < chat.length; i++) {
+        const e = chat[i]?.extra?.[EXTRA_KEY];
+        if (!e) continue;
+        chars -= persistSize(e);
+        delete chat[i].extra[EXTRA_KEY];
+    }
+}
+
+/** ⑤ storage in this chat against its cap (only scanned when the hooks exist). */
 function persistUsage(chat) {
     let entries = 0;
     let chars = 0;
@@ -920,9 +942,9 @@ function persistUsage(chat) {
         const e = m?.extra?.[EXTRA_KEY];
         if (!e) continue;
         entries++;
-        chars += String(e.k).length + (e.v?.length ?? 0);
+        chars += persistSize(e);
     }
-    return t`⑤ saved in this chat: ${entries} messages, ≈${Math.round(chars / 1024)} KB`;
+    return t`⑤ saved in this chat: ${entries} messages, ≈${Math.round(chars / 1024)} KB of ${settings.persistMaxMB} MB`;
 }
 
 let measured = null; // last "Measure on this chat" result
@@ -1089,6 +1111,7 @@ const settingsHtml = () => `
           ${limit('memoMaxLen', t`③ Longest input to cache (characters)`, t`Longer inputs are not cached.`)}
           ${limit('memoMaxMB', t`③ Cache memory (MB)`, t`Oldest results are dropped beyond this estimated size (2 bytes per character of input and output).`)}
           ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved in the chat.`)}
+          ${limit('persistMaxMB', t`⑤ Saved results per chat (MB)`, t`Beyond this, the oldest messages' results are dropped from the chat.`)}
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
         </div>
       </details>
@@ -1139,7 +1162,7 @@ const settingsHtml = () => `
 
 const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist' };
 // editable limits: setting -> [min, max]
-const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], streamingThrottleMs: [50, 60000] };
+const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000] };
 
 let ui = null; // panel elements, cached by bindUi()
 const rendered = new WeakMap();

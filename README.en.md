@@ -11,7 +11,7 @@ Speeds up SillyTavern's built-in Regex extension **without changing a single cha
 | ③ Reuse results (memory cache) | ON | When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with `{{macros}}` are left out automatically. Oldest entries are evicted beyond 3000 entries or 64 MB. |
 | ④ Rest display scripts while streaming | ON | While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. |
 | Compromise (an option of ④) | OFF | With ④ on: instead of skipping them, display scripts still format the lines that are already complete, at most once per interval (default 500 ms); the line being written stays raw, and the finished reply gets every script. Needs the MessageFormatter hooks, like ⑤. |
-| ⑤ Save results in the chat file (persistent cache) | OFF | Stores the display result in the message's `extra` so reopening the chat skips the work. Needs SillyTavern staging (MessageFormatter hooks). |
+| ⑤ Save results in the chat file (persistent cache) | OFF | Stores the display result in the message's `extra` so reopening the chat skips the work. Beyond a per-chat cap (8 MB by default) the oldest messages' results are dropped first. Needs SillyTavern staging (MessageFormatter hooks). |
 
 ## Install
 
@@ -40,7 +40,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
   - `∅` ran 20+ times without ever matching (a candidate to disable, also listed in the summary); a script that matches but leaves the text as it is gets no mark
 - Click a row to open the script in SillyTavern's regex editor; the power button at the end of the row turns the script off (same as its switch in the Regex extension's list). Patterns that are not scripts have neither. The stopwatch button re-renders this chat without that one script and shows the time it costs (ms) inline in the row (measured with ③ and ⑤ off; it does not show up in the stats).
 - Scripts whose **Literal** column says "none" get no benefit from ② and always run (unless the minimum length alone rules a message out). `"a" & "b"` means both must be present, `"a" | "b"` any one of them; hover a cell for the shortest possible match and, when there is no literal, the reason (only classes, every literal optional, a branch without one, ...). The table lists only patterns that ran or were skipped at least once; in a narrow panel (phones) the Avg, Replacer and Literal columns are hidden and remain in the text report.
-- **Limits** lets you change ③'s entry count, longest cached input and memory (MB), ⑤'s longest saved result and the compromise interval. The line above it shows ③'s usage and this chat's ⑤ storage.
+- **Limits** lets you change ③'s entry count, longest cached input and memory (MB), ⑤'s longest saved result and per-chat size (MB), and the compromise interval. The line above it shows ③'s usage and this chat's ⑤ storage against its cap.
 
 ## SillyTavern settings that help
 
