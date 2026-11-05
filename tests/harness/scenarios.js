@@ -306,3 +306,42 @@ export async function streamingCheck(h) {
     r.afterStop = display();
     return r;
 }
+
+/** Two scripts with the same pattern: each must get its own output (memo) and only display scripts stream-skip. */
+export async function sharedPattern(h) {
+    const thinking = '/<thinking>[\\s\\S]*?<\\/thinking>/g';
+    await useScripts(h, [
+        script({ scriptName: 'Hide thinking', findRegex: thinking, replaceString: '', promptOnly: true }),
+        script({ scriptName: 'Fold thinking', findRegex: thinking, replaceString: '<details>{{match}}</details>', markdownOnly: true }),
+        script({ scriptName: 'Save-time', findRegex: '/foo/g', replaceString: 'bar' }),
+        script({ scriptName: 'Display', findRegex: '/foo/g', replaceString: 'baz', markdownOnly: true }),
+    ]);
+    const mes = 'A <thinking>x</thinking> B';
+    const out = [h.engine.getRegexedString(mes, P.AI, { isPrompt: true }), h.engine.getRegexedString(mes, P.AI, { isMarkdown: true })];
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    h.st.setState({ streamingProcessor: { messageId: 0, isFinished: false, isStopped: false } });
+    out.push(h.engine.getRegexedString('foo', P.AI)); // what cleanUpMessage() runs on every streamed chunk
+    h.st.setState({ streamingProcessor: null });
+    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    return out;
+}
+
+/** ⑧ The persisted display output also depends on the message depth and on each script's placement. */
+export async function persistDepth(h) {
+    applyProfile(h, { persist: true });
+    const hp = script({ findRegex: '/\\[HP\\]/g', replaceString: '<meter>', markdownOnly: true, maxDepth: 0 });
+    const shout = script({ findRegex: '/!/g', replaceString: '!!', markdownOnly: true, placement: [P.AI] });
+    await useScripts(h, [hp, shout]);
+    const m = (isUser, mes) => ({ name: isUser ? 'User' : 'Char', is_user: isUser, is_system: false, mes, extra: {} });
+    h.st.setState({ chat: [m(false, 'Hi [HP]')] });
+    const render = (i) => h.st.messageFormatting(h.st.chat[i].mes, h.st.chat[i].name, false, h.st.chat[i].is_user, i);
+    const out = [render(0)]; // depth 0
+    h.st.chat.push(m(true, 'Yo!'));
+    out.push(render(1), render(0)); // message 0 is now at depth 1
+    h.st.chat.push(m(false, 'Next [HP]'));
+    out.push(render(2));
+    shout.placement = [P.AI, P.USER]; // the regex editor saves, then reloads the chat
+    await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+    out.push(render(1));
+    return out;
+}

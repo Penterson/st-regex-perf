@@ -129,3 +129,17 @@ test('item 7: no getContext() per display script outside a generation; exact che
     assert.equal(r.baseline.afterStop, 'ab', 'main keeps skipping after the generation stopped');
     assert.equal(r.current.afterStop, 'AB', 'finished messages get their display scripts');
 });
+
+test('extra: scripts sharing a pattern keep their own replacement and streaming behavior', async ({ each }) => {
+    const r = await each('sharedPattern');
+    assert.deepEqual(r.none, ['A  B', 'A <details><thinking>x</thinking></details> B', 'bar']);
+    assert.notDeepEqual(r.baseline, r.none, 'main serves one script the other one\'s memo entry (bug reproduced)');
+    assert.deepEqual(r.current, r.none);
+});
+
+test('extra: ⑧ persisted display output refreshes when the message depth or a script\'s placement changes', async ({ each }) => {
+    const r = await each('persistDepth');
+    assert.deepEqual(r.none, ['Hi <meter>', 'Yo!', 'Hi [HP]', 'Next <meter>', 'Yo!!']);
+    assert.notDeepEqual(r.baseline, r.none, 'main shows the stored depth-0 output and the old placement (bug reproduced)');
+    assert.deepEqual(r.current, r.none);
+});

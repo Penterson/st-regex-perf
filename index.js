@@ -276,6 +276,7 @@ function buildInfo() {
     const map = new Map();
     const counts = { total: scripts.length, active: 0, markdownOnly: 0, promptOnly: 0, noNeedle: 0, heavy: 0 };
     const versionParts = [];
+    const depthRules = []; // [min, max] of display scripts with depth limits, for the ⑧ key
 
     for (const s of scripts) {
         if (!s?.findRegex || s.disabled) continue;
@@ -302,7 +303,7 @@ function buildInfo() {
 
         // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
         const replacement = replaceString.replace(/{{match}}/gi, '$0');
-        map.set(keyOf(re), {
+        const info = {
             name: s.scriptName || '(이름 없음)',
             markdownOnly: !!s.markdownOnly,
             // No macros, and no group reference that could complete one (<$1>, {$1}): the output then depends
@@ -312,10 +313,23 @@ function buildInfo() {
             replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
             needle,
             heavy,
-        });
-        versionParts.push(re.source, re.flags, replaceString, trimSig, String(!!s.markdownOnly), String(!!s.promptOnly), String(s.minDepth), String(s.maxDepth));
+        };
+        const key = keyOf(re);
+        const prev = map.get(key);
+        if (prev) { // scripts with the same pattern share one wrapper: keep only what holds for all of them
+            info.name = prev.name + ', ' + info.name;
+            info.markdownOnly &&= prev.markdownOnly;
+            info.pure &&= prev.pure && prev.replaceSig === info.replaceSig;
+        }
+        map.set(key, info);
+
+        // The same limits getRegexedString() applies; display scripts only, as those are what ⑧ stores.
+        const min = !isNaN(s.minDepth) && s.minDepth !== null && s.minDepth >= -1 ? Number(s.minDepth) : -Infinity;
+        const max = !isNaN(s.maxDepth) && s.maxDepth !== null && s.maxDepth >= 0 ? Number(s.maxDepth) : Infinity;
+        if (s.markdownOnly && (min > -Infinity || max < Infinity)) depthRules.push([min, max]);
+        versionParts.push(re.source, re.flags, replaceString, trimSig, String(!!s.markdownOnly), String(!!s.promptOnly), String(s.minDepth), String(s.maxDepth), String(s.placement));
     }
-    return { map, counts, version: fnv1a(versionParts.join('\u0003')), builtAt: performance.now() };
+    return { map, counts, depthRules, version: fnv1a(versionParts.join('\u0003')), builtAt: performance.now() };
 }
 
 // ---- Instrumented RegExp ----
@@ -505,7 +519,14 @@ function installPersistHooks() {
         if (!msg) return mes;
         // {{user}}/{{char}} in replacements and trim strings resolve to these names (ch_name: the message author).
         const names = fnv1a([c.ch_name ?? c.characterName, name1, name2].join('\u0000'));
-        const key = fnv1a(mes) + ':' + mes.length + ':' + ensureInfo().version + ':' + names;
+        const { version, depthRules } = ensureInfo();
+        let depths = '';
+        if (depthRules.length) { // which depth-limited scripts apply at this message's depth, as messageFormatting() counts it
+            let depth = 0;
+            for (let k = c.messageId + 1; k < chat.length; k++) if (!chat[k]?.is_system) depth++;
+            depths = msg.is_system ? ':*' : ':' + depthRules.map(([min, max]) => (depth < min || depth > max ? 0 : 1)).join('');
+        }
+        const key = fnv1a(mes) + ':' + mes.length + ':' + version + ':' + names + depths;
         const e = msg.extra?.[EXTRA_KEY];
         if (e && e.k === key) {
             bypass = true;
