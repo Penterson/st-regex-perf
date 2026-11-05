@@ -266,6 +266,20 @@ export async function needleCoverage(h) {
     };
 }
 
+/** AND prefilter and minimum length: every mandatory literal must be present, shorter messages than the least match skip. */
+export async function needleAnd(h) {
+    const both = script({ scriptName: 'Both', findRegex: '/x(?:ab)+y/g', replaceString: '!' }); // "xab" & "aby"
+    const five = script({ scriptName: 'Five', findRegex: '/\\d{5}/g', replaceString: '#' }); // no literal, at least 5 characters
+    const tag = script({ scriptName: 'Tag', findRegex: '/<status>([\\s\\S]*?)<\\/status>/g', replaceString: '$1' }); // "</status>" & "<status>"
+    await useScripts(h, [both, five, tag]);
+    const src = (s) => h.engine.RegexProvider.instance.get(s.findRegex).source;
+    const inputs = ['xab aby', 'xab only', 'xababy', '123', '12345', 'has </status> only', '<status>ok</status>'];
+    const out = [];
+    const runs = inputs.map(str => executionsBySource(() => out.push(h.engine.getRegexedString(str, P.AI))));
+    const per = (s) => runs.map(r => r[src(s)] ?? 0);
+    return { out, both: per(both), five: per(five), tag: per(tag), report: await report(h) };
+}
+
 /** Item 6. Memo memory budget: with a 1 MB budget, old large entries are evicted (LRU) well before the entry cap. */
 export async function memoBudget(h) {
     applyProfile(h, { memoMaxMB: 1, memoMaxLen: 20000 });
@@ -419,14 +433,6 @@ export function translations(h, entries) {
     return entries.filter(([key, value]) => h.i18n.translate(key) !== value);
 }
 
-/** Rows of the extension's text report, each keyed by the column headers. */
-function reportRows(text) {
-    const lines = text.split('\n');
-    const head = lines.indexOf('') + 1; // the table header follows the first blank line
-    const cols = lines[head].split(' | ');
-    return lines.slice(head + 1).filter(Boolean).map(l => Object.fromEntries(l.split(' | ').map((v, i) => [cols[i], v])));
-}
-
 const slowRegex = '/[\\s\\S]*?ZZZ/g'; // no match in the chat below: quadratic scan, prefiltered by "ZZZ"
 
 /** Item 9. "Measure on this chat": renders the chat with the features off and on; stats are left as they were. */
@@ -456,7 +462,7 @@ export async function insights(h) {
         script({ scriptName: 'Changes', findRegex: '/\\bcat\\b/g', replaceString: 'dog' }),
         script({ scriptName: 'Never changes', findRegex: '/\\d{5}/g', replaceString: 'N' }),
         script({ scriptName: 'Rarely runs', findRegex: '/\\d{6}/g', replaceString: 'N', placement: [P.USER] }),
-        script({ scriptName: 'Slow regex', findRegex: '/x[\\s\\S]*?q{3}/g', replaceString: '' }), // needle "x": each one scans to the end
+        script({ scriptName: 'Slow regex', findRegex: '/x[\\s\\S]*?\\d{3}/g', replaceString: '' }), // needle "x": each one scans to the end
         script({ scriptName: 'Slow macro', findRegex: '/@/g', replaceString: '{{slow}}' }), // 2 ms per match
         script({ scriptName: 'Nested', findRegex: '/(?:\\w+\\s?)+!/g', replaceString: '!' }), // never runs: no "!"
     ]);
@@ -468,8 +474,7 @@ export async function insights(h) {
     }
     for (let i = 0; i < 3; i++) h.engine.getRegexedString(`user ${i}`, P.USER);
     for (let i = 0; i < 3; i++) h.engine.getRegexedString('@'.repeat(30) + i, P.AI); // ~60 ms per call
-    const text = await report(h);
-    return { text, rows: reportRows(text) };
+    return { text: await report(h) };
 }
 
 /** Item 14. Clicking a table row opens the script in SillyTavern's regex editor; the row's off button disables it. */

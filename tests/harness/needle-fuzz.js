@@ -49,8 +49,50 @@ export const CASES = [
     ['\\12x', '', ['x']],
     ['(a)\\1bc', '', ['bc']],
     ['\\p{L}+abc', 'u', ['abc']],
-    ['(\\p{a)|b}', '', null],
+    ['(\\p{a)|b}', '', ['p', 'b}']], // without u, \p is the letter p and {a) is not a quantifier
+    ['\\p{0,2}x', '', ['x']],
+    ['\\u{61}', '', ['u']],
+    ['\\u{0}x', '', ['x']],
+    ['\\x{2}', '', ['x']],
     ['[abc]', 'v', null],
+];
+
+/** [pattern, flags, expected terms (every match satisfies all: a one-literal term must occur, one of a longer term)] */
+export const TERMS = [
+    ['x(?:ab)+y', '', [['xab'], ['aby']]],
+    ['ab?c', '', [['a'], ['c']]],
+    ['ab+c', '', [['ab'], ['bc']]],
+    ['(?:foo|bar)x', '', [['x'], ['foo', 'bar']]],
+    ['x(?:a\\db\\dc)y', '', [['xa'], ['cy'], ['b']]],
+    ['(abc)+d', '', [['abcd']]],
+    ['xfoo(?:foo|bar)', '', [['xfoo']]], // the alternation is implied by the mandatory run
+    ['foo|bar', '', [['foo', 'bar']]],
+    ['<status>([\\s\\S]*?)<\\/status>', 'g', [['</status>'], ['<status>']]],
+    ['(?=abc)def', '', [['def']]],
+    ['a*', '', []],
+    ['\\d{5}', '', []],
+];
+
+/** [pattern, flags, expected minimum match length in UTF-16 units] */
+export const MINLEN = [
+    ['\\d{5}', '', 5],
+    ['<status>([\\s\\S]*?)<\\/status>', 'g', 17],
+    ['ab?c', '', 2],
+    ['(?:abc){2,}d', '', 7],
+    ['(?=abc)def', '', 3],
+    ['(?<!x)y\\b', '', 1],
+    ['a|bcd', '', 1],
+    ['(a)\\1', '', 1],
+    ['^$', 'm', 0],
+    ['😀x', 'u', 3],
+    ['[😀]x', 'u', 2],
+    ['\\p{L}x', 'u', 2],
+    ['\\p{0,2}x', '', 1],
+    ['\\u{61}', '', 61],
+    ['\\u{0}', '', 0],
+    ['x{,2}', '', 5],
+    ['(?s:a.c)', '', 3],
+    ['a\\k<n>(?<n>b)', '', 2],
 ];
 
 /** [pattern, flags, nested quantifier expected] */
@@ -86,7 +128,23 @@ export function runCases(extractNeedle) {
         const got = extractNeedle(source, flags).nested;
         if (got !== want) throw new Error(`extractNeedle(/${source}/${flags}).nested = ${got}, want ${want}`);
     }
-    return { checked: CASES.length + NESTED.length - unsupported.length, unsupported };
+    for (const [source, flags, want] of TERMS) {
+        const got = extractNeedle(source, flags).terms;
+        if (!same(got, want)) throw new Error(`extractNeedle(/${source}/${flags}).terms = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+    }
+    for (const [source, flags, want] of MINLEN) {
+        const got = extractNeedle(source, flags).minLen;
+        if (got !== want) throw new Error(`extractNeedle(/${source}/${flags}).minLen = ${got}, want ${want}`);
+        let re;
+        try {
+            re = new RegExp(source, flags);
+        } catch {
+            unsupported.push(`/${source}/${flags}`);
+            continue;
+        }
+        if (want > 0 && re.test('x'.repeat(want - 1))) throw new Error(`/${source}/${flags} matches a string shorter than ${want}`);
+    }
+    return { checked: CASES.length + NESTED.length + TERMS.length + MINLEN.length - unsupported.length, unsupported };
 }
 
 // Characters whose case folding differs between toLowerCase() and the regex engine, astral characters, syntax
@@ -100,7 +158,7 @@ const GROUPS = ['(', '(', '(?:', '(?:', '(?<n>', '(?=', '(?!', '(?<=', '(?<!', '
 /**
  * Generates random patterns (biased toward the constructs extractNeedle treats specially) and strings built from
  * their characters, and fails if the prefilter would skip a string the regex matches.
- * @returns {{seed: number, valid: number, skips: number, matched: number}}
+ * @returns {{seed: number, valid: number, skips: number, matched: number, lenSkips: number, andSkips: number}}
  */
 export function fuzz(extractNeedle, { seed, patterns }) {
     let state = seed;
@@ -153,6 +211,8 @@ export function fuzz(extractNeedle, { seed, patterns }) {
     let valid = 0;
     let skips = 0;
     let matched = 0;
+    let lenSkips = 0; // skips the minimum length alone decided
+    let andSkips = 0; // skips a mandatory term decided where the best needle set was present
     for (let p = 0; p < patterns; p++) {
         const ctx = { groups: 0, u: chance(0.35) };
         const source = gen(0, ctx);
@@ -164,7 +224,7 @@ export function fuzz(extractNeedle, { seed, patterns }) {
             continue;
         }
         valid++;
-        const { needles, test } = extractNeedle(source, flags);
+        const { needles, test, minLen } = extractNeedle(source, flags);
         if (!test) continue;
         for (let k = 0; k < 30; k++) {
             const str = sample(source);
@@ -172,11 +232,15 @@ export function fuzz(extractNeedle, { seed, patterns }) {
             if (matches) matched++;
             if (test(str)) continue;
             skips++;
+            if (str.length < minLen) lenSkips++;
+            else if (!needles || needles.some(s => str.includes(s))) andSkips++;
             if (matches) {
                 throw new Error(`seed ${seed}: /${source}/${flags} has needles ${JSON.stringify(needles)} but matches ${JSON.stringify(str)} (match ${JSON.stringify(str.match(re)?.[0])})`);
             }
         }
     }
-    if (skips < patterns || matched < patterns) throw new Error(`fuzzer too weak (seed ${seed}): ${skips} skips, ${matched} matches`);
-    return { seed, valid, skips, matched };
+    if (skips < patterns || matched < patterns || lenSkips < patterns / 20 || andSkips < patterns / 100) {
+        throw new Error(`fuzzer too weak (seed ${seed}): ${skips} skips (${lenSkips} by length, ${andSkips} by a mandatory term), ${matched} matches`);
+    }
+    return { seed, valid, skips, matched, lenSkips, andSkips };
 }

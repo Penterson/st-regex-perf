@@ -7,7 +7,7 @@ Speeds up SillyTavern's built-in Regex extension **without changing a single cha
 | Feature | Default | What it does |
 |---|---|---|
 | ① Measure run time (profiler) | ON | Per script: runs, total / max ms, the part spent in the replacement (macros), and how often a run actually changed the text. Finds the slowest scripts and the ones that do nothing. |
-| ② Skip runs that cannot match (literal prefilter) | ON | If the message does not even contain the fixed text a script looks for (e.g. `</status>`, `abc` inside `(?:abc)`, either of `foo\|bar`), the regex is not run. Results are 100% identical; with the `i` flag the check folds case exactly like the regex engine. |
+| ② Skip runs that cannot match (literal prefilter) | ON | If the message does not even contain the fixed text a script looks for (e.g. both `<status>` and `</status>`, `abc` inside `(?:abc)`, either of `foo\|bar`), or is shorter than the pattern's least possible match, the regex is not run. Results are 100% identical; with the `i` flag the check folds case exactly like the regex engine. |
 | ③ Reuse results (memory cache) | ON | When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with `{{macros}}` are left out automatically. Oldest entries are evicted beyond 3000 entries or 64 MB. |
 | ④ Rest display scripts while streaming | ON | While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. |
 | Compromise (an option of ④) | OFF | With ④ on: instead of skipping them, display scripts still format the lines that are already complete, at most once per interval (default 500 ms); the line being written stays raw, and the finished reply gets every script. Needs the MessageFormatter hooks, like ⑤. |
@@ -38,7 +38,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
   - `⚡` a single run took over 50 ms
   - `∅` ran 20+ times without ever changing the text (a candidate to disable, also listed in the summary)
 - Click a row to open the script in SillyTavern's regex editor; the power button at the end of the row turns the script off (same as its switch in the Regex extension's list). Patterns that are not scripts have no buttons.
-- Scripts whose **Literal** column says "none" get no benefit from ② and always run. Several literals (`"a" | "b"`) mean any one of them must be present. The table lists only patterns that ran or were skipped at least once; in a narrow panel (phones) the Avg, Replacer and Literal columns are hidden and remain in the text report.
+- Scripts whose **Literal** column says "none" get no benefit from ② and always run (unless the minimum length alone rules a message out). `"a" & "b"` means both must be present, `"a" | "b"` any one of them; hover a cell for the shortest possible match. The table lists only patterns that ran or were skipped at least once; in a narrow panel (phones) the Avg, Replacer and Literal columns are hidden and remain in the text report.
 - **Limits** lets you change ③'s entry count, longest cached input and memory (MB), ⑤'s longest saved result and the compromise interval. The line above it shows ③'s usage and this chat's ⑤ storage.
 
 ## SillyTavern settings that help

@@ -67,7 +67,6 @@
     "Runs that changed the text": "텍스트를 실제로 바꾼 실행 횟수",
     "Runs skipped by ② (the fixed text was absent)": "②가 건너뛴 횟수 (리터럴 없음)",
     "Results reused by ③": "③이 결과를 재사용한 횟수",
-    "The fixed text ② looks for before running this script": "②가 실행 전에 확인하는 리터럴",
     "none": "없음",
     "How to read the table": "표 읽는 법",
     "Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.": "오래 걸린 순서. 굵게 표시된 행은 혼자 전체 시간의 절반 이상.",
@@ -100,7 +99,6 @@
     "Estimated time saved: not available yet (no measured runs)": "절약 추정: 아직 계산할 수 없음 (측정된 실행 없음)",
     "#1 \"${0}\" takes ${1}% of the total time": "1위 \"${0}\" 가 전체 시간의 ${1}% 차지",
     "Candidates to disable (ran ${0}+ times, never changed the text): ${1}": "끄기 후보 (${0}회 이상 실행, 텍스트 변경 없음): ${1}",
-    "Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Changed | Skips | Hits | Stream skips | Literal | Warnings": "순위 | 스크립트 | 실행 | 총ms | 평균ms | 최대ms | 치환ms | 변경 | 스킵 | 히트 | 스트리밍 스킵 | 리터럴 | 경고",
     ".*-style": ".* 계열",
     "nested quantifier": "중첩 수량자",
     "spike": "스파이크",
@@ -108,5 +106,8 @@
     "This chat (${0} messages): ${1} ms with the features off, ${2} ms on — ${3} ms saved (${4}%)": "이 채팅 (메시지 ${0}개): 기능을 끄면 ${1} ms, 켜면 ${2} ms. ${3} ms 절약 (${4}%)",
     "\"${0}\" is not in the Regex extension's list.": "\"${0}\" 스크립트를 정규식 확장 목록에서 찾을 수 없습니다.",
     "Turned off: ${0}": "껐습니다: ${0}",
-    "Wait until the generation finishes.": "생성이 끝난 뒤에 측정하세요."
+    "Wait until the generation finishes.": "생성이 끝난 뒤에 측정하세요.",
+    "Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings": "순위 | 스크립트 | 실행 | 총ms | 평균ms | 최대ms | 치환ms | 변경 | 스킵 | 히트 | 스트리밍 스킵 | 리터럴 | 최소 길이 | 경고",
+    "The fixed text ② looks for before running this script: every literal joined by & must be present, one of those joined by |. Hover a cell for the shortest possible match.": "②가 실행 전에 확인하는 리터럴. &로 이어진 것은 전부, |로 이어진 것은 하나라도 있어야 실행. 셀에 마우스를 올리면 최소 매치 길이 표시.",
+    "Shortest possible match: ${0} characters. ② skips shorter messages.": "최소 매치 길이 ${0}글자. 이보다 짧은 메시지는 ② 가 건너뜀."
 }

@@ -7,6 +7,16 @@ import { readFileSync } from 'node:fs';
 export const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 
+const num = (s) => Number(String(s).replace(/[^\d.-]/g, ''));
+const row = (rows, name) => rows.find(x => x.Script === name) ?? assert.fail(`no row ${name}`);
+/** Rows of the extension's text report, each keyed by the column headers. */
+function reportRows(text) {
+    const lines = text.split('\n');
+    const head = lines.indexOf('') + 1; // the table header follows the first blank line
+    const cols = lines[head].split(' | ');
+    return lines.slice(head + 1).filter(Boolean).map(l => Object.fromEntries(l.split(' | ').map((v, i) => [cols[i], v])));
+}
+
 /** Asserts two record lists ([label, value][]) are identical, naming the first differing record. */
 function sameRecords(a, b, what, skip = () => false) {
     assert.equal(a.length, b.length, `${what}: record count`);
@@ -109,6 +119,26 @@ test('item 8: group and alternation literals prefilter; optional astral characte
     assert.ok(r.baseline.groupRuns > 0 && r.baseline.altRuns > 0, 'baseline has no needle for these');
     assert.equal(r.current.groupRuns, 0, 'group literal prefilters');
     assert.equal(r.current.altRuns, 0, 'alternation prefilters');
+});
+
+test('AND prefilter: every mandatory literal must be present; messages shorter than the least match are skipped', async ({ each }) => {
+    const r = await each('needleAnd');
+    assert.deepEqual(r.none.out, ['xab aby', 'xab only', '!', '123', '#', 'has </status> only', 'ok']);
+    assert.deepEqual(r.baseline.out, r.none.out);
+    assert.deepEqual(r.current.out, r.none.out);
+    assert.deepEqual(r.baseline.both, [1, 1, 1, 0, 0, 0, 0], 'baseline checks one literal');
+    assert.deepEqual(r.current.both, [1, 0, 1, 0, 0, 0, 0], '"xab" and "aby" must both be present');
+    assert.deepEqual(r.baseline.five, [1, 1, 1, 1, 1, 1, 1], 'baseline always runs a pattern without literals');
+    assert.deepEqual(r.current.five, [1, 1, 0, 0, 1, 1, 1], 'a 3-character message (or "!" left by Both) cannot contain 5 digits');
+    assert.deepEqual(r.baseline.tag, [0, 0, 0, 0, 0, 1, 1]);
+    assert.deepEqual(r.current.tag, [0, 0, 0, 0, 0, 0, 1], 'the opening tag is mandatory too');
+    const rows = reportRows(r.current.report);
+    assert.equal(row(rows, 'Both').Literal, '"xab" & "aby"');
+    assert.equal(row(rows, 'Both')['Min length'], '4');
+    assert.equal(row(rows, 'Five').Literal, '-');
+    assert.equal(row(rows, 'Five')['Min length'], '5');
+    assert.equal(row(rows, 'Tag').Literal, '"</status>" & "<status>"');
+    assert.equal(row(rows, 'Tag')['Min length'], '17');
 });
 
 test('item 6: the memo has a memory budget with LRU eviction', async ({ each }) => {
@@ -225,22 +255,20 @@ test('item 9: "Measure on this chat" renders with the features off and on and sh
     assert.ok(r.current.chatUnchanged);
 });
 
-const num = (s) => Number(String(s).replace(/[^\d.-]/g, ''));
-const row = (rows, name) => rows.find(x => x.Script === name) ?? assert.fail(`no row ${name}`);
 
 test('item 10: summary shows the estimated time saved = (skips + hits + streaming skips) x average run time', async ({ each }) => {
     const r = await each('insights', null, { variants: ['baseline', 'current'] });
     assert.doesNotMatch(r.baseline.text, /≈/);
     const m = /Estimated time saved: ≈([\d.]+) ms/.exec(r.current.text);
     assert.ok(m, r.current.text);
-    const want = r.current.rows.reduce((acc, x) => acc + (num(x.Runs) ? (num(x.Skips) + num(x.Hits) + num(x['Stream skips'])) * num(x['Total ms']) / num(x.Runs) : 0), 0);
+    const want = reportRows(r.current.text).reduce((acc, x) => acc + (num(x.Runs) ? (num(x.Skips) + num(x.Hits) + num(x['Stream skips'])) * num(x['Total ms']) / num(x.Runs) : 0), 0);
     assert.ok(want > 0);
     assert.ok(Math.abs(num(m[1]) - want) <= want * 0.02 + 0.05, `${m[1]} vs ${want}`);
 });
 
 test('item 11: scripts that ran many times without changing the text are flagged', async ({ each }) => {
     const r = await each('insights', null, { variants: ['current'] });
-    const rows = r.current.rows;
+    const rows = reportRows(r.current.text);
     assert.ok(num(row(rows, 'Changes').Changed) > 0);
     assert.equal(num(row(rows, 'Never changes').Changed), 0);
     for (const name of ['Never changes', 'Slow regex']) assert.match(row(rows, name).Warnings, /no effect/, name);
@@ -250,9 +278,10 @@ test('item 11: scripts that ran many times without changing the text are flagged
 
 test('item 12: replacer (macro) time is measured separately from regex time', async ({ each }) => {
     const r = await each('insights', null, { variants: ['baseline', 'current'] });
-    assert.ok(!r.baseline.rows[0] || !('Replacer ms' in r.baseline.rows[0]));
-    const macro = row(r.current.rows, 'Slow macro');
-    const regex = row(r.current.rows, 'Slow regex');
+    assert.doesNotMatch(r.baseline.text, /Replacer ms/);
+    const rows = reportRows(r.current.text);
+    const macro = row(rows, 'Slow macro');
+    const regex = row(rows, 'Slow regex');
     assert.ok(num(macro['Replacer ms']) >= 150, `30 x 2 ms x 3: ${macro['Replacer ms']}`);
     assert.ok(num(macro['Replacer ms']) >= num(macro['Total ms']) * 0.8);
     assert.ok(num(regex['Total ms']) > 0);
@@ -260,11 +289,11 @@ test('item 12: replacer (macro) time is measured separately from regex time', as
 });
 
 test('item 13: nested quantifiers and execution spikes are flagged', async ({ each }) => {
-    const r = await each('insights', null, { variants: ['current'] });
-    assert.match(row(r.current.rows, 'Nested').Warnings, /nested quantifier/);
-    assert.match(row(r.current.rows, 'Slow macro').Warnings, /spike/);
-    assert.ok(num(row(r.current.rows, 'Slow macro')['Max ms']) > 50);
-    assert.doesNotMatch(row(r.current.rows, 'Changes').Warnings, /nested|spike/);
+    const rows = reportRows((await each('insights', null, { variants: ['current'] })).current.text);
+    assert.match(row(rows, 'Nested').Warnings, /nested quantifier/);
+    assert.match(row(rows, 'Slow macro').Warnings, /spike/);
+    assert.ok(num(row(rows, 'Slow macro')['Max ms']) > 50);
+    assert.doesNotMatch(row(rows, 'Changes').Warnings, /nested|spike/);
 });
 
 test('item 14: a table row opens its script in the regex editor; its off button disables the script', async ({ each }) => {
