@@ -345,3 +345,45 @@ export async function persistDepth(h) {
     out.push(render(1));
     return out;
 }
+
+/** ⑰ Everything the panel, the report, the slash command and the toasts show, after some activity. */
+export async function uiTexts(h) {
+    applyProfile(h, { persist: true });
+    await useScripts(h, [
+        script({ scriptName: 'Status card', findRegex: '/<status>([\\s\\S]*?)<\\/status>/g', replaceString: '<b>$1</b>', markdownOnly: true }),
+        script({ scriptName: 'Greedy', findRegex: '/x.*y/g', replaceString: 'z' }),
+        script({ scriptName: 'Nobody', findRegex: '/nothing-here/g', replaceString: '' }),
+    ]);
+    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: 'x <status>ok</status> y', extra: {} }] });
+    for (let i = 0; i < 3; i++) {
+        h.engine.getRegexedString(h.st.chat[0].mes, P.AI);
+        h.st.messageFormatting(h.st.chat[0].mes, 'Char', false, false, 0);
+    }
+    const root = document.getElementById('regex_perf_kit');
+    if (!root) return null;
+    root.querySelector('#rpk_refresh').click();
+    const texts = new Set();
+    const walk = (el) => {
+        for (const node of el.childNodes) {
+            if (node.nodeType === Node.TEXT_NODE && node.textContent.trim()) texts.add(node.textContent.trim());
+            if (node.nodeType === Node.ELEMENT_NODE) {
+                if (node.title) texts.add(node.title);
+                walk(node);
+            }
+        }
+    };
+    walk(root);
+    root.querySelector('#rpk_reset').click();
+    return {
+        texts: [...texts],
+        all: root.innerText + '\n' + [...root.querySelectorAll('[title]')].map(e => e.title).join('\n'),
+        report: await report(h),
+        help: h.commands.regexperf.helpString,
+        toasts: h.toasts.map(([, msg]) => msg),
+    };
+}
+
+/** ⑰ Keys whose translation in this locale is not the expected value (e.g. SillyTavern already translates them). */
+export function translations(h, entries) {
+    return entries.filter(([key, value]) => h.i18n.translate(key) !== value);
+}

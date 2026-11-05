@@ -13,6 +13,7 @@ import { regexFromString } from '../../../utils.js';
 const MODULE_NAME = 'regex_perf_kit';
 const EXTRA_KEY = 'regex_perf_cache';
 const ctx = () => SillyTavern.getContext();
+const { t, translate } = ctx();
 
 // ---- Settings ----
 
@@ -304,7 +305,7 @@ function buildInfo() {
         // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
         const replacement = replaceString.replace(/{{match}}/gi, '$0');
         const info = {
-            name: s.scriptName || '(이름 없음)',
+            name: s.scriptName || t`(no name)`,
             markdownOnly: !!s.markdownOnly,
             // No macros, and no group reference that could complete one (<$1>, {$1}): the output then depends
             // only on the input, so it can be memoized.
@@ -366,7 +367,7 @@ function getStat(key, re) {
     let st = stats.get(key);
     if (!st) {
         st = {
-            name: '(알 수 없음)',
+            name: t`(unknown)`,
             src: '/' + re.source + '/' + re.flags,
             calls: 0, totalMs: 0, maxMs: 0,
             skipped: 0, hits: 0, streamSkipped: 0, bypass: 0,
@@ -600,14 +601,14 @@ function buildReportText() {
     const c = s.counts;
     const lines = [
         `Regex Perf Kit report (${new Date().toLocaleString()})`,
-        `측정 시작: ${new Date(statsSince).toLocaleTimeString()} / 채팅 메시지 ${s.chatLen}개`,
-        `스크립트: 전체 ${c.total}, 활성 ${c.active} (표시용 ${c.markdownOnly}, 프롬프트용 ${c.promptOnly}), 리터럴 없음 ${c.noNeedle}, 무거운 패턴 의심 ${c.heavy}`,
-        `실행 ${s.calls}회 / 총 ${fmtMs(s.total)}ms | 프리필터 스킵 ${s.skipped} | 캐시 히트 ${s.hits} | 스트리밍 스킵 ${s.streamSkipped} | 영구캐시 바이패스 ${s.bypass} (히트 ${persistStats.hits}, 저장 ${persistStats.stores})`,
+        t`Since: ${new Date(statsSince).toLocaleTimeString()} / chat messages: ${s.chatLen}`,
+        t`Scripts: ${c.total} total, ${c.active} active (display ${c.markdownOnly}, prompt ${c.promptOnly}), no literal ${c.noNeedle}, possibly heavy ${c.heavy}`,
+        t`Ran ${s.calls} times / ${fmtMs(s.total)} ms total | prefilter skips ${s.skipped} | cache hits ${s.hits} | streaming skips ${s.streamSkipped} | persistent cache bypasses ${s.bypass} (hits ${persistStats.hits}, stored ${persistStats.stores})`,
     ];
-    if (s.top) lines.push(`1위 "${s.top.name}" 가 전체 시간의 ${s.topShare.toFixed(0)}% 차지`);
-    lines.push('', '순위 | 스크립트 | 실행 | 총ms | 평균ms | 최대ms | 스킵 | 히트 | 리터럴 | 경고');
+    if (s.top) lines.push(t`#1 "${s.top.name}" takes ${s.topShare.toFixed(0)}% of the total time`);
+    lines.push('', t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Skips | Hits | Literal | Warnings`);
     s.rows.forEach((r, i) => {
-        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${r.skipped} | ${r.hits} | ${fmtNeedles(r) ?? '-'} | ${r.heavy ? '.* 계열' : ''}`);
+        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${r.skipped} | ${r.hits} | ${fmtNeedles(r) ?? '-'} | ${r.heavy ? t`.*-style` : ''}`);
     });
     return lines.join('\n');
 }
@@ -625,7 +626,74 @@ function resetStats() {
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' };
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ESCAPES[c]);
 
-const SETTINGS_HTML = `
+// UI text is English; Korean locales get the Korean wording below. addLocaleData() never overrides SillyTavern's own
+// translations, so a key SillyTavern already translates differently gets its own id (translate(text, id)).
+const KO = {
+    'Measuring...': '측정 중...',
+    'Measures each script\'s execution time. Almost free.': '스크립트별 실행 시간을 측정합니다. 비용이 거의 없습니다.',
+    '① Profiler': '① 프로파일러',
+    'Skips a regex when the message lacks a fixed string that every match must contain. Results are identical.': '패턴에 반드시 포함돼야 하는 고정 문자열이 메시지에 없으면 정규식을 실행하지 않습니다. 결과는 동일합니다.',
+    '④ Literal prefilter': '④ 리터럴 프리필터',
+    'Reuses the previous result when the same script runs on the same message again. Scripts with {{macros}} in the replacement, and text containing macros, are excluded automatically.': '같은 메시지에 같은 스크립트를 다시 돌릴 때 이전 결과를 재사용합니다. 치환문에 {{매크로}}가 있는 스크립트와 매크로가 든 텍스트는 자동 제외.',
+    '② Result cache (memory)': '② 결과 캐시 (메모리)',
+    'While streaming, display-only (markdownOnly) scripts are skipped and applied once the generation finishes.': '스트리밍 중에는 표시 전용(markdownOnly) 스크립트를 건너뛰고, 생성이 끝나면 한 번 적용합니다.',
+    '⑥ Skip display scripts while streaming': '⑥ 스트리밍 중 표시용 스킵',
+    'Stores the display result in the message (extra) so reopening the chat skips recomputing it. Chat files may grow.': '표시 결과를 메시지(extra)에 저장해 채팅을 다시 열 때 재계산을 생략합니다. 채팅 파일이 커질 수 있습니다.',
+    '⑧ Persistent display cache (optional)': '⑧ 표시 결과 영구 캐시 (선택)',
+    'rpk_refresh': '새로고침',
+    'Reset stats': '측정 초기화',
+    'Copy report': '리포트 복사',
+    'Clear persistent cache (this chat)': '영구 캐시 삭제(현재 채팅)',
+    'Script': '스크립트',
+    'Runs': '실행',
+    'Total ms': '총 ms',
+    'Avg': '평균',
+    'Max': '최대',
+    'Skips': '스킵',
+    'Hits': '히트',
+    'Literal': '리터럴',
+    '⑥·⑦ What SillyTavern\'s own settings can do': '⑥·⑦ 설정만으로 할 수 있는 것 (ST 기본 설정)',
+    '<b>User Settings → "# Messages to Load"</b>: how many messages are rendered (= regex applied) when a chat opens. 0 = all. 50–100 makes loading much faster.': '<b>User Settings → "# Messages to Load"</b>: 채팅을 열 때 렌더링(=정규식 적용)하는 메시지 수. 0=전부. 50~100 정도로 줄이면 로딩이 크게 빨라집니다.',
+    '<b>User Settings → "Streaming FPS"</b>: screen updates per second while streaming. Every update runs all display regexes, so 10–15 reduces lag.': '<b>User Settings → "Streaming FPS"</b>: 스트리밍 중 화면 갱신 횟수. 갱신마다 표시용 정규식이 전부 돌아가므로 10~15로 낮추면 렉이 줄어듭니다.',
+    'Turn on <b>"Only Format Display"</b> for display scripts and <b>"Only Format Prompt"</b> for prompt scripts. Scripts with neither run when a message is saved and are not skipped while streaming.': '표시용 스크립트는 <b>"Only Format Display"</b>, 프롬프트용은 <b>"Only Format Prompt"</b>를 켜두세요. 둘 다 꺼진 스크립트는 저장 시점에 돌아가며, 이 확장의 스트리밍 스킵 대상도 아닙니다.',
+    'Scripts <b>${0}</b>/${1} active (display ${2}, prompt ${3})': '스크립트 <b>${0}</b>/${1} 활성 (표시용 ${2}, 프롬프트용 ${3})',
+    'no literal <b>${0}</b>': '리터럴 없음 <b>${0}</b>',
+    '<code>.*</code>-style <b>${0}</b>': '<code>.*</code> 계열 <b>${0}</b>',
+    'chat ${0} messages': '채팅 ${0}개',
+    'Ran <b>${0}</b> times / <b>${1}</b> ms': '실행 <b>${0}</b>회 / <b>${1}</b> ms',
+    'prefilter skips <b>${0}</b>': '프리필터 스킵 <b>${0}</b>',
+    'cache hits <b>${0}</b>': '캐시 히트 <b>${0}</b>',
+    'streaming skips <b>${0}</b>': '스트리밍 스킵 <b>${0}</b>',
+    'persistent cache hits <b>${0}</b>': '영구캐시 히트 <b>${0}</b>',
+    'Slowest script: <b>${0}</b> — ${1}% of the total': '가장 느린 스크립트: <b>${0}</b> — 전체의 ${1}%',
+    '⚠ Could not patch the regex engine — this SillyTavern version is not supported.': '⚠ 정규식 엔진 패치 실패 — 이 ST 버전은 지원되지 않습니다.',
+    'Pattern that may backtrack a lot': '백트래킹이 많을 수 있는 패턴',
+    'none': '없음',
+    'No runs measured yet. Render a message or reopen the chat.': '아직 측정된 실행이 없습니다. 메시지를 렌더링하거나 채팅을 다시 열어보세요.',
+    '⑧ is unavailable: this SillyTavern version has no MessageFormatter hooks (needs a recent staging build).': '⑧ 영구 캐시는 이 ST 버전에 MessageFormatter 훅이 없어 사용할 수 없습니다 (staging 최신 버전 필요).',
+    '⑧ on: display results are stored in the message extra. Changing a script changes the key, so results are recomputed automatically.': '⑧ 켜짐: 표시 결과가 메시지 extra에 저장됩니다. 스크립트를 바꾸면 키가 달라져 자동으로 재계산됩니다.',
+    'Stats reset.': '측정값을 초기화했습니다.',
+    'Report copied to the clipboard.': '리포트를 클립보드에 복사했습니다.',
+    'Could not copy — use the /regexperf command to see the report in a popup.': '클립보드 복사 실패 — /regexperf 명령으로 팝업에서 확인하세요.',
+    'Removed ${0} persistent cache entries.': '영구 캐시 ${0}개를 삭제했습니다.',
+    'Stats reset': '측정값 초기화 완료',
+    '<div>Shows the Regex Perf Kit report in a popup. <code>/regexperf reset</code> resets the stats, <code>/regexperf text</code> returns it as text.</div>': '<div>Regex Perf Kit 리포트를 팝업으로 표시합니다. <code>/regexperf reset</code> 으로 측정 초기화, <code>/regexperf text</code> 로 텍스트 반환.</div>',
+    '(no name)': '(이름 없음)',
+    '(unknown)': '(알 수 없음)',
+    'Since: ${0} / chat messages: ${1}': '측정 시작: ${0} / 채팅 메시지 ${1}개',
+    'Scripts: ${0} total, ${1} active (display ${2}, prompt ${3}), no literal ${4}, possibly heavy ${5}': '스크립트: 전체 ${0}, 활성 ${1} (표시용 ${2}, 프롬프트용 ${3}), 리터럴 없음 ${4}, 무거운 패턴 의심 ${5}',
+    'Ran ${0} times / ${1} ms total | prefilter skips ${2} | cache hits ${3} | streaming skips ${4} | persistent cache bypasses ${5} (hits ${6}, stored ${7})': '실행 ${0}회 / 총 ${1}ms | 프리필터 스킵 ${2} | 캐시 히트 ${3} | 스트리밍 스킵 ${4} | 영구캐시 바이패스 ${5} (히트 ${6}, 저장 ${7})',
+    '#1 "${0}" takes ${1}% of the total time': '1위 "${0}" 가 전체 시간의 ${1}% 차지',
+    'Rank | Script | Runs | Total ms | Avg ms | Max ms | Skips | Hits | Literal | Warnings': '순위 | 스크립트 | 실행 | 총ms | 평균ms | 최대ms | 스킵 | 히트 | 리터럴 | 경고',
+    '.*-style': '.* 계열',
+};
+{
+    const { getCurrentLocale, addLocaleData } = ctx();
+    const locale = getCurrentLocale();
+    if (locale.startsWith('ko')) addLocaleData(locale, KO);
+}
+
+const settingsHtml = () => `
 <div id="regex_perf_kit" class="regex-perf-kit">
   <div class="inline-drawer">
     <div class="inline-drawer-toggle inline-drawer-header">
@@ -633,47 +701,47 @@ const SETTINGS_HTML = `
       <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
     <div class="inline-drawer-content">
-      <div class="rpk-summary" id="rpk_summary">측정 중...</div>
+      <div class="rpk-summary" id="rpk_summary">${t`Measuring...`}</div>
 
       <div class="rpk-grid">
-        <label class="checkbox_label" title="스크립트별 실행 시간을 측정합니다. 비용이 거의 없습니다.">
-          <input type="checkbox" id="rpk_profiler"><span>① 프로파일러</span>
+        <label class="checkbox_label" title="${t`Measures each script's execution time. Almost free.`}">
+          <input type="checkbox" id="rpk_profiler"><span>${t`① Profiler`}</span>
         </label>
-        <label class="checkbox_label" title="패턴에 반드시 포함돼야 하는 고정 문자열이 메시지에 없으면 정규식을 실행하지 않습니다. 결과는 동일합니다.">
-          <input type="checkbox" id="rpk_prefilter"><span>④ 리터럴 프리필터</span>
+        <label class="checkbox_label" title="${t`Skips a regex when the message lacks a fixed string that every match must contain. Results are identical.`}">
+          <input type="checkbox" id="rpk_prefilter"><span>${t`④ Literal prefilter`}</span>
         </label>
-        <label class="checkbox_label" title="같은 메시지에 같은 스크립트를 다시 돌릴 때 이전 결과를 재사용합니다. 치환문에 {{매크로}}가 있는 스크립트는 자동 제외.">
-          <input type="checkbox" id="rpk_memo"><span>② 결과 캐시 (메모리)</span>
+        <label class="checkbox_label" title="${t`Reuses the previous result when the same script runs on the same message again. Scripts with {{macros}} in the replacement, and text containing macros, are excluded automatically.`}">
+          <input type="checkbox" id="rpk_memo"><span>${t`② Result cache (memory)`}</span>
         </label>
-        <label class="checkbox_label" title="스트리밍 중에는 표시 전용(markdownOnly) 스크립트를 건너뛰고, 생성이 끝나면 한 번 적용합니다.">
-          <input type="checkbox" id="rpk_streaming"><span>⑥ 스트리밍 중 표시용 스킵</span>
+        <label class="checkbox_label" title="${t`While streaming, display-only (markdownOnly) scripts are skipped and applied once the generation finishes.`}">
+          <input type="checkbox" id="rpk_streaming"><span>${t`⑥ Skip display scripts while streaming`}</span>
         </label>
-        <label class="checkbox_label" id="rpk_persist_label" title="표시 결과를 메시지(extra)에 저장해 채팅을 다시 열 때 재계산을 생략합니다. 채팅 파일이 커질 수 있습니다.">
-          <input type="checkbox" id="rpk_persist"><span>⑧ 표시 결과 영구 캐시 (선택)</span>
+        <label class="checkbox_label" id="rpk_persist_label" title="${t`Stores the display result in the message (extra) so reopening the chat skips recomputing it. Chat files may grow.`}">
+          <input type="checkbox" id="rpk_persist"><span>${t`⑧ Persistent display cache (optional)`}</span>
         </label>
       </div>
       <div class="rpk-note" id="rpk_persist_note"></div>
 
       <div class="rpk-buttons">
-        <div class="menu_button" id="rpk_refresh">새로고침</div>
-        <div class="menu_button" id="rpk_reset">측정 초기화</div>
-        <div class="menu_button" id="rpk_copy">리포트 복사</div>
-        <div class="menu_button" id="rpk_clear_persist">영구 캐시 삭제(현재 채팅)</div>
+        <div class="menu_button" id="rpk_refresh">${translate('Refresh', 'rpk_refresh')}</div>
+        <div class="menu_button" id="rpk_reset">${t`Reset stats`}</div>
+        <div class="menu_button" id="rpk_copy">${t`Copy report`}</div>
+        <div class="menu_button" id="rpk_clear_persist">${t`Clear persistent cache (this chat)`}</div>
       </div>
 
       <div class="rpk-table-wrap">
         <table class="rpk-table" id="rpk_table">
-          <thead><tr><th>#</th><th>스크립트</th><th>실행</th><th>총 ms</th><th>평균</th><th>최대</th><th>스킵</th><th>히트</th><th>리터럴</th></tr></thead>
+          <thead><tr><th>#</th><th>${t`Script`}</th><th>${t`Runs`}</th><th>${t`Total ms`}</th><th>${t`Avg`}</th><th>${t`Max`}</th><th>${t`Skips`}</th><th>${t`Hits`}</th><th>${t`Literal`}</th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
 
       <details class="rpk-tips">
-        <summary>⑥·⑦ 설정만으로 할 수 있는 것 (ST 기본 설정)</summary>
+        <summary>${t`⑥·⑦ What SillyTavern's own settings can do`}</summary>
         <ul>
-          <li><b>User Settings → "# Messages to Load"</b>: 채팅을 열 때 렌더링(=정규식 적용)하는 메시지 수. 0=전부. 50~100 정도로 줄이면 로딩이 크게 빨라집니다.</li>
-          <li><b>User Settings → "Streaming FPS"</b>: 스트리밍 중 화면 갱신 횟수. 갱신마다 표시용 정규식이 전부 돌아가므로 10~15로 낮추면 렉이 줄어듭니다.</li>
-          <li>표시용 스크립트는 <b>"Only Format Display"</b>, 프롬프트용은 <b>"Only Format Prompt"</b>를 켜두세요. 둘 다 꺼진 스크립트는 저장 시점에 돌아가며, 이 확장의 스트리밍 스킵 대상도 아닙니다.</li>
+          <li>${t`<b>User Settings → "# Messages to Load"</b>: how many messages are rendered (= regex applied) when a chat opens. 0 = all. 50–100 makes loading much faster.`}</li>
+          <li>${t`<b>User Settings → "Streaming FPS"</b>: screen updates per second while streaming. Every update runs all display regexes, so 10–15 reduces lag.`}</li>
+          <li>${t`Turn on <b>"Only Format Display"</b> for display scripts and <b>"Only Format Prompt"</b> for prompt scripts. Scripts with neither run when a message is saved and are not skipped while streaming.`}</li>
         </ul>
       </details>
     </div>
@@ -696,28 +764,36 @@ function renderPanel() {
     if (!ui) return;
     const s = buildSummary();
     const c = s.counts;
-    let summary = `<div>스크립트 <b>${c.active}</b>/${c.total} 활성 (표시용 ${c.markdownOnly}, 프롬프트용 ${c.promptOnly})`
-        + ` · 리터럴 없음 <b>${c.noNeedle}</b> · <code>.*</code> 계열 <b>${c.heavy}</b> · 채팅 ${s.chatLen}개</div>`
-        + `<div>실행 <b>${s.calls}</b>회 / <b>${fmtMs(s.total)}</b> ms · 프리필터 스킵 <b>${s.skipped}</b> · 캐시 히트 <b>${s.hits}</b> · 스트리밍 스킵 <b>${s.streamSkipped}</b>`
-        + (persistAvailable ? ` · 영구캐시 히트 <b>${persistStats.hits}</b>` : '') + '</div>';
+    let summary = '<div>' + [
+        t`Scripts <b>${c.active}</b>/${c.total} active (display ${c.markdownOnly}, prompt ${c.promptOnly})`,
+        t`no literal <b>${c.noNeedle}</b>`,
+        t`<code>.*</code>-style <b>${c.heavy}</b>`,
+        t`chat ${s.chatLen} messages`,
+    ].join(' · ') + '</div><div>' + [
+        t`Ran <b>${s.calls}</b> times / <b>${fmtMs(s.total)}</b> ms`,
+        t`prefilter skips <b>${s.skipped}</b>`,
+        t`cache hits <b>${s.hits}</b>`,
+        t`streaming skips <b>${s.streamSkipped}</b>`,
+        ...(persistAvailable ? [t`persistent cache hits <b>${persistStats.hits}</b>`] : []),
+    ].join(' · ') + '</div>';
     if (s.top && s.calls > 0) {
-        summary += `<div class="${s.topShare >= 50 ? 'rpk-warn' : ''}">가장 느린 스크립트: <b>${esc(s.top.name)}</b> — 전체의 ${s.topShare.toFixed(0)}%</div>`;
+        summary += `<div class="${s.topShare >= 50 ? 'rpk-warn' : ''}">${t`Slowest script: <b>${esc(s.top.name)}</b> — ${s.topShare.toFixed(0)}% of the total`}</div>`;
     }
-    if (!patched) summary += '<div class="rpk-warn">⚠ 정규식 엔진 패치 실패 — 이 ST 버전은 지원되지 않습니다.</div>';
+    if (!patched) summary += `<div class="rpk-warn">${t`⚠ Could not patch the regex engine — this SillyTavern version is not supported.`}</div>`;
     setContent(ui.summary, summary);
 
     setContent(ui.tbody, s.rows.slice(0, 60).map((r, i) => {
         const cls = (s.total > 0 && r.totalMs / s.total >= 0.5) ? 'rpk-hot' : (r.heavy ? 'rpk-heavy' : '');
         return `<tr class="${cls}" title="${esc(r.src)}">
-          <td>${i + 1}</td><td>${esc(r.name)}${r.heavy ? ' <span class="rpk-badge" title="백트래킹이 많을 수 있는 패턴">.*</span>' : ''}</td>
+          <td>${i + 1}</td><td>${esc(r.name)}${r.heavy ? ` <span class="rpk-badge" title="${t`Pattern that may backtrack a lot`}">.*</span>` : ''}</td>
           <td>${r.calls}</td><td>${fmtMs(r.totalMs)}</td><td>${fmtMs(avgMs(r))}</td><td>${fmtMs(r.maxMs)}</td>
-          <td>${r.skipped}</td><td>${r.hits}</td><td>${r.needle?.needles ? esc(fmtNeedles(r)) : '<span class="rpk-dim">없음</span>'}</td>
+          <td>${r.skipped}</td><td>${r.hits}</td><td>${r.needle?.needles ? esc(fmtNeedles(r)) : '<span class="rpk-dim">${t`none`}</span>'}</td>
         </tr>`;
-    }).join('') || '<tr><td colspan="9" class="rpk-dim">아직 측정된 실행이 없습니다. 메시지를 렌더링하거나 채팅을 다시 열어보세요.</td></tr>');
+    }).join('') || `<tr><td colspan="9" class="rpk-dim">${t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
 
     setContent(ui.note, !persistAvailable
-        ? '⑧ 영구 캐시는 이 ST 버전에 MessageFormatter 훅이 없어 사용할 수 없습니다 (staging 최신 버전 필요).'
-        : settings.persist ? '⑧ 켜짐: 표시 결과가 메시지 extra에 저장됩니다. 스크립트를 바꾸면 키가 달라져 자동으로 재계산됩니다.' : '', 'textContent');
+        ? t`⑧ is unavailable: this SillyTavern version has no MessageFormatter hooks (needs a recent staging build).`
+        : settings.persist ? t`⑧ on: display results are stored in the message extra. Changing a script changes the key, so results are recomputed automatically.` : '', 'textContent');
 }
 
 function bindUi() {
@@ -738,18 +814,18 @@ function bindUi() {
     if (!persistAvailable) find('#rpk_persist').disabled = true;
 
     find('#rpk_refresh').addEventListener('click', () => { markDirty(); renderPanel(); });
-    find('#rpk_reset').addEventListener('click', () => { resetStats(); renderPanel(); toastr.info('측정값을 초기화했습니다.'); });
+    find('#rpk_reset').addEventListener('click', () => { resetStats(); renderPanel(); toastr.info(t`Stats reset.`); });
     find('#rpk_copy').addEventListener('click', async () => {
         try {
             await navigator.clipboard.writeText(buildReportText());
-            toastr.success('리포트를 클립보드에 복사했습니다.');
+            toastr.success(t`Report copied to the clipboard.`);
         } catch {
-            toastr.warning('클립보드 복사 실패 — /regexperf 명령으로 팝업에서 확인하세요.');
+            toastr.warning(t`Could not copy — use the /regexperf command to see the report in a popup.`);
         }
     });
     find('#rpk_clear_persist').addEventListener('click', async () => {
         const n = await clearPersistedCache();
-        toastr.info(`영구 캐시 ${n}개를 삭제했습니다.`);
+        toastr.info(t`Removed ${n} persistent cache entries.`);
         renderPanel();
     });
 
@@ -768,7 +844,7 @@ function registerSlash() {
             if (arg === 'reset') {
                 resetStats();
                 renderPanel();
-                return '측정값 초기화 완료';
+                return t`Stats reset`;
             }
             const text = buildReportText();
             if (arg !== 'text' && typeof callGenericPopup === 'function') {
@@ -783,7 +859,7 @@ function registerSlash() {
                 isRequired: false,
             }),
         ] : [],
-        helpString: '<div>Regex Perf Kit 리포트를 팝업으로 표시합니다. <code>/regexperf reset</code> 으로 측정 초기화, <code>/regexperf text</code> 로 텍스트 반환.</div>',
+        helpString: t`<div>Shows the Regex Perf Kit report in a popup. <code>/regexperf reset</code> resets the stats, <code>/regexperf text</code> returns it as text.</div>`,
     }));
 }
 
@@ -805,7 +881,7 @@ eventSource.on(event_types.APP_READY, () => {
     try {
         const container = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
         if (container) {
-            container.insertAdjacentHTML('beforeend', SETTINGS_HTML);
+            container.insertAdjacentHTML('beforeend', settingsHtml());
             bindUi();
             renderPanel();
         }

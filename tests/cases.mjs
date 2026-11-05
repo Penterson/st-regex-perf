@@ -1,6 +1,7 @@
 // Test cases for tests/run.mjs. Each case gets {open, each}: open(variant) boots one harness page, each(scenario)
 // runs a scenario from harness/scenarios.js on a fresh page per variant and returns {none, baseline, current}.
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 /** @type {[string, (t: {open: Function, each: Function}) => Promise<void>][]} */
 export const tests = [];
@@ -142,4 +143,44 @@ test('extra: ⑧ persisted display output refreshes when the message depth or a 
     assert.deepEqual(r.none, ['Hi <meter>', 'Yo!', 'Hi [HP]', 'Next <meter>', 'Yo!!']);
     assert.notDeepEqual(r.baseline, r.none, 'main shows the stored depth-0 output and the old placement (bug reproduced)');
     assert.deepEqual(r.current, r.none);
+});
+
+/** Korean wording that this branch changes on purpose (the behavior it describes changed). */
+const KO_CHANGED = new Set([
+    // ② tooltip: text containing macros is now excluded too (item 3)
+    '같은 메시지에 같은 스크립트를 다시 돌릴 때 이전 결과를 재사용합니다. 치환문에 {{매크로}}가 있는 스크립트는 자동 제외.',
+]);
+// Words the Korean UI keeps in English: product and SillyTavern setting names, units, the test's script names.
+const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|markdownOnly|staging|extra|regexperf|reset|text|Status card|Greedy|Nobody|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b/g;
+
+test('item 17: Korean locale keeps main\'s Korean UI text; nothing is left untranslated', async ({ each }) => {
+    const r = await each('uiTexts', null, { locale: 'ko-kr', variants: ['baseline', 'current'] });
+    const norm = (s) => s.replace(/\d+(?:\.\d+)?/g, '#'); // timings differ between runs
+    const now = new Set(r.current.texts.map(norm));
+    const missing = r.baseline.texts.filter(s => !now.has(norm(s)) && !KO_CHANGED.has(s) && /[가-힣]/.test(s));
+    assert.deepEqual(missing, [], 'Korean panel strings from main that are gone');
+    for (const line of r.baseline.report.split('\n').slice(1)) {
+        const fixed = line.replace(/\d[\d.:/ ]*|"[^"]*"/g, '#').split(/[#|]/).map(s => s.trim()).filter(s => /[가-힣]/.test(s));
+        for (const piece of fixed) assert.ok(r.current.report.includes(piece), `report text "${piece}"`);
+    }
+    assert.equal(r.current.help, r.baseline.help);
+    for (const toast of r.baseline.toasts) assert.ok(r.current.toasts.includes(toast), `toast "${toast}"`);
+    const leftover = (r.current.all + '\n' + r.current.report + '\n' + r.current.help.replace(/<[^>]+>/g, ' ')).replace(EN_ALLOWED, '').match(/[A-Za-z]{3,}/g);
+    assert.equal(leftover, null, 'untranslated English in the Korean UI');
+});
+
+test('item 17: English locale shows no Korean', async ({ each }) => {
+    const r = await each('uiTexts', null, { locale: 'en', variants: ['current'] });
+    const hangul = [r.current.all, r.current.report, r.current.help, ...r.current.toasts].join('\n').match(/[가-힣ㄱ-ㅎ]+/g);
+    assert.equal(hangul, null);
+});
+
+test('item 17: every Korean string resolves under SillyTavern\'s real ko-kr.json (no key collisions)', async ({ each }) => {
+    const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+    const block = src.slice(src.indexOf('const KO = {'), src.indexOf('\n};', src.indexOf('const KO = {')));
+    const unquote = (q) => q.slice(1, -1).replace(/\\(.)/g, '$1');
+    const entries = [...block.matchAll(/^ {4}('(?:[^'\\]|\\.)*'): ('(?:[^'\\]|\\.)*'),$/gm)].map(m => [unquote(m[1]), unquote(m[2])]);
+    assert.ok(entries.length > 50, `parsed ${entries.length} entries`);
+    const r = await each('translations', entries, { locale: 'ko-kr', variants: ['current'] });
+    assert.deepEqual(r.current, []);
 });
