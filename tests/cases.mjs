@@ -396,7 +396,20 @@ test('item 15: memo and ⑤ limits are editable (validated) and memo / ⑤ usage
     assert.deepEqual(r.current.found, [true, true, true, true]);
     assert.deepEqual(r.current.values, { memoMaxEntries: 4, memoMaxLen: 0, memoMaxMB: 64, persistMaxLen: 123457 });
     assert.match(r.current.usage, /cache: 4 entries/);
-    assert.match(r.current.usage, /in this chat: 3 messages/);
+    assert.match(r.current.usage, /in this chat: 3 messages, ≈0 KB of 8 MB/);
+});
+
+test('⑤ budget: beyond the per-chat cap the oldest messages\' results are dropped; usage is shown against the cap', async ({ each }) => {
+    const r = await each('persistBudget', null, { variants: ['baseline', 'current'] });
+    assert.deepEqual(r.baseline.stored, Array(26).fill(true), 'baseline keeps everything');
+    assert.equal(r.baseline.hasLimit, false);
+    const kept = r.current.stored.map((v, i) => v ? i : -1).filter(i => i >= 0);
+    assert.ok(kept.length >= 18 && kept.length <= 20, `about 20 x 50 KB fit in 1 MB: ${kept.length}`);
+    assert.deepEqual(kept, Array.from({ length: kept.length }, (_, k) => 26 - kept.length + k), 'the newest messages are kept, the oldest dropped');
+    assert.ok(r.current.chars <= 1048576, 'within the cap');
+    assert.match(r.current.usage, new RegExp(`⑤ saved in this chat: ${kept.length} messages, ≈\\d+ KB of 1 MB`));
+    assert.equal(r.current.hasLimit, true);
+    assert.equal(r.current.limit, 2, 'the cap is editable under Limits');
 });
 
 test('item 16: streaming compromise mode formats completed lines at most every N ms; final render is complete', async ({ each }) => {
@@ -418,7 +431,7 @@ test('item 16: streaming compromise mode formats completed lines at most every N
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
