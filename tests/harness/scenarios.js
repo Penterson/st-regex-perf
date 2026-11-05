@@ -502,7 +502,7 @@ export async function rowMeasure(h) {
         script({ scriptName: 'Slow', findRegex: slowRegex, replaceString: '', markdownOnly: true }),
         script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true }),
     ]);
-    const long = 'word **bold** '.repeat(400);
+    const long = 'word **bold** '.repeat(900); // the quadratic script dominates by far
     h.st.setState({ chat: Array.from({ length: 8 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: `${i} ${long}`, extra: {} })) });
     h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
     const table = async () => (await report(h)).split('\n\n')[1];
@@ -641,6 +641,23 @@ export async function limits(h) {
     h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
     root.querySelector('#rpk_refresh').click();
     return { found, values, usage: root.querySelector('#rpk_usage')?.textContent ?? '' };
+}
+
+/** ⑤ key: two same-length messages with the same fnv1a hash must not share a stored result; old keys are recomputed. */
+export async function persistKey(h) {
+    applyProfile(h, { persist: true });
+    await useScripts(h, [script({ findRegex: '/o/g', replaceString: '0', markdownOnly: true })]);
+    const [a, b] = ['zhjotclp', 'tiofsnfk']; // fnv1a("zhjotclp") === fnv1a("tiofsnfk") === 2945646617
+    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: a, extra: {} }] });
+    const render = () => h.st.messageFormatting(h.st.chat[0].mes, 'Char', false, false, 0);
+    const out = [render()];
+    h.st.chat[0].mes = b; // edited to a colliding message of the same length
+    out.push(render());
+    const entry = h.st.chat[0].extra.regex_perf_cache;
+    // an entry in an older key format is ignored and replaced
+    if (entry) h.st.chat[0].extra.regex_perf_cache = { k: entry.k.replace(/^[^:]+/, 'old'), v: 'STALE' };
+    out.push(render());
+    return { out, key: h.st.chat[0].extra.regex_perf_cache?.k ?? null };
 }
 
 /** ⑤ budget: beyond persistMaxMB per chat, the oldest messages' stored results are dropped first. */
