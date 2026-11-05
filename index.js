@@ -277,7 +277,7 @@ const HEAVY_HINT = /\.\*|\.\+|\[\\s\\S\]\*|\[\^\]\*|\(\.\|\\n\)\*|\[\\w\\W\]\*/;
 
 const keyOf = (re) => re.source + '\u0000' + re.flags;
 
-/** @type {{map: Map<string, object>, counts: object, version: string, builtAt: number} | null} */
+/** @type {{map: Map<string, object>, counts: object, depthRules: number[][], version: string, builtAt: number} | null} */
 let infoCache = null; // null = rebuild on next use
 const markDirty = () => { infoCache = null; };
 
