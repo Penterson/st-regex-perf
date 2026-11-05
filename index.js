@@ -22,6 +22,7 @@ const defaultSettings = Object.freeze({
     memo: true,
     memoMaxEntries: 3000,
     memoMaxLen: 20000,
+    memoMaxMB: 64,
     streamingSkip: true,
     persist: false,
     persistMaxLen: 60000,
@@ -44,7 +45,13 @@ function fnv1a(str) {
     return (h >>> 0).toString(36);
 }
 
+// Set from GENERATION_STARTED until GENERATION_ENDED / GENERATION_STOPPED, so the exact check (which builds the
+// whole getContext() object) only runs while a generation can be streaming. Without those events: always check.
+const { event_types: EVENTS } = ctx();
+let generating = !(EVENTS.GENERATION_STARTED && EVENTS.GENERATION_ENDED && EVENTS.GENERATION_STOPPED);
+
 function isStreamingLive() {
+    if (!generating) return false;
     const sp = ctx().streamingProcessor;
     return !!sp && !sp.isFinished && !sp.isStopped;
 }
@@ -59,82 +66,73 @@ const sanitizeRegexMacro = (x) => (x && typeof x === 'string'
     : x);
 
 const CONTROL_ESCAPES = { n: '\n', t: '\t', r: '\r', f: '\f', v: '\v' };
+const BAIL = Symbol('bail');
 
 /**
- * Extracts a literal substring that EVERY match of the pattern must contain.
- * Conservative: returns null whenever unsure (top-level alternation, exotic escapes, ...).
- * Only characters at group depth 0 that are not optional are considered.
+ * Parses a pattern once. needles: literals of which every match contains at least one (null if none is certain),
+ * decided by test(str). nested: an unbounded quantifier inside an unboundedly repeated group, e.g. (a+)+.
+ * Conservative: classes, class escapes, backreferences, lookarounds, (?i:) modifier groups and the v flag
+ * contribute no literal. Literals in groups that must match join the surrounding run; an alternation yields one
+ * needle per branch (any of them must occur), provided every branch has one.
  * @param {string} source RegExp.source
  * @param {string} flags RegExp.flags
- * @returns {{needle: string, re: RegExp | null} | null} re: case-insensitive check for the i flag
+ * @returns {{needles: string[] | null, test: ((str: string) => boolean) | null, nested: boolean}}
  */
 export function extractNeedle(source, flags) {
-    if (flags.includes('v')) return null;
+    const u = flags.includes('u');
     const n = source.length;
     let i = 0;
-    let depth = 0;
-    let cur = '';
-    let best = ''; // first longest run
-    const endRun = () => {
-        if (cur.length > best.length) best = cur;
-        cur = '';
-    };
-    // Consumes a quantifier (and its lazy '?') at j. optional: it allows zero repetitions.
-    const skipQuant = (j) => {
-        const c = source[j];
-        let len = 0;
-        let optional = false;
+    let nested = false;
+
+    // Quantifier at i, with its lazy '?': {min, inf} or null.
+    const quant = () => {
+        let q = null;
+        const c = source[i];
         if (c === '?' || c === '*' || c === '+') {
-            len = 1;
-            optional = c !== '+';
+            q = { min: c === '+' ? 1 : 0, inf: c !== '?' };
+            i++;
         } else if (c === '{') {
-            const m = /^\{(\d+)(?:,\d*)?\}/.exec(source.slice(j, j + 24));
+            const m = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(i, i + 24));
             if (m) {
-                len = m[0].length;
-                optional = Number(m[1]) === 0;
+                q = { min: Number(m[1]), inf: m[3] === '' };
+                i += m[0].length;
             }
         }
-        if (!len) return { j, optional: false, had: false };
-        j += len;
-        return { j: source[j] === '?' ? j + 1 : j, optional, had: true };
-    };
-    // Adds a literal to the current run, or ends the run, depending on the quantifier that follows.
-    const pushLiteral = (lit, j) => {
-        const q = skipQuant(j);
-        if (depth === 0) {
-            if (lit !== null && !q.optional) cur += lit;
-            if (lit === null || q.had) endRun(); // "ab+c": the run ends after the repeated char
-        }
-        return q.j;
+        if (q && source[i] === '?') i++;
+        return q;
     };
 
-    while (i < n) {
+    // A needle set is better if its shortest needle is longer, then if it has fewer needles.
+    const score = (set) => Math.min(...set.map(s => s.length));
+    const better = (a, b) => !b || score(a) > score(b) || (score(a) === score(b) && a.length < b.length);
+
+    // {lit} for a literal character, {group, opaque} for a group, {lit: null} for anything else.
+    const atom = () => {
         const c = source[i];
         if (c === '\\') {
             const nx = source[i + 1];
-            if (nx === undefined) break;
-            let lit = null;
-            let adv = 2;
-            if ('dDwWsSbB0123456789'.includes(nx)) {
-                // class escapes, boundaries, backreferences, \0: no literal
-            } else if ('pPku'.includes(nx) && (source[i + 2] === '{' || source[i + 2] === '<')) {
-                // \p{..} \P{..} \u{..} \k<..>: skip the argument; give up if it looks like real syntax
-                const e = source.indexOf(source[i + 2] === '<' ? '>' : '}', i + 3);
+            i += 2;
+            if (nx === undefined || 'dDwWsSbB0123456789'.includes(nx)) return { lit: null }; // classes, boundaries, backreferences
+            if ('pPku'.includes(nx) && (source[i] === '{' || source[i] === '<')) { // \p{..} \u{..} \k<..>: skip the argument
+                const e = source.indexOf(source[i] === '<' ? '>' : '}', i + 1);
                 if (e !== -1) {
-                    if (/[|()[\]\\]/.test(source.slice(i + 3, e))) return null;
-                    adv = e + 1 - i;
+                    if (/[|()[\]\\]/.test(source.slice(i + 1, e))) throw BAIL; // without u these are literals around real syntax
+                    i = e + 1;
                 }
-            } else if (nx === 'u') {
-                if (/^[0-9a-fA-F]{4}$/.test(source.slice(i + 2, i + 6))) adv = 6;
-            } else if (nx === 'x') {
-                if (/^[0-9a-fA-F]{2}$/.test(source.slice(i + 2, i + 4))) adv = 4;
-            } else if (nx === 'c') {
-                if (/^[a-zA-Z]$/.test(source[i + 2] ?? '')) adv = 3;
-            } else {
-                lit = CONTROL_ESCAPES[nx] ?? nx; // \n \t \r \f \v, or escaped punctuation
+                return { lit: null };
             }
-            i = pushLiteral(lit, i + adv);
-        } else if (c === '[') {
+            const hex = { u: 4, x: 2 }[nx];
+            if (hex) {
+                if (new RegExp(`^[0-9a-fA-F]{${hex}}`).test(source.slice(i, i + hex))) i += hex;
+                return { lit: null };
+            }
+            if (nx === 'c') {
+                if (/[a-zA-Z]/.test(source[i] ?? '')) i++;
+                return { lit: null };
+            }
+            return { lit: CONTROL_ESCAPES[nx] ?? nx }; // \n \t \r \f \v, or an escaped character
+        }
+        if (c === '[') {
             let j = i + 1;
             if (source[j] === '^') j++;
             // In JS "[]" is an empty class and "[^]" matches anything: a ']' right after '[' closes it.
@@ -142,43 +140,117 @@ export function extractNeedle(source, flags) {
                 if (source[j] === '\\') j++;
                 j++;
             }
-            i = pushLiteral(null, j + 1);
-        } else if (c === '(') {
-            if (++depth === 1) endRun();
+            i = j + 1;
+            return { lit: null };
+        }
+        if (c === '(') {
             i++;
-            if (source[i] === '?') { // consume "(?:", "(?=", "(?<=", "(?<name>", ... so '?' is not a quantifier
+            let opaque = false;
+            if (source[i] === '?') {
                 i++;
-                if (source[i] === '<' && source[i + 1] !== '=' && source[i + 1] !== '!') {
+                if (source[i] === ':') {
+                    i++;
+                } else if (source[i] === '<' && source[i + 1] !== '=' && source[i + 1] !== '!') { // (?<name>
                     const e = source.indexOf('>', i);
                     i = e === -1 ? n : e + 1;
-                } else {
-                    i += source[i] === '<' ? 2 : 1;
+                } else { // (?= (?! (?<= (?<! lookarounds, (?i: (?-s: modifiers
+                    opaque = true;
+                    const m = /^(?:<?[=!]|[a-z]*(?:-[a-z]*)?:)/.exec(source.slice(i, i + 16));
+                    i += m ? m[0].length : 0;
                 }
             }
-        } else if (c === ')') {
-            depth--;
-            i = pushLiteral(null, i + 1);
-        } else if (c === '|') {
-            if (depth === 0) return null; // top-level alternation => no mandatory literal
+            const group = alternation();
+            if (source[i] !== ')') throw BAIL;
             i++;
-        } else if (c === '.' || c === '^' || c === '$') {
-            i = pushLiteral(null, i + 1);
-        } else if (c === '*' || c === '+' || c === '?' || c === '{') {
-            // stray quantifier / literal brace: be conservative and break the run
-            const q = skipQuant(i);
-            i = q.had ? q.j : i + 1;
-            if (depth === 0) endRun();
-        } else {
-            i = pushLiteral(c, i + 1);
+            return { group, opaque };
         }
-    }
-    endRun();
+        if ('.^${'.includes(c)) { // a '{' that is not a quantifier is a literal without u: break the run anyway
+            i++;
+            return { lit: null };
+        }
+        const pair = u && c >= '\uD800' && c <= '\uDBFF' && source[i + 1] >= '\uDC00' && source[i + 1] <= '\uDFFF';
+        i += pair ? 2 : 1;
+        return { lit: source.slice(i - (pair ? 2 : 1), i) }; // with u, a surrogate pair is one character
+    };
 
-    if (!best) return null;
-    // With the i flag, an escaped copy of the literal decides: it folds case exactly like the pattern itself
-    // (toLowerCase() does not: σ/ς/Σ, µ/μ, ſ/s ...).
-    const re = flags.includes('i') ? new RegExp(best.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&'), flags.includes('u') ? 'iu' : 'i') : null;
-    return { needle: best, re };
+    // Summary of a sequence: pre/suf = literal run at its start/end, full = the whole sequence is one literal run,
+    // best = best needle set inside it, inf = it contains an unbounded quantifier.
+    const sequence = () => {
+        let cur = '';
+        let pre = null;
+        let best = null;
+        let inf = false;
+        const consider = (set) => { if (set && better(set, best)) best = set; };
+        const end = () => {
+            pre ??= cur;
+            if (cur) consider([cur]);
+            cur = '';
+        };
+        while (i < n && source[i] !== '|' && source[i] !== ')') {
+            const a = atom();
+            const q = quant();
+            if (q?.inf) inf = true;
+            if (a.group) {
+                const g = a.group;
+                if (g.inf) {
+                    inf = true;
+                    if (q?.inf) nested = true;
+                }
+                if (a.opaque || q?.min === 0) {
+                    end();
+                } else if (!q && g.full) {
+                    cur += g.pre;
+                } else { // the first repetition continues the run before it, the last one starts the run after it
+                    cur += g.pre;
+                    end();
+                    consider(g.best);
+                    cur = g.suf;
+                }
+            } else if (a.lit === null || q?.min === 0) {
+                end();
+            } else if (q) { // "ab+c": "ab" and "bc"
+                cur += a.lit;
+                end();
+                cur = a.lit;
+            } else {
+                cur += a.lit;
+            }
+        }
+        const full = pre === null;
+        const suf = cur;
+        end();
+        return { pre, suf, full, best, inf };
+    };
+
+    const alternation = () => {
+        const seqs = [sequence()];
+        while (source[i] === '|') {
+            i++;
+            seqs.push(sequence());
+        }
+        if (seqs.length === 1) return seqs[0];
+        const best = seqs.every(s => s.best) ? [...new Set(seqs.flatMap(s => s.best))] : null;
+        return { pre: '', suf: '', full: false, best: best?.length <= 16 ? best : null, inf: seqs.some(s => s.inf) };
+    };
+
+    let needles = null;
+    try {
+        if (flags.includes('v')) throw BAIL;
+        const top = alternation();
+        if (i < n) throw BAIL;
+        needles = top.best;
+    } catch (e) {
+        if (e !== BAIL) throw e;
+    }
+    if (!needles) return { needles: null, test: null, nested };
+    // With the i flag, escaped copies of the needles under the pattern's i/u flags decide: they fold case exactly
+    // like the pattern itself (toLowerCase() does not: σ/ς/Σ, µ/μ, ſ/s ...).
+    if (flags.includes('i')) {
+        const re = new RegExp(needles.map(s => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')).join('|'), u ? 'iu' : 'i');
+        return { needles, test: (str) => re.test(str), nested };
+    }
+    const [one] = needles;
+    return { needles, test: needles.length === 1 ? (str) => str.includes(one) : (str) => needles.some(s => str.includes(s)), nested };
 }
 
 // .*  .+  [\s\S]*  [^]*  (.|\n)*  [\w\W]* — likely heavy backtracking
@@ -225,7 +297,7 @@ function buildInfo() {
         const trimSig = trims.join('\u0002');
         const needle = extractNeedle(re.source, re.flags);
         const heavy = HEAVY_HINT.test(re.source);
-        if (!needle) counts.noNeedle++;
+        if (!needle.needles) counts.noNeedle++;
         if (heavy) counts.heavy++;
 
         // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
@@ -255,13 +327,26 @@ let bypass = false; // set by the persisted-cache hook while a stored result is 
 
 // ② Memo: memoPrefix -> Map(input -> entry). Keying by the input string itself (its hash is cached and the same
 // string object flows through consecutive scripts) avoids building a new key per call. memoLru orders all
-// entries, least recently used first.
+// entries, least recently used first; memoBytes is their estimated size (2 bytes per UTF-16 unit).
 const memo = new Map();
 const memoLru = new Set();
+let memoBytes = 0;
 const clearMemo = () => {
     memo.clear();
     memoLru.clear();
+    memoBytes = 0;
 };
+
+/** Evicts least recently used entries until the memo fits both its entry and its memory limit. */
+function trimMemo() {
+    const maxBytes = settings.memoMaxMB * 1048576;
+    while (memoLru.size && (memoLru.size > settings.memoMaxEntries || memoBytes > maxBytes)) {
+        const old = memoLru.values().next().value;
+        memoLru.delete(old);
+        old.bucket.delete(old.str);
+        memoBytes -= old.size;
+    }
+}
 
 function getStat(key, re) {
     let st = stats.get(key);
@@ -289,7 +374,7 @@ class PerfRegExp extends RegExp {
     }
 
     [Symbol.replace](str, replacer) {
-        const { stat, markdownOnly, needle, memoPrefix } = this._meta;
+        const { stat, markdownOnly, test, memoPrefix } = this._meta;
 
         if (bypass) {
             stat.bypass++;
@@ -299,7 +384,7 @@ class PerfRegExp extends RegExp {
             stat.streamSkipped++;
             return str;
         }
-        if (settings.prefilter && needle && !(needle.re ? needle.re.test(str) : str.includes(needle.needle))) {
+        if (settings.prefilter && test && !test(str)) {
             stat.skipped++;
             return str;
         }
@@ -330,15 +415,13 @@ class PerfRegExp extends RegExp {
         }
         this.lastIndex = native.lastIndex; // leave this regex as a native replace would
 
-        if (bucket) {
-            const entry = { bucket, str, out };
+        const size = (str.length + out.length) * 2;
+        if (bucket && size <= settings.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
+            const entry = { bucket, str, out, size };
             bucket.set(str, entry);
             memoLru.add(entry);
-            while (memoLru.size > settings.memoMaxEntries) {
-                const old = memoLru.values().next().value;
-                memoLru.delete(old);
-                old.bucket.delete(old.str);
-            }
+            memoBytes += size;
+            trimMemo();
         }
         return out;
     }
@@ -384,7 +467,7 @@ function patchProvider() {
             w._meta = {
                 stat,
                 markdownOnly: !!info?.markdownOnly,
-                needle: stat.needle,
+                test: stat.needle.test,
                 memoPrefix: info?.pure ? key + '\u0001' + info.replaceSig + '\u0001' : null,
             };
             w._version = version;
@@ -468,6 +551,7 @@ async function clearPersistedCache() {
 
 const fmtMs = (x) => x.toFixed(x >= 100 ? 0 : x >= 10 ? 1 : 2);
 const avgMs = (r) => (r.calls ? r.totalMs / r.calls : 0);
+const fmtNeedles = (r) => r.needle?.needles?.map(s => JSON.stringify(s)).join(' | ') ?? null;
 
 function buildSummary() {
     const { counts } = ensureInfo();
@@ -502,7 +586,7 @@ function buildReportText() {
     if (s.top) lines.push(`1위 "${s.top.name}" 가 전체 시간의 ${s.topShare.toFixed(0)}% 차지`);
     lines.push('', '순위 | 스크립트 | 실행 | 총ms | 평균ms | 최대ms | 스킵 | 히트 | 리터럴 | 경고');
     s.rows.forEach((r, i) => {
-        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${r.skipped} | ${r.hits} | ${r.needle ? JSON.stringify(r.needle.needle) : '-'} | ${r.heavy ? '.* 계열' : ''}`);
+        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${r.skipped} | ${r.hits} | ${fmtNeedles(r) ?? '-'} | ${r.heavy ? '.* 계열' : ''}`);
     });
     return lines.join('\n');
 }
@@ -606,7 +690,7 @@ function renderPanel() {
         return `<tr class="${cls}" title="${esc(r.src)}">
           <td>${i + 1}</td><td>${esc(r.name)}${r.heavy ? ' <span class="rpk-badge" title="백트래킹이 많을 수 있는 패턴">.*</span>' : ''}</td>
           <td>${r.calls}</td><td>${fmtMs(r.totalMs)}</td><td>${fmtMs(avgMs(r))}</td><td>${fmtMs(r.maxMs)}</td>
-          <td>${r.skipped}</td><td>${r.hits}</td><td>${r.needle ? esc(JSON.stringify(r.needle.needle)) : '<span class="rpk-dim">없음</span>'}</td>
+          <td>${r.skipped}</td><td>${r.hits}</td><td>${r.needle?.needles ? esc(fmtNeedles(r)) : '<span class="rpk-dim">없음</span>'}</td>
         </tr>`;
     }).join('') || '<tr><td colspan="9" class="rpk-dim">아직 측정된 실행이 없습니다. 메시지를 렌더링하거나 채팅을 다시 열어보세요.</td></tr>');
 
@@ -689,6 +773,9 @@ if (extensionSettings.disabledExtensions?.includes('regex')) {
     console.log('[RegexPerf] built-in regex extension is disabled; nothing to do.');
 }
 patchProvider();
+eventSource.on(event_types.GENERATION_STARTED, (_type, _params, dryRun) => { if (!dryRun) generating = true; });
+eventSource.on(event_types.GENERATION_ENDED, () => { generating = false; });
+eventSource.on(event_types.GENERATION_STOPPED, () => { generating = false; });
 eventSource.on(event_types.CHAT_CHANGED, markDirty);
 eventSource.on(event_types.SETTINGS_UPDATED, markDirty);
 if (event_types.PRESET_CHANGED) eventSource.on(event_types.PRESET_CHANGED, markDirty);

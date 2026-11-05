@@ -91,3 +91,41 @@ test('item 5: escaped-substitution scripts are recognized, memoized and stream-s
     assert.match(r.current.report, /^\d+ \| Escaped char \|/m);
     assert.match(r.current.report, /^\d+ \| [^|]+ \|.*\| "abc" \|/m, 'the unknown /abc/ row shows its needle');
 });
+
+test('item 8: extractNeedle cases and differential fuzz in Chrome (prefilter never skips a match)', async ({ each }) => {
+    const seed = Math.floor(Math.random() * 2 ** 31);
+    const r = await each('needleFuzz', { seed, patterns: 15000 }, { variants: ['current'] });
+    assert.deepEqual(r.current.cases.unsupported, [], 'Chrome supports every case');
+    assert.ok(r.current.fuzz.skips > 15000, `seed ${seed}: ${JSON.stringify(r.current.fuzz)}`);
+});
+
+test('item 8: group and alternation literals prefilter; optional astral characters under u are not needles', async ({ each }) => {
+    const r = await each('needleCoverage');
+    assert.deepEqual(r.none.out, ['He said <q>hi</q> and left.', 'a b ']);
+    assert.notDeepEqual(r.baseline.out, r.none.out, 'main skips the 💬? script (bug reproduced)');
+    assert.deepEqual(r.current.out, r.none.out);
+    assert.ok(r.baseline.groupRuns > 0 && r.baseline.altRuns > 0, 'main has no needle for these');
+    assert.equal(r.current.groupRuns, 0, 'group literal prefilters');
+    assert.equal(r.current.altRuns, 0, 'alternation prefilters');
+});
+
+test('item 6: the memo has a memory budget with LRU eviction', async ({ each }) => {
+    const r = await each('memoBudget');
+    for (const v of ['none', 'baseline', 'current']) assert.ok(r[v].ok, `${v} output`);
+    assert.equal(r.baseline.runsFirst, 0, 'main keeps all 100 x 10k-char entries (count cap only)');
+    assert.equal(r.current.runsFirst, 1, 'the oldest entry was evicted by the 1 MB budget');
+    assert.equal(r.current.runsLast, 0, 'the newest entry is still cached');
+});
+
+test('item 7: no getContext() per display script outside a generation; exact check during one', async ({ each }) => {
+    const r = await each('streamingCheck');
+    assert.deepEqual([r.none.idle, r.none.live, r.none.finished, r.none.afterStop], ['AB', 'AB', 'AB', 'AB']);
+    assert.ok(r.baseline.idleContexts > 0, 'main builds the context for every display script');
+    assert.equal(r.current.idleContexts, 0);
+    assert.equal(r.current.dryRunContexts, 0, 'dry runs never stream');
+    assert.equal(r.current.idle, 'AB');
+    assert.equal(r.current.live, 'ab', 'display scripts are skipped while the stream is live');
+    assert.equal(r.current.finished, 'AB');
+    assert.equal(r.baseline.afterStop, 'ab', 'main keeps skipping after the generation stopped');
+    assert.equal(r.current.afterStop, 'AB', 'finished messages get their display scripts');
+});

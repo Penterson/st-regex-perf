@@ -240,3 +240,69 @@ export async function escapedSubst(h) {
     await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
     return { first, second, live, report: await report(h) };
 }
+
+/** ⑧ The hand-checked cases and the fuzzer, in Chrome, against the loaded extension's extractNeedle(). */
+export async function needleFuzz(h, { seed, patterns }) {
+    const { extractNeedle } = await import(`/scripts/extensions/third-party/${h.variant}/index.js`);
+    const f = await import('/harness/needle-fuzz.js');
+    return { cases: f.runCases(extractNeedle), fuzz: f.fuzz(extractNeedle, { seed, patterns }) };
+}
+
+/** ⑧ Literals inside groups and alternations prefilter; an optional astral character under u is not a needle. */
+export async function needleCoverage(h) {
+    const group = script({ findRegex: '/(?:<summary>)([\\s\\S]*?)(?:<\\/summary>)/g', replaceString: '$1' });
+    const alt = script({ findRegex: '/<thinking>[\\s\\S]*?<\\/thinking>|<think>[\\s\\S]*?<\\/think>/g', replaceString: '' });
+    const astral = script({ findRegex: '/💬?"(.+?)"/gu', replaceString: '<q>$1</q>' });
+    await useScripts(h, [group, alt, astral]);
+    const plain = 'He said "hi" and left.';
+    const runs = executionsBySource(() => h.engine.getRegexedString(plain, P.AI));
+    const src = (s) => h.engine.RegexProvider.instance.get(s.findRegex).source;
+    return {
+        out: [plain, 'a <summary>b</summary> <think>c</think>'].map(s => h.engine.getRegexedString(s, P.AI)),
+        groupRuns: runs[src(group)] ?? 0,
+        altRuns: runs[src(alt)] ?? 0,
+    };
+}
+
+/** ⑥ Memo memory budget: with a 1 MB budget, old large entries are evicted (LRU) well before the entry cap. */
+export async function memoBudget(h) {
+    applyProfile(h, { memoMaxMB: 1, memoMaxLen: 20000 });
+    const s = script({ findRegex: '/x/g', replaceString: 'y' });
+    await useScripts(h, [s]);
+    const inputs = Array.from({ length: 100 }, (_, i) => `${i} ` + 'x'.repeat(10000));
+    const outs = inputs.map(str => h.engine.getRegexedString(str, P.AI));
+    const source = h.engine.RegexProvider.instance.get(s.findRegex).source;
+    const runsFirst = executionsBySource(() => h.engine.getRegexedString(inputs[0], P.AI))[source] ?? 0;
+    const runsLast = executionsBySource(() => h.engine.getRegexedString(inputs[99], P.AI))[source] ?? 0;
+    return { ok: outs.every((o, i) => o === `${i} ` + 'y'.repeat(10000)), runsFirst, runsLast };
+}
+
+/** ⑦ Display scripts outside a generation do not build getContext(); during one, the exact check still decides. */
+export async function streamingCheck(h) {
+    await useScripts(h, [
+        script({ findRegex: '/a/g', replaceString: 'A', markdownOnly: true }),
+        script({ findRegex: '/b/g', replaceString: 'B', markdownOnly: true }),
+    ]);
+    const display = () => h.engine.getRegexedString('ab', P.AI, { isMarkdown: true });
+    const contexts = (fn) => {
+        const before = h.calls.getContext;
+        const out = fn();
+        return [out, h.calls.getContext - before];
+    };
+    const r = {};
+    display(); // builds the script info once after the chat change
+    [r.idle, r.idleContexts] = contexts(display);
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, true); // a dry run never streams
+    [r.dryRun, r.dryRunContexts] = contexts(display);
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    h.st.setState({ streamingProcessor: { messageId: 0, isFinished: false, isStopped: false } });
+    r.live = display();
+    h.st.streamingProcessor.isFinished = true;
+    r.finished = display();
+    // An aborted stream can leave a processor that is neither finished nor stopped; once the generation has
+    // ended, display scripts must still apply.
+    h.st.streamingProcessor.isFinished = false;
+    await h.eventSource.emit(h.event_types.GENERATION_STOPPED);
+    r.afterStop = display();
+    return r;
+}

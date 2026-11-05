@@ -1,6 +1,6 @@
 // Browser tests: boots the harness in headless Chrome once per variant and compares what SillyTavern's real
 // regex engine produces with no extension ("none"), with main ("baseline") and with the working tree ("current").
-// Usage: node tests/run.mjs [name filter]   Chrome: $CHROME_PATH, else google-chrome / chromium on PATH.
+// Usage: node tests/run.mjs [name regex]   Chrome: $CHROME_PATH, else google-chrome / chromium on PATH.
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import puppeteer from 'puppeteer-core';
@@ -61,11 +61,11 @@ async function each(name, arg, { variants = Object.keys(VARIANTS), ...options } 
     return out;
 }
 
-const filter = process.argv[2] ?? '';
+const filter = new RegExp(process.argv[2] ?? '');
 let failed = 0;
 let passed = 0;
 for (const [name, fn] of tests) {
-    if (!name.includes(filter)) continue;
+    if (!filter.test(name)) continue;
     const t0 = Date.now();
     try {
         await fn({ open, each });
