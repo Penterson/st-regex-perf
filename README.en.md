@@ -26,7 +26,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
 ## Use
 
 - Reopen the chat or render a few messages to fill the table. The summary counts scripts as active/total per origin (global / preset / scoped). Each feature is described under its checkbox, and the table's columns and badges under **How to read the table**.
-- Summary tiles: **Runs** are regex executions that really happened, **Time spent** their total, **Runs skipped** what ②, ③, ④ (and ⑤) avoided. **Time saved (estimate)** is skipped runs × each script's average run time, so it can exceed the time spent (that is work that never ran). Before any run is measured it shows `—`.
+- The summary is a few sentences: how many regex runs really happened and how long they took, how many ②, ③, ④ (and ⑤) avoided, and the **time saved** (skipped runs × each script's average run time, so it can exceed the time spent: that is work that never ran). Until a run has been measured, no saving is shown.
 - `/regexperf` shows the report in a popup, `/regexperf text` returns it as text, `/regexperf reset` resets the stats.
 - **Measure on this chat** re-renders the current chat once with the features off and once on, and shows the time actually saved. The page is busy meanwhile; the measurement does not show up in the stats.
 - Scripts taking **50% or more of the total time** are highlighted: turning off or fixing those helps most.
