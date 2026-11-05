@@ -11,14 +11,14 @@
 import { RegexProvider, getRegexScripts } from '../../regex/engine.js';
 import { regexFromString } from '../../../utils.js';
 
-const MODULE_NAME = 'regex_perf_kit';
 const EXTRA_KEY = 'regex_perf_cache';
 const ctx = () => SillyTavern.getContext();
-const { t, translate } = ctx();
+// Fixed for the session, so read once; live state (chat, names, the streaming processor) is read through ctx().
+const { t, translate, extensionSettings, eventSource, event_types, getCurrentLocale, addLocaleData } = ctx();
 
 // ---- Settings ----
 
-const defaultSettings = Object.freeze({
+const defaultSettings = {
     profiler: true,
     prefilter: true,
     memo: true,
@@ -30,10 +30,10 @@ const defaultSettings = Object.freeze({
     streamingThrottleMs: 500,
     persist: false,
     persistMaxLen: 60000,
-});
+};
 
 // ST keeps this object for the whole session, so it is resolved once instead of on every replace.
-const settings = (ctx().extensionSettings[MODULE_NAME] ||= {});
+const settings = (extensionSettings.regex_perf_kit ||= {});
 for (const [key, value] of Object.entries(defaultSettings)) {
     if (!Object.hasOwn(settings, key)) settings[key] = value;
 }
@@ -51,8 +51,7 @@ function fnv1a(str) {
 
 // Set from GENERATION_STARTED until GENERATION_ENDED / GENERATION_STOPPED, so the exact check (which builds the
 // whole getContext() object) only runs while a generation can be streaming. Without those events: always check.
-const { event_types: EVENTS } = ctx();
-let generating = !(EVENTS.GENERATION_STARTED && EVENTS.GENERATION_ENDED && EVENTS.GENERATION_STOPPED);
+let generating = !(event_types.GENERATION_STARTED && event_types.GENERATION_ENDED && event_types.GENERATION_STOPPED);
 
 /** The streaming processor while a stream is live, else null. */
 function liveStream() {
@@ -87,9 +86,10 @@ const BAIL = Symbol('bail');
 /**
  * Parses a pattern once. needles: literals of which every match contains at least one (null if none is certain),
  * decided by test(str). nested: an unbounded quantifier inside an unboundedly repeated group, e.g. (a+)+.
- * Conservative: classes, class escapes, backreferences, lookarounds and modifier groups contribute no literal;
- * patterns with the v flag or a case modifier ((?i:), (?-i:)) get no needle at all. Literals in groups that must match join the surrounding run; an alternation yields one
- * needle per branch (any of them must occur), provided every branch has one.
+ * Conservative: classes, class escapes, backreferences, lookarounds and modifier groups contribute no literal, and
+ * patterns with the v flag or a case modifier ((?i:), (?-i:)) get no needle at all. Literals in groups that must
+ * match join the surrounding run; an alternation yields one needle per branch (any of them must occur), provided
+ * every branch has one.
  * @param {string} source RegExp.source
  * @param {string} flags RegExp.flags
  * @returns {{needles: string[] | null, test: ((str: string) => boolean) | null, nested: boolean}}
@@ -189,9 +189,10 @@ export function extractNeedle(source, flags) {
             i++;
             return { lit: null };
         }
+        const start = i;
         const pair = u && c >= '\uD800' && c <= '\uDBFF' && source[i + 1] >= '\uDC00' && source[i + 1] <= '\uDFFF';
         i += pair ? 2 : 1;
-        return { lit: source.slice(i - (pair ? 2 : 1), i) }; // with u, a surrogate pair is one character
+        return { lit: source.slice(start, i) }; // with u, a surrogate pair is one character
     };
 
     // Summary of a sequence: pre/suf = literal run at its start/end, full = the whole sequence is one literal run,
@@ -219,22 +220,22 @@ export function extractNeedle(source, flags) {
                 }
                 if (a.opaque || q?.min === 0) {
                     end();
-                } else if (!q && g.full) {
+                } else {
                     cur += g.pre;
-                } else { // the first repetition continues the run before it, the last one starts the run after it
-                    cur += g.pre;
-                    end();
-                    consider(g.best);
-                    cur = g.suf;
+                    if (q || !g.full) { // the first repetition continues the run before it, the last one starts the run after it
+                        end();
+                        consider(g.best);
+                        cur = g.suf;
+                    }
                 }
             } else if (a.lit === null || q?.min === 0) {
                 end();
-            } else if (q) { // "ab+c": "ab" and "bc"
-                cur += a.lit;
-                end();
-                cur = a.lit;
             } else {
                 cur += a.lit;
+                if (q) { // "ab+c": "ab" and "bc"
+                    end();
+                    cur = a.lit;
+                }
             }
         }
         const full = pre === null;
@@ -320,9 +321,8 @@ function buildInfo() {
         const trims = Array.isArray(s.trimStrings) ? s.trimStrings : [];
         const trimSig = trims.join('\u0002');
         const needle = extractNeedle(re.source, re.flags);
-        const heavy = HEAVY_HINT.test(re.source);
         if (!needle.needles) counts.noNeedle++;
-        if (heavy) counts.heavy++;
+        if (HEAVY_HINT.test(re.source)) counts.heavy++;
         if (needle.nested) counts.nested++;
 
         // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
@@ -336,7 +336,6 @@ function buildInfo() {
                 && !trims.some(trim => MACRO.test(String(trim))),
             replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
             needle,
-            heavy,
             ids: [s.id], // for the row actions in the table
         };
         const key = keyOf(re);
@@ -448,8 +447,9 @@ class PerfRegExp extends RegExp {
         const native = this._native;
         native.lastIndex = 0;
         // SillyTavern's replacer (groups, trim strings, macros) is timed apart from the matching itself.
+        const profile = settings.profiler;
         let replMs = 0;
-        const fn = settings.profiler && typeof replacer === 'function'
+        const fn = profile && typeof replacer === 'function'
             ? function () {
                 const t1 = performance.now();
                 const r = replacer.apply(this, arguments);
@@ -457,9 +457,9 @@ class PerfRegExp extends RegExp {
                 return r;
             }
             : replacer;
-        const t0 = performance.now();
+        const t0 = profile ? performance.now() : 0;
         const out = RegExp.prototype[Symbol.replace].call(native, str, fn);
-        if (settings.profiler) {
+        if (profile) {
             const dt = performance.now() - t0;
             stat.calls++;
             stat.totalMs += dt;
@@ -514,11 +514,11 @@ function patchProvider() {
         // Script info is re-read whenever it changes, so an edited script takes effect without RegexProvider.clear().
         if (w._version !== version) {
             const key = keyOf(base);
-            const info = map.get(key) ?? null;
+            const info = map.get(key);
             const stat = getStat(key, base);
             if (info) stat.name = info.name;
             stat.ids = info?.ids ?? [];
-            stat.needle = info ? info.needle : extractNeedle(base.source, base.flags);
+            stat.needle = info?.needle ?? extractNeedle(base.source, base.flags);
             w._meta = {
                 stat,
                 markdownOnly: !!info?.markdownOnly,
@@ -547,6 +547,12 @@ let pending = null; // {msg, key, input}: message awaiting its after-regex resul
 const streamViews = new Map(); // ⑥ compromise: "<messageId><m|r>" -> {at, prefix, out} of the streamed message
 let streamView = null; // the view this pass formats
 let streamTail = null; // raw text this pass appends after the regex stage
+
+/** Clears the state the two hooks share for one formatting pass. */
+function resetPass() {
+    bypass = streamApply = false;
+    pending = streamView = streamTail = null;
+}
 
 /**
  * ⑥ compromise mode, for the message being streamed: the display scripts format the completed lines at most every
@@ -577,10 +583,7 @@ function installPersistHooks() {
     // Before regex: ⑥ compromise mode for the streamed message; otherwise, on a ⑧ key match, substitute the
     // stored result and bypass every script for this message.
     mf.addHook((mes, c) => {
-        bypass = false;
-        pending = null;
-        streamView = streamTail = null;
-        streamApply = false;
+        resetPass();
         if (c.messageId < 0 || c.isSystem) return mes;
         const sp = settings.persist || settings.streamingThrottle ? liveStream() : null;
         if (sp) return settings.streamingSkip && settings.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;
@@ -610,19 +613,14 @@ function installPersistHooks() {
 
     // After regex: append ⑥'s raw tail, or store the freshly computed result for ⑧.
     mf.addHook((mes) => {
-        if (streamTail !== null) {
-            if (streamView) streamView.out = mes;
-            const tail = streamTail;
-            streamView = streamTail = null;
-            streamApply = false;
+        const tail = streamTail;
+        const view = streamView;
+        const p = pending; // null after a ⑧ hit (bypass)
+        resetPass();
+        if (tail !== null) {
+            if (view) view.out = mes;
             return mes + tail;
         }
-        if (bypass) {
-            bypass = false;
-            return mes;
-        }
-        const p = pending;
-        pending = null;
         if (!p || mes.length > settings.persistMaxLen) return mes;
         p.msg.extra ||= {};
         p.msg.extra[EXTRA_KEY] = mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes };
@@ -654,7 +652,7 @@ const INEFFECTIVE_RUNS = 20; // a script that ran this often without changing th
 const fmtMs = (x) => x.toFixed(x >= 100 ? 0 : x >= 10 ? 1 : 2);
 const avgMs = (r) => (r.calls ? r.totalMs / r.calls : 0);
 const fmtNeedles = (r) => r.needle?.needles?.map(s => JSON.stringify(s)).join(' | ') ?? null;
-// ⑩ every call the prefilter, the memo or the streaming skip avoided would have cost the script's average run
+// every call the prefilter, the memo or the streaming skip avoided would have cost the script's average run
 const savedMs = (r) => (r.skipped + r.hits + r.streamSkipped) * avgMs(r);
 const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.changed;
 const warnings = (r) => [
@@ -726,7 +724,7 @@ function buildReportText() {
 const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass'];
 
 /**
- * ⑨ Renders every message of the current chat as SillyTavern displays it (messageFormatting), first with the
+ * Renders every message of the current chat as SillyTavern displays it (messageFormatting), first with the
  * prefilter, the memo and ⑧ off, then with the user's settings, and returns both times. The chat was rendered when
  * it opened, so this is a re-render, as on swipes, edits and reloads. Synchronous, so the temporarily changed
  * settings can never be saved, and the stats are restored afterwards.
@@ -745,18 +743,18 @@ function measureChat() {
     const user = { profiler: settings.profiler, prefilter: settings.prefilter, memo: settings.memo, persist: settings.persist };
     const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => st[c])]));
     const savedPersist = { ...persistStats };
-    const times = {};
+    let off, on;
     try {
         Object.assign(settings, { profiler: false, prefilter: false, memo: false, persist: false });
-        times.off = render();
+        off = render();
         Object.assign(settings, user, { profiler: false });
-        times.on = render();
+        on = render();
     } finally {
         Object.assign(settings, user);
         for (const [k, st] of stats) COUNTERS.forEach((c, i) => { st[c] = saved.get(k)?.[i] ?? 0; });
         Object.assign(persistStats, savedPersist);
     }
-    return { messages: chat.length, ...times };
+    return { messages: chat.length, off, on };
 }
 
 function resetStats() {
@@ -870,11 +868,8 @@ const KO = {
     'Turned off: ${0}': '껐습니다: ${0}',
     'Wait until the generation finishes.': '생성이 끝난 뒤에 측정하세요.',
 };
-{
-    const { getCurrentLocale, addLocaleData } = ctx();
-    const locale = getCurrentLocale();
-    if (locale.startsWith('ko')) addLocaleData(locale, KO);
-}
+const locale = getCurrentLocale();
+if (locale.startsWith('ko')) addLocaleData(locale, KO);
 
 const settingsHtml = () => `
 <div id="regex_perf_kit" class="regex-perf-kit">
@@ -949,7 +944,7 @@ const settingsHtml = () => `
 </div>`;
 
 const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist' };
-// ⑮ editable limits: setting -> [min, max]
+// editable limits: setting -> [min, max]
 const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], streamingThrottleMs: [50, 60000] };
 
 let ui = null; // panel elements, cached by bindUi()
@@ -1018,7 +1013,7 @@ function renderPanel() {
 }
 
 /**
- * ⑭ The Regex extension has no API to open or toggle a script, so its own list is used: each script row has the
+ * The Regex extension has no API to open or toggle a script, so its own list is used: each script row has the
  * script's id, an .edit_existing_regex button and a .regex-toggle-on switch (the one that disables it).
  */
 function scriptAction(r, off) {
@@ -1132,7 +1127,6 @@ function registerSlash() {
 
 // ---- Init ----
 
-const { eventSource, event_types, extensionSettings } = ctx();
 if (extensionSettings.disabledExtensions?.includes('regex')) {
     console.log('[RegexPerf] built-in regex extension is disabled; nothing to do.');
 }
