@@ -1,0 +1,30 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the browser tests load main's index.js from an older commit
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # V8 with (?i:) modifier groups, like current Chrome
+          cache: npm
+      - run: npm ci
+      - name: ESLint (SillyTavern's rules)
+        run: npm run lint && npm run test:eslint-sync
+      - name: extractNeedle cases and differential fuzz
+        run: npm run test:fuzz
+      - name: Browser tests (headless Chrome, SillyTavern's real regex engine)
+        run: npm run test:browser
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
