@@ -21,7 +21,7 @@ Speeds up SillyTavern's built-in Regex extension **without changing a single cha
 2. Reload SillyTavern in the browser.
 3. A **Regex Perf Kit** drawer appears at the bottom of the Extensions panel (🧩).
 
-Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The UI is in Korean when SillyTavern's language is Korean, and in English otherwise.
+Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The UI is in Korean when SillyTavern's language is Korean, and in English otherwise; translations are one `locales/<locale>.json` file each, so another language is just another file.
 
 ## Use
 

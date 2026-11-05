@@ -195,13 +195,20 @@ test('item 17: English locale shows no Korean', async ({ each }) => {
 });
 
 test('item 17: every Korean string resolves under SillyTavern\'s real ko-kr.json (no key collisions)', async ({ each }) => {
-    const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
-    const block = src.slice(src.indexOf('const KO = {'), src.indexOf('\n};', src.indexOf('const KO = {')));
-    const unquote = (q) => q.slice(1, -1).replace(/\\(.)/g, '$1');
-    const entries = [...block.matchAll(/^ {4}('(?:[^'\\]|\\.)*'): ('(?:[^'\\]|\\.)*'),$/gm)].map(m => [unquote(m[1]), unquote(m[2])]);
+    const entries = Object.entries(JSON.parse(readFileSync(new URL('../locales/ko-kr.json', import.meta.url), 'utf8')));
     assert.ok(entries.length > 50, `parsed ${entries.length} entries`);
     const r = await each('translations', entries, { locale: 'ko-kr', variants: ['current'] });
     assert.deepEqual(r.current, []);
+});
+
+test('locale files: the Korean table lives in locales/ko-kr.json; a locale without a file keeps the English UI', async ({ each }) => {
+    const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8');
+    assert.doesNotMatch(src, /const KO = \{/, 'no inline translation table');
+    assert.match(src, /locales\/\$\{localeFile\}\.json/, 'loads the locale file');
+    const ko = await each('uiTexts', null, { locale: 'ko', variants: ['current'] });
+    assert.ok(ko.current.all.includes('① 프로파일러'), 'a bare "ko" locale uses the ko-kr file');
+    const xx = await each('uiTexts', null, { locale: 'xx-yy', variants: ['current'] });
+    assert.ok(xx.current.all.includes('① Measure run time (profiler)'), 'no file: English');
 });
 
 test('item 9: "Measure on this chat" renders with the features off and on and shows the time saved', async ({ each }) => {
