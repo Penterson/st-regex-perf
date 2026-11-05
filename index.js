@@ -545,7 +545,7 @@ function getStat(key, re) {
         st = {
             name: t`(unknown)`,
             src: '/' + re.source + '/' + re.flags,
-            calls: 0, totalMs: 0, maxMs: 0, replMs: 0, changed: 0,
+            calls: 0, totalMs: 0, maxMs: 0, replMs: 0, matched: 0, changed: 0,
             skipped: 0, hits: 0, streamSkipped: 0, bypass: 0,
             heavy: HEAVY_HINT.test(re.source),
             needle: null, // the needle the wrapper uses (and its nested flag), set with its meta
@@ -601,8 +601,10 @@ class PerfRegExp extends RegExp {
         // SillyTavern's replacer (groups, trim strings, macros) is timed apart from the matching itself.
         const profile = settings.profiler;
         let replMs = 0;
+        let matched = false; // the replacer ran, so the pattern matched (even if the text came out the same)
         const fn = profile && typeof replacer === 'function'
             ? function () {
+                matched = true;
                 const t1 = performance.now();
                 const r = replacer.apply(this, arguments);
                 replMs += performance.now() - t1;
@@ -618,6 +620,8 @@ class PerfRegExp extends RegExp {
             stat.replMs += replMs;
             if (dt > stat.maxMs) stat.maxMs = dt;
             if (out !== str) stat.changed++;
+            // A string replacer (not SillyTavern's) tells nothing: test short inputs, assume a match on long ones.
+            if (matched || (fn === replacer && (out !== str || str.length > 2000 || native.test(str)))) stat.matched++;
         }
         this.lastIndex = native.lastIndex; // leave this regex as a native replace would
 
@@ -800,7 +804,7 @@ async function clearPersistedCache() {
 // ---- Report ----
 
 const SPIKE_MS = 50; // a single run slower than this is flagged
-const INEFFECTIVE_RUNS = 20; // a script that ran this often without changing the text is a candidate to disable
+const INEFFECTIVE_RUNS = 20; // a script that ran this often without ever matching is a candidate to disable
 
 /** Milliseconds for display: an exact zero is "0", otherwise 2 / 1 / 0 decimals as the value grows. */
 const fmtMs = (x) => (x === 0 ? '0' : x.toFixed(x >= 100 ? 0 : x >= 10 ? 1 : 2));
@@ -815,7 +819,7 @@ const fmtNeedles = (r) => {
 // every call the prefilter, the memo or the streaming skip avoided would have cost the script's average run
 const avoided = (r) => r.skipped + r.hits + r.streamSkipped;
 const savedMs = (r) => avoided(r) * avgMs(r);
-const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.changed;
+const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.matched;
 /** A pattern the extension has seen do anything: rows that never ran nor were skipped are left out of the table. */
 const active = (r) => r.calls + avoided(r) + r.bypass > 0;
 const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">${text}</span>`;
@@ -824,7 +828,7 @@ const warnings = (r, badges = false) => [
     r.heavy && (badges ? badge('.*', t`Contains .* or similar: may be slow on long text (backtracking)`) : t`.*-style`),
     r.needle?.nested && (badges ? badge('(a+)+', t`Nested quantifier such as (a+)+: can become extremely slow on long text`) : t`nested quantifier`),
     r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)`) : t`spike`),
-    ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without ever changing the text: consider turning it off`) : t`no effect`),
+    ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without ever matching: consider turning it off`) : t`no match`),
 ].filter(Boolean);
 
 function buildSummary() {
@@ -892,15 +896,15 @@ function buildReportText() {
     ];
     if (measured) lines.push(measureText(measured));
     if (s.top) lines.push(t`#1 "${s.top.name}" takes ${s.topShare.toFixed(0)}% of the total time`);
-    if (s.ineffective.length) lines.push(t`Candidates to disable (ran ${INEFFECTIVE_RUNS}+ times, never changed the text): ${s.ineffective.join(', ')}`);
-    lines.push('', t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`);
+    if (s.ineffective.length) lines.push(t`Candidates to disable (ran ${INEFFECTIVE_RUNS}+ times, never matched): ${s.ineffective.join(', ')}`);
+    lines.push('', t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Matched | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`);
     s.rows.forEach((r, i) => {
-        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${fmtMs(r.replMs)} | ${r.changed} | ${r.skipped} | ${r.hits} | ${r.streamSkipped} | ${fmtNeedles(r) ?? '- (' + needleReason(r) + ')'} | ${r.needle?.minLen || '-'} | ${warnings(r).join(', ')}`);
+        lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${fmtMs(r.replMs)} | ${r.matched} | ${r.changed} | ${r.skipped} | ${r.hits} | ${r.streamSkipped} | ${fmtNeedles(r) ?? '- (' + needleReason(r) + ')'} | ${r.needle?.minLen || '-'} | ${warnings(r).join(', ')}`);
     });
     return lines.join('\n');
 }
 
-const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass'];
+const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass'];
 const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false }; // what a measurement turns off
 
 /**
@@ -1022,7 +1026,7 @@ const settingsHtml = () => `
           <thead><tr>
             ${th('rank', '#')}${th('name', t`Script`)}
             ${th('runs', t`Runs`, t`Regex runs that really happened`)}${th('total', t`Total ms`)}${th('avg', t`Avg`, t`Time per run, averaged`)}${th('max', t`Max`, t`Slowest single run`)}
-            ${th('repl', t`Replacer`, t`Time spent in the replacement (group filling, trim strings, macros), included in Total ms`)}${th('changed', t`Changed`, t`Runs that changed the text`)}
+            ${th('repl', t`Replacer`, t`Time spent in the replacement (group filling, trim strings, macros), included in Total ms`)}${th('matched', t`Matched`, t`Runs where the pattern matched, even if the text came out the same`)}${th('changed', t`Changed`, t`Runs that changed the text`)}
             ${th('skips', t`Skips`, t`Runs skipped by ② (the fixed text was absent)`)}${th('hits', t`Hits`, t`Results reused by ③`)}${th('lit', t`Literal`, t`The fixed text ② looks for before running this script: every literal joined by & must be present, one of those joined by |. Hover a cell for the shortest possible match.`)}${th('act', '')}
           </tr></thead>
           <tbody></tbody>
@@ -1034,7 +1038,7 @@ const settingsHtml = () => `
           <li>${t`Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.`}</li>
           <li>${t`<b>Runs</b> are real regex executions; <b>Skips</b> and <b>Hits</b> are runs avoided by ② and ③. A script with 0 runs and many skips never had to run at all.`}</li>
           <li>${t`<b>Replacer</b> is the part of Total ms spent in the replacement; if it is large, the replacement (macros) is slow, not the pattern.`}</li>
-          <li>${t`Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${SPIKE_MS} ms, <code>∅</code> ran ${INEFFECTIVE_RUNS}+ times without changing anything.`}</li>
+          <li>${t`Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${SPIKE_MS} ms, <code>∅</code> ran ${INEFFECTIVE_RUNS}+ times without ever matching.`}</li>
           <li>${t`Click a row to open the script in the Regex extension; the power icon turns it off.`}</li>
         </ul>
       </details>
@@ -1096,7 +1100,7 @@ function renderPanel() {
         lines.push(t`Slowest: <b>${esc(s.top.name)}</b>, ${s.topShare.toFixed(0)}% of the time.` + (s.topShare >= 50 ? ' ' + t`Turning it off or fixing it helps the most.` : ''));
     }
     if (s.ineffective.length) {
-        lines.push(t`Never changed the text in ${INEFFECTIVE_RUNS}+ runs: <b>${esc(s.ineffective.join(', '))}</b>. Consider turning them off.`);
+        lines.push(t`Never matched in ${INEFFECTIVE_RUNS}+ runs: <b>${esc(s.ineffective.join(', '))}</b>. Consider turning them off.`);
     }
     if (!patched) lines.push(`<span class="rpk-warn">${t`⚠ Could not patch the regex engine — this SillyTavern version is not supported.`}</span>`);
     lines.push(`<span class="rpk-dim rpk-since">${t`Since ${new Date(statsSince).toLocaleTimeString()}`}</span>`);
@@ -1112,11 +1116,11 @@ function renderPanel() {
         return `<tr class="${cls}${r.ids.length ? ' rpk-script' : ''}" title="${esc(r.src)}" data-i="${i}">
           ${td('rank', i + 1)}${td('name', esc(r.name) + warnings(r, true).join(''))}
           ${td('runs', r.calls)}${td('total', fmtMs(r.totalMs))}${td('avg', fmtMs(avgMs(r)))}${td('max', fmtMs(r.maxMs))}
-          ${td('repl', fmtMs(r.replMs))}${td('changed', r.changed)}
+          ${td('repl', fmtMs(r.replMs))}${td('matched', r.matched)}${td('changed', r.changed)}
           ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', fmtNeedles(r) ? esc(fmtNeedles(r)) : `<span class="rpk-dim">${t`none`}</span>`, 'rpk-lit', litTitle(r))}
           ${td('act', actions, 'rpk-act')}
         </tr>`;
-    }).join('') || `<tr><td colspan="12" class="rpk-dim rpk-empty">${t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
+    }).join('') || `<tr><td colspan="13" class="rpk-dim rpk-empty">${t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
 
     setContent(ui.note, !persistAvailable
         ? t`⑤ and the compromise mode need a newer SillyTavern (staging with MessageFormatter hooks).`
