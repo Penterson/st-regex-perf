@@ -2,15 +2,95 @@
     font-size: 0.9em;
     line-height: 1.5;
     margin: 6px 0 10px;
-    padding: 6px 8px;
+    padding: 8px 10px;
     border-radius: 6px;
     background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 6%, transparent);
 }
 
-.regex-perf-kit .rpk-grid {
+.regex-perf-kit .rpk-scripts {
+    margin-bottom: 2px;
+}
+
+.regex-perf-kit .rpk-stats {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 2px 12px;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.regex-perf-kit .rpk-stat {
+    display: flex;
+    flex-direction: column;
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 8%, transparent);
+    line-height: 1.3;
+}
+
+.regex-perf-kit .rpk-stat-value {
+    font-size: 1.25em;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.regex-perf-kit .rpk-stat-label {
+    font-size: 0.85em;
+    opacity: 0.75;
+}
+
+.regex-perf-kit .rpk-section {
+    margin: 12px 0 4px;
+    font-size: 0.85em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    opacity: 0.7;
+}
+
+.regex-perf-kit .rpk-features {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 4px 16px;
+}
+
+.regex-perf-kit .rpk-feature {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    margin: 0;
+    padding: 5px 6px;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.regex-perf-kit .rpk-feature:hover {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 6%, transparent);
+}
+
+.regex-perf-kit .rpk-feature input {
+    flex: 0 0 auto;
+    margin: 3px 0 0;
+}
+
+.regex-perf-kit .rpk-feature-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.regex-perf-kit .rpk-feature-name {
+    font-weight: 600;
+}
+
+.regex-perf-kit .rpk-feature-desc {
+    font-size: 0.85em;
+    opacity: 0.75;
+    line-height: 1.4;
+}
+
+.regex-perf-kit .rpk-feature:has(input:disabled) {
+    opacity: 0.5;
+    cursor: default;
 }
 
 .regex-perf-kit .rpk-note {
@@ -21,8 +101,19 @@
 }
 
 .regex-perf-kit .rpk-limits {
-    margin: 4px 0;
+    margin: 8px 0 4px;
     font-size: 0.9em;
+}
+
+.regex-perf-kit .rpk-limits summary {
+    cursor: pointer;
+}
+
+.regex-perf-kit .rpk-limits .rpk-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 2px 12px;
+    margin-top: 4px;
 }
 
 .regex-perf-kit .rpk-limits label {
@@ -44,6 +135,13 @@
     margin: 8px 0;
 }
 
+.regex-perf-kit .rpk-buttons .menu_button {
+    flex: 0 0 auto;
+    width: auto;
+    white-space: nowrap;
+    writing-mode: horizontal-tb;
+}
+
 .regex-perf-kit .rpk-table-wrap {
     max-height: 320px;
     overflow: auto;
@@ -60,7 +158,7 @@
 
 .regex-perf-kit .rpk-table th,
 .regex-perf-kit .rpk-table td {
-    padding: 3px 6px;
+    padding: 4px 6px;
     text-align: right;
     white-space: nowrap;
     border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.08));
@@ -94,6 +192,10 @@
     cursor: pointer;
 }
 
+.regex-perf-kit .rpk-table tr.rpk-script:hover td {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 6%, transparent);
+}
+
 .regex-perf-kit .rpk-hot td {
     color: var(--warning, #f0a040);
     font-weight: 600;
@@ -114,6 +216,7 @@
 .regex-perf-kit .rpk-act span {
     padding: 0 3px;
     opacity: 0.7;
+    cursor: pointer;
 }
 
 .regex-perf-kit .rpk-act span:hover {
@@ -131,6 +234,10 @@
 .regex-perf-kit .rpk-tips {
     margin-top: 10px;
     font-size: 0.85em;
+}
+
+.regex-perf-kit .rpk-tips summary {
+    cursor: pointer;
 }
 
 .regex-perf-kit .rpk-tips ul {

@@ -146,23 +146,28 @@ test('extra: ⑧ persisted display output refreshes when the message depth or a 
     assert.deepEqual(r.current, r.none);
 });
 
-/** Korean wording that this branch changes on purpose (the behavior it describes changed). */
-const KO_CHANGED = new Set([
-    // ② tooltip: text containing macros is now excluded too (item 3)
-    '같은 메시지에 같은 스크립트를 다시 돌릴 때 이전 결과를 재사용합니다. 치환문에 {{매크로}}가 있는 스크립트는 자동 제외.',
-]);
+/** Baseline Korean text that this branch replaces on purpose (the panel redesign, renumbered features). */
+const KO_CHANGED = [
+    /표시용 #, 프롬프트용 #/, // the summary now counts scripts by origin (global / preset / scoped)
+    /^(회 \/|ms · 프리필터 스킵|· 캐시 히트|· 스트리밍 스킵|· 영구캐시 히트|· 절약 추정 ≈|ms|· 채팅 #개)$/, // the run counters are tiles now
+    /^· 설정만으로 할 수 있는 것/, // the tips heading lost its "⑥·⑦" plan numbers
+    '같은 메시지에 같은 스크립트를 다시 돌릴 때 이전 결과를 재사용합니다. 치환문에 {{매크로}}가 있는 스크립트는 자동 제외.', // ③: text with macros is excluded too (item 3)
+];
+const changed = (text) => KO_CHANGED.some(x => (x instanceof RegExp ? x.test(text) : x === text));
 // Words the Korean UI keeps in English: product and SillyTavern setting names, units, the test's script names.
 const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|markdownOnly|staging|extra|regexperf|reset|text|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b/g;
 
 test('item 17: Korean locale keeps main\'s Korean UI text; nothing is left untranslated', async ({ each }) => {
     const r = await each('uiTexts', null, { locale: 'ko-kr', variants: ['baseline', 'current'] });
-    const norm = (s) => s.replace(/\d+(?:\.\d+)?/g, '#'); // timings differ between runs
+    // timings differ between runs; features were renumbered ① ② ③ ④ ⑤ in screen order (main: ① ④ ② ⑥ ⑧)
+    const norm = (s) => s.replace(/\d+(?:\.\d+)?/g, '#').replace(/[①②③④⑤⑥⑦⑧]/g, '').trim();
     const now = new Set(r.current.texts.map(norm));
-    const missing = r.baseline.texts.filter(s => !now.has(norm(s)) && !KO_CHANGED.has(s) && /[가-힣]/.test(s));
+    const missing = r.baseline.texts.map(norm).filter(s => !now.has(s) && !changed(s) && /[가-힣]/.test(s));
     assert.deepEqual(missing, [], 'Korean panel strings from main that are gone');
+    const report = r.current.report.replace(/[①②③④⑤⑥⑦⑧]/g, '#');
     for (const line of r.baseline.report.split('\n').slice(1)) {
-        const fixed = line.replace(/\d[\d.:/ ]*|"[^"]*"/g, '#').split(/[#|]/).map(s => s.trim()).filter(s => /[가-힣]/.test(s));
-        for (const piece of fixed) assert.ok(r.current.report.includes(piece), `report text "${piece}"`);
+        const fixed = line.replace(/\d[\d.:/ ]*|"[^"]*"|[①②③④⑤⑥⑦⑧]/g, '#').split(/[#|]/).map(s => s.trim()).filter(s => /[가-힣]/.test(s) && !/표시용|프롬프트용/.test(s));
+        for (const piece of fixed) assert.ok(report.includes(piece), `report text "${piece}"`);
     }
     assert.equal(r.current.help, r.baseline.help);
     for (const toast of r.baseline.toasts) assert.ok(r.current.toasts.includes(toast), `toast "${toast}"`);

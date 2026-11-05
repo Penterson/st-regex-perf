@@ -3,14 +3,15 @@
  *
  * The engine compiles every script pattern through RegexProvider.instance.get(). That method is patched to
  * return a RegExp subclass whose [Symbol.replace] (where String.prototype.replace() dispatches) adds
- * ① profiler, ② memo cache, ④ literal prefilter, ⑥ streaming skip of display-only scripts and
- * ⑧ a persisted display cache (needs ST's MessageFormatter hooks, as does ⑥'s compromise mode).
+ * ① profiler, ③ memo cache, ② literal prefilter, ④ streaming skip of display-only scripts and
+ * ⑤ a persisted display cache (needs ST's MessageFormatter hooks, as does ④'s compromise mode).
  * No ST core file is modified.
  */
 
-import { RegexProvider, getRegexScripts } from '../../regex/engine.js';
+import * as engine from '../../regex/engine.js';
 import { regexFromString } from '../../../utils.js';
 
+const { RegexProvider, getRegexScripts, getScriptsByType, SCRIPT_TYPES } = engine;
 const EXTRA_KEY = 'regex_perf_cache';
 const ctx = () => SillyTavern.getContext();
 // Fixed for the session, so read once; live state (chat, names, the streaming processor) is read through ctx().
@@ -26,7 +27,7 @@ const defaultSettings = {
     memoMaxLen: 20000,
     memoMaxMB: 64,
     streamingSkip: true,
-    streamingThrottle: false, // ⑥ compromise mode: format the streamed message at most every streamingThrottleMs
+    streamingThrottle: false, // ④ compromise mode: format the streamed message at most every streamingThrottleMs
     streamingThrottleMs: 500,
     persist: false,
     persistMaxLen: 60000,
@@ -294,19 +295,28 @@ function ensureInfo() { // runs on every RegexProvider.get(): Date.now() is the 
 }
 
 function buildInfo() {
-    let scripts = [];
-    try { scripts = getRegexScripts({ allowedOnly: true }) ?? []; } catch (e) { console.warn('[RegexPerf] getRegexScripts failed', e); }
+    // Scripts by origin, in the engine's priority order (global, preset, scoped); older engines only have the flat list.
+    const groups = [];
+    try {
+        if (typeof getScriptsByType === 'function' && SCRIPT_TYPES) {
+            for (const [name, type] of Object.entries(SCRIPT_TYPES)) groups.push([name.toLowerCase(), getScriptsByType(type, { allowedOnly: true }) ?? []]);
+        } else {
+            groups.push(['global', getRegexScripts({ allowedOnly: true }) ?? []]);
+        }
+    } catch (e) { console.warn('[RegexPerf] reading regex scripts failed', e); }
+    const scripts = groups.flatMap(([, list]) => list);
     const { substituteParamsExtended } = ctx();
     const map = new Map();
-    const counts = { total: scripts.length, active: 0, markdownOnly: 0, promptOnly: 0, noNeedle: 0, heavy: 0, nested: 0 };
+    const counts = { total: scripts.length, active: 0, noNeedle: 0, heavy: 0, nested: 0, types: {} };
+    for (const [name, list] of groups) {
+        counts.types[name] = { total: list.length, active: list.filter(x => x?.findRegex && !x.disabled).length };
+    }
     const versionParts = [];
-    const depthRules = []; // [min, max] of display scripts with depth limits, for the ⑧ key
+    const depthRules = []; // [min, max] of display scripts with depth limits, for the ⑤ key
 
     for (const s of scripts) {
         if (!s?.findRegex || s.disabled) continue;
         counts.active++;
-        if (s.markdownOnly) counts.markdownOnly++;
-        if (s.promptOnly) counts.promptOnly++;
 
         let rs = s.findRegex;
         const substitute = Number(s.substituteRegex);
@@ -348,7 +358,7 @@ function buildInfo() {
         }
         map.set(key, info);
 
-        // The same limits getRegexedString() applies; display scripts only, as those are what ⑧ stores.
+        // The same limits getRegexedString() applies; display scripts only, as those are what ⑤ stores.
         const min = !isNaN(s.minDepth) && s.minDepth !== null && s.minDepth >= -1 ? Number(s.minDepth) : -Infinity;
         const max = !isNaN(s.maxDepth) && s.maxDepth !== null && s.maxDepth >= 0 ? Number(s.maxDepth) : Infinity;
         if (s.markdownOnly && (min > -Infinity || max < Infinity)) depthRules.push([min, max]);
@@ -363,9 +373,9 @@ const stats = new Map(); // pattern key -> counters, see getStat()
 let statsSince = Date.now();
 const persistStats = { hits: 0, stores: 0 };
 let bypass = false; // set by the formatter hooks while a stored result is being shown
-let streamApply = false; // set by the formatter hooks for a ⑥ compromise pass that does run the display scripts
+let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
 
-// ② Memo: memoPrefix -> Map(input -> entry). Keying by the input string itself (its hash is cached and the same
+// ③ Memo: memoPrefix -> Map(input -> entry). Keying by the input string itself (its hash is cached and the same
 // string object flows through consecutive scripts) avoids building a new key per call. memoLru orders all
 // entries, least recently used first; memoBytes is their estimated size (2 bytes per UTF-16 unit).
 const memo = new Map();
@@ -540,11 +550,11 @@ function patchProvider() {
     patched = true;
 }
 
-// ---- MessageFormatter hooks: ⑧ persisted display cache, ⑥ compromise mode ----
+// ---- MessageFormatter hooks: ⑤ persisted display cache, ④ compromise mode ----
 
 let persistAvailable = false; // the hooks exist (recent SillyTavern)
 let pending = null; // {msg, key, input}: message awaiting its after-regex result
-const streamViews = new Map(); // ⑥ compromise: "<messageId><m|r>" -> {at, prefix, out} of the streamed message
+const streamViews = new Map(); // ④ compromise: "<messageId><m|r>" -> {at, prefix, out} of the streamed message
 let streamView = null; // the view this pass formats
 let streamTail = null; // raw text this pass appends after the regex stage
 
@@ -555,7 +565,7 @@ function resetPass() {
 }
 
 /**
- * ⑥ compromise mode, for the message being streamed: the display scripts format the completed lines at most every
+ * ④ compromise mode, for the message being streamed: the display scripts format the completed lines at most every
  * streamingThrottleMs; in between, the last formatted lines are reused and the rest is shown as it streams.
  */
 function streamPass(mes, c) {
@@ -580,7 +590,7 @@ function installPersistHooks() {
     if (!mf || typeof mf.addHook !== 'function' || !mf.stage) return;
     persistAvailable = true;
 
-    // Before regex: ⑥ compromise mode for the streamed message; otherwise, on a ⑧ key match, substitute the
+    // Before regex: ④ compromise mode for the streamed message; otherwise, on a ⑤ key match, substitute the
     // stored result and bypass every script for this message.
     mf.addHook((mes, c) => {
         resetPass();
@@ -611,11 +621,11 @@ function installPersistHooks() {
         return mes;
     }, { stage: mf.stage.BEFORE_REGEX, order: mf.order?.LATEST ?? 100 });
 
-    // After regex: append ⑥'s raw tail, or store the freshly computed result for ⑧.
+    // After regex: append ④'s raw tail, or store the freshly computed result for ⑤.
     mf.addHook((mes) => {
         const tail = streamTail;
         const view = streamView;
-        const p = pending; // null after a ⑧ hit (bypass)
+        const p = pending; // null after a ⑤ hit (bypass)
         resetPass();
         if (tail !== null) {
             if (view) view.out = mes;
@@ -692,7 +702,7 @@ function buildSummary() {
         top,
         topShare: top && total > 0 ? top.totalMs / total * 100 : 0,
         usage: t`Memo: ${memoLru.size} entries, ${(memoBytes / 1048576).toFixed(1)} of ${settings.memoMaxMB} MB`
-            + (persistAvailable ? ' · ' + t`⑧ in this chat: ${persistEntries} messages, ≈${Math.round(persistChars / 1024)} KB` : ''),
+            + (persistAvailable ? ' · ' + t`⑤ in this chat: ${persistEntries} messages, ≈${Math.round(persistChars / 1024)} KB` : ''),
     };
 }
 
@@ -700,13 +710,19 @@ let measured = null; // last "Measure on this chat" result
 
 const measureText = (m) => t`This chat (${m.messages} messages): ${fmtMs(m.off)} ms with the features off, ${fmtMs(m.on)} ms on — ${fmtMs(m.off - m.on)} ms saved (${m.off > 0 ? Math.round((m.off - m.on) / m.off * 100) : 0}%)`;
 
+/** "global 3/40 · preset 2/8 · scoped 0/0": active/total per script origin. */
+const typeCounts = (c) => {
+    const n = (k) => c.types[k] ?? { active: 0, total: 0 };
+    return [t`global ${n('global').active}/${n('global').total}`, t`preset ${n('preset').active}/${n('preset').total}`, t`scoped ${n('scoped').active}/${n('scoped').total}`].join(' · ');
+};
+
 function buildReportText() {
     const s = buildSummary();
     const c = s.counts;
     const lines = [
         `Regex Perf Kit report (${new Date().toLocaleString()})`,
         t`Since: ${new Date(statsSince).toLocaleTimeString()} / chat messages: ${s.chatLen}`,
-        t`Scripts: ${c.total} total, ${c.active} active (display ${c.markdownOnly}, prompt ${c.promptOnly}), no literal ${c.noNeedle}, possibly heavy ${c.heavy}, nested quantifiers ${c.nested}`,
+        t`Scripts: ${c.total} total, ${c.active} active (${typeCounts(c)}), no literal ${c.noNeedle}, possibly heavy ${c.heavy}, nested quantifiers ${c.nested}`,
         t`Ran ${s.calls} times / ${fmtMs(s.total)} ms total | prefilter skips ${s.skipped} | cache hits ${s.hits} | streaming skips ${s.streamSkipped} | persistent cache bypasses ${s.bypass} (hits ${persistStats.hits}, stored ${persistStats.stores})`,
         t`Estimated time saved: ≈${fmtMs(s.saved)} ms ((prefilter skips + cache hits + streaming skips) × average run time)`,
         s.usage,
@@ -725,7 +741,7 @@ const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'changed', 'skipped', '
 
 /**
  * Renders every message of the current chat as SillyTavern displays it (messageFormatting), first with the
- * prefilter, the memo and ⑧ off, then with the user's settings, and returns both times. The chat was rendered when
+ * prefilter, the memo and ⑤ off, then with the user's settings, and returns both times. The chat was rendered when
  * it opened, so this is a re-render, as on swipes, edits and reloads. Synchronous, so the temporarily changed
  * settings can never be saved, and the stats are restored afterwards.
  */
@@ -775,15 +791,17 @@ const esc = (s) => String(s).replace(/[&<>"']/g, c => ESCAPES[c]);
 const KO = {
     'Measuring...': '측정 중...',
     'Measures each script\'s execution time. Almost free.': '스크립트별 실행 시간을 측정합니다. 비용이 거의 없습니다.',
+    'Features': '기능',
+    'Statistics': '통계',
     '① Profiler': '① 프로파일러',
     'Skips a regex when the message lacks a fixed string that every match must contain. Results are identical.': '패턴에 반드시 포함돼야 하는 고정 문자열이 메시지에 없으면 정규식을 실행하지 않습니다. 결과는 동일합니다.',
-    '④ Literal prefilter': '④ 리터럴 프리필터',
+    '② Literal prefilter': '② 리터럴 프리필터',
     'Reuses the previous result when the same script runs on the same message again. Scripts with {{macros}} in the replacement, and text containing macros, are excluded automatically.': '같은 메시지에 같은 스크립트를 다시 돌릴 때 이전 결과를 재사용합니다. 치환문에 {{매크로}}가 있는 스크립트와 매크로가 든 텍스트는 자동 제외.',
-    '② Result cache (memory)': '② 결과 캐시 (메모리)',
+    '③ Result cache (memory)': '③ 결과 캐시 (메모리)',
     'While streaming, display-only (markdownOnly) scripts are skipped and applied once the generation finishes.': '스트리밍 중에는 표시 전용(markdownOnly) 스크립트를 건너뛰고, 생성이 끝나면 한 번 적용합니다.',
-    '⑥ Skip display scripts while streaming': '⑥ 스트리밍 중 표시용 스킵',
+    '④ Skip display scripts while streaming': '④ 스트리밍 중 표시용 스킵',
     'Stores the display result in the message (extra) so reopening the chat skips recomputing it. Chat files may grow.': '표시 결과를 메시지(extra)에 저장해 채팅을 다시 열 때 재계산을 생략합니다. 채팅 파일이 커질 수 있습니다.',
-    '⑧ Persistent display cache (optional)': '⑧ 표시 결과 영구 캐시 (선택)',
+    '⑤ Persistent display cache (optional)': '⑤ 표시 결과 영구 캐시 (선택)',
     'rpk_refresh': '새로고침',
     'Reset stats': '측정 초기화',
     'Copy report': '리포트 복사',
@@ -796,25 +814,28 @@ const KO = {
     'Skips': '스킵',
     'Hits': '히트',
     'Literal': '리터럴',
-    '⑥·⑦ What SillyTavern\'s own settings can do': '⑥·⑦ 설정만으로 할 수 있는 것 (ST 기본 설정)',
+    'What SillyTavern\'s own settings can do': '설정만으로 할 수 있는 것 (ST 기본 설정)',
     '<b>User Settings → "# Messages to Load"</b>: how many messages are rendered (= regex applied) when a chat opens. 0 = all. 50–100 makes loading much faster.': '<b>User Settings → "# Messages to Load"</b>: 채팅을 열 때 렌더링(=정규식 적용)하는 메시지 수. 0=전부. 50~100 정도로 줄이면 로딩이 크게 빨라집니다.',
     '<b>User Settings → "Streaming FPS"</b>: screen updates per second while streaming. Every update runs all display regexes, so 10–15 reduces lag.': '<b>User Settings → "Streaming FPS"</b>: 스트리밍 중 화면 갱신 횟수. 갱신마다 표시용 정규식이 전부 돌아가므로 10~15로 낮추면 렉이 줄어듭니다.',
     'Turn on <b>"Only Format Display"</b> for display scripts and <b>"Only Format Prompt"</b> for prompt scripts. Scripts with neither run when a message is saved and are not skipped while streaming.': '표시용 스크립트는 <b>"Only Format Display"</b>, 프롬프트용은 <b>"Only Format Prompt"</b>를 켜두세요. 둘 다 꺼진 스크립트는 저장 시점에 돌아가며, 이 확장의 스트리밍 스킵 대상도 아닙니다.',
-    'Scripts <b>${0}</b>/${1} active (display ${2}, prompt ${3})': '스크립트 <b>${0}</b>/${1} 활성 (표시용 ${2}, 프롬프트용 ${3})',
+    'Active scripts <b>${0}</b>/${1}': '활성 스크립트 <b>${0}</b>/${1}',
+    'global ${0}/${1}': '글로벌 ${0}/${1}',
+    'preset ${0}/${1}': '프리셋 ${0}/${1}',
+    'scoped ${0}/${1}': '범위 지정 ${0}/${1}',
     'no literal <b>${0}</b>': '리터럴 없음 <b>${0}</b>',
     '<code>.*</code>-style <b>${0}</b>': '<code>.*</code> 계열 <b>${0}</b>',
     'chat ${0} messages': '채팅 ${0}개',
-    'Ran <b>${0}</b> times / <b>${1}</b> ms': '실행 <b>${0}</b>회 / <b>${1}</b> ms',
-    'prefilter skips <b>${0}</b>': '프리필터 스킵 <b>${0}</b>',
-    'cache hits <b>${0}</b>': '캐시 히트 <b>${0}</b>',
-    'streaming skips <b>${0}</b>': '스트리밍 스킵 <b>${0}</b>',
-    'persistent cache hits <b>${0}</b>': '영구캐시 히트 <b>${0}</b>',
+    'Prefilter skips': '프리필터 스킵',
+    'Cache hits': '캐시 히트',
+    'Streaming skips': '스트리밍 스킵',
+    'Persistent cache hits': '영구 캐시 히트',
+    'Time saved (estimate)': '절약 추정',
     'Slowest script: <b>${0}</b> — ${1}% of the total': '가장 느린 스크립트: <b>${0}</b> — 전체의 ${1}%',
     '⚠ Could not patch the regex engine — this SillyTavern version is not supported.': '⚠ 정규식 엔진 패치 실패 — 이 ST 버전은 지원되지 않습니다.',
     'Pattern that may backtrack a lot': '백트래킹이 많을 수 있는 패턴',
     'none': '없음',
     'No runs measured yet. Render a message or reopen the chat.': '아직 측정된 실행이 없습니다. 메시지를 렌더링하거나 채팅을 다시 열어보세요.',
-    '⑧ on: display results are stored in the message extra. Changing a script changes the key, so results are recomputed automatically.': '⑧ 켜짐: 표시 결과가 메시지 extra에 저장됩니다. 스크립트를 바꾸면 키가 달라져 자동으로 재계산됩니다.',
+    '⑤ on: display results are stored in the message extra. Changing a script changes the key, so results are recomputed automatically.': '⑤ 켜짐: 표시 결과가 메시지 extra에 저장됩니다. 스크립트를 바꾸면 키가 달라져 자동으로 재계산됩니다.',
     'Stats reset.': '측정값을 초기화했습니다.',
     'Report copied to the clipboard.': '리포트를 클립보드에 복사했습니다.',
     'Could not copy — use the /regexperf command to see the report in a popup.': '클립보드 복사 실패 — /regexperf 명령으로 팝업에서 확인하세요.',
@@ -827,29 +848,29 @@ const KO = {
     'Ran ${0} times / ${1} ms total | prefilter skips ${2} | cache hits ${3} | streaming skips ${4} | persistent cache bypasses ${5} (hits ${6}, stored ${7})': '실행 ${0}회 / 총 ${1}ms | 프리필터 스킵 ${2} | 캐시 히트 ${3} | 스트리밍 스킵 ${4} | 영구캐시 바이패스 ${5} (히트 ${6}, 저장 ${7})',
     '#1 "${0}" takes ${1}% of the total time': '1위 "${0}" 가 전체 시간의 ${1}% 차지',
     '.*-style': '.* 계열',
-    'Scripts: ${0} total, ${1} active (display ${2}, prompt ${3}), no literal ${4}, possibly heavy ${5}, nested quantifiers ${6}': '스크립트: 전체 ${0}, 활성 ${1} (표시용 ${2}, 프롬프트용 ${3}), 리터럴 없음 ${4}, 무거운 패턴 의심 ${5}, 중첩 수량자 ${6}',
+    'Scripts: ${0} total, ${1} active (${2}), no literal ${3}, possibly heavy ${4}, nested quantifiers ${5}': '스크립트: 전체 ${0}, 활성 ${1} (${2}), 리터럴 없음 ${3}, 무거운 패턴 의심 ${4}, 중첩 수량자 ${5}',
     'Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Changed | Skips | Hits | Stream skips | Literal | Warnings': '순위 | 스크립트 | 실행 | 총ms | 평균ms | 최대ms | 치환ms | 변경 | 스킵 | 히트 | 스트리밍 스킵 | 리터럴 | 경고',
-    '⑧ and ⑥\'s compromise mode are unavailable: this SillyTavern version has no MessageFormatter hooks (needs a recent staging build).': '⑧ 영구 캐시와 ⑥ 절충 모드는 이 ST 버전에 MessageFormatter 훅이 없어 사용할 수 없습니다 (staging 최신 버전 필요).',
+    '⑤ and ④\'s compromise mode are unavailable: this SillyTavern version has no MessageFormatter hooks (needs a recent staging build).': '⑤ 영구 캐시와 ④ 절충 모드는 이 ST 버전에 MessageFormatter 훅이 없어 사용할 수 없습니다 (staging 최신 버전 필요).',
     'nested quantifier': '중첩 수량자',
     'spike': '스파이크',
     'no effect': '효과 없음',
     'Memo: ${0} entries, ${1} of ${2} MB': '결과 캐시: ${0}개, ${1} / ${2} MB',
-    '⑧ in this chat: ${0} messages, ≈${1} KB': '⑧ 현재 채팅: 메시지 ${0}개, ≈${1} KB',
+    '⑤ in this chat: ${0} messages, ≈${1} KB': '⑤ 현재 채팅: 메시지 ${0}개, ≈${1} KB',
     'This chat (${0} messages): ${1} ms with the features off, ${2} ms on — ${3} ms saved (${4}%)': '이 채팅 (메시지 ${0}개): 기능 끔 ${1} ms, 켬 ${2} ms — ${3} ms 절약 (${4}%)',
     'Estimated time saved: ≈${0} ms ((prefilter skips + cache hits + streaming skips) × average run time)': '절약 추정: ≈${0} ms ((프리필터 스킵 + 캐시 히트 + 스트리밍 스킵) × 평균 실행 시간)',
     'Candidates to disable (ran ${0}+ times, never changed the text): ${1}': '끄기 후보 (${0}회 이상 실행, 텍스트 변경 없음): ${1}',
-    'With ⑥ on: instead of skipping them, display scripts format the completed lines of the streamed message at most every N ms (set under Limits); the line being written stays raw. The final render applies every script.': '⑥이 켜져 있을 때: 건너뛰는 대신, 스트리밍 중인 메시지의 완성된 줄에 표시용 스크립트를 최대 N ms마다 한 번 적용합니다(한도에서 설정). 작성 중인 줄은 그대로 보이고, 마지막 렌더링에는 모든 스크립트가 적용됩니다.',
-    '⑥ Compromise: format while streaming': '⑥ 절충: 스트리밍 중에도 표시',
+    'With ④ on: instead of skipping them, display scripts format the completed lines of the streamed message at most every N ms (set under Limits); the line being written stays raw. The final render applies every script.': '④이 켜져 있을 때: 건너뛰는 대신, 스트리밍 중인 메시지의 완성된 줄에 표시용 스크립트를 최대 N ms마다 한 번 적용합니다(한도에서 설정). 작성 중인 줄은 그대로 보이고, 마지막 렌더링에는 모든 스크립트가 적용됩니다.',
+    '④ Compromise: format while streaming': '④ 절충: 스트리밍 중에도 표시',
     'Limits': '한도',
     'Oldest results are evicted beyond this many.': '이 개수를 넘으면 가장 오래된 결과부터 지웁니다.',
-    '② Memo entries': '② 결과 캐시 개수',
+    '③ Memo entries': '③ 결과 캐시 개수',
     'Longer inputs are not memoized.': '이보다 긴 입력은 캐시하지 않습니다.',
-    '② Memo max input (characters)': '② 캐시할 최대 입력 길이 (글자)',
+    '③ Memo max input (characters)': '③ 캐시할 최대 입력 길이 (글자)',
     'Oldest results are evicted beyond this estimated size (2 bytes per character of input and output).': '추정 크기(입력+출력 글자당 2바이트)가 이를 넘으면 가장 오래된 결과부터 지웁니다.',
-    '② Memo memory (MB)': '② 결과 캐시 메모리 (MB)',
+    '③ Memo memory (MB)': '③ 결과 캐시 메모리 (MB)',
     'Longer display results are not stored in the chat.': '이보다 긴 표시 결과는 채팅에 저장하지 않습니다.',
-    '⑧ Max stored result (characters)': '⑧ 저장할 최대 결과 길이 (글자)',
-    '⑥ Compromise interval (ms)': '⑥ 절충 모드 간격 (ms)',
+    '⑤ Max stored result (characters)': '⑤ 저장할 최대 결과 길이 (글자)',
+    '④ Compromise interval (ms)': '④ 절충 모드 간격 (ms)',
     'Re-renders this chat with the features off, then on, and shows the difference. The page is busy meanwhile.': '이 채팅을 기능을 끈 상태와 켠 상태로 다시 렌더링해 차이를 보여줍니다. 그동안 화면이 멈춥니다.',
     'Measure on this chat': '이 채팅으로 측정',
     'Time spent in SillyTavern\'s replacer (group filling, trim strings, macros), included in Total ms': 'SillyTavern 치환 함수(그룹 채우기, 트림 문자열, 매크로)에 쓴 시간. 총 ms에 포함됩니다.',
@@ -857,7 +878,6 @@ const KO = {
     'Runs that changed the text': '텍스트를 바꾼 실행 횟수',
     'Changed': '변경',
     'nested quantifiers <b>${0}</b>': '중첩 수량자 <b>${0}</b>',
-    '≈<b>${0}</b> ms saved (estimate)': '절약 추정 ≈<b>${0}</b> ms',
     'Ran ${0}+ times without changing the text (candidates to disable): <b>${1}</b>': '${0}회 이상 실행했지만 텍스트를 바꾸지 않음 (끄기 후보): <b>${1}</b>',
     'Nested quantifier: can backtrack catastrophically on long text': '중첩 수량자: 긴 텍스트에서 백트래킹이 폭증할 수 있습니다',
     'A single run took ${0} ms (over ${1} ms)': '한 번 실행에 ${0} ms 걸림 (${1} ms 초과)',
@@ -871,6 +891,12 @@ const KO = {
 const locale = getCurrentLocale();
 if (locale.startsWith('ko')) addLocaleData(locale, KO);
 
+const feature = (id, name, desc, labelId = '') => `
+        <label class="rpk-feature"${labelId ? ` id="${labelId}"` : ''}>
+          <input type="checkbox" id="${id}">
+          <span class="rpk-feature-text"><span class="rpk-feature-name">${name}</span><span class="rpk-feature-desc">${desc}</span></span>
+        </label>`;
+
 const settingsHtml = () => `
 <div id="regex_perf_kit" class="regex-perf-kit">
   <div class="inline-drawer">
@@ -881,25 +907,14 @@ const settingsHtml = () => `
     <div class="inline-drawer-content">
       <div class="rpk-summary" id="rpk_summary">${t`Measuring...`}</div>
 
-      <div class="rpk-grid">
-        <label class="checkbox_label" title="${t`Measures each script's execution time. Almost free.`}">
-          <input type="checkbox" id="rpk_profiler"><span>${t`① Profiler`}</span>
-        </label>
-        <label class="checkbox_label" title="${t`Skips a regex when the message lacks a fixed string that every match must contain. Results are identical.`}">
-          <input type="checkbox" id="rpk_prefilter"><span>${t`④ Literal prefilter`}</span>
-        </label>
-        <label class="checkbox_label" title="${t`Reuses the previous result when the same script runs on the same message again. Scripts with {{macros}} in the replacement, and text containing macros, are excluded automatically.`}">
-          <input type="checkbox" id="rpk_memo"><span>${t`② Result cache (memory)`}</span>
-        </label>
-        <label class="checkbox_label" title="${t`While streaming, display-only (markdownOnly) scripts are skipped and applied once the generation finishes.`}">
-          <input type="checkbox" id="rpk_streaming"><span>${t`⑥ Skip display scripts while streaming`}</span>
-        </label>
-        <label class="checkbox_label" title="${t`With ⑥ on: instead of skipping them, display scripts format the completed lines of the streamed message at most every N ms (set under Limits); the line being written stays raw. The final render applies every script.`}">
-          <input type="checkbox" id="rpk_stream_throttle"><span>${t`⑥ Compromise: format while streaming`}</span>
-        </label>
-        <label class="checkbox_label" id="rpk_persist_label" title="${t`Stores the display result in the message (extra) so reopening the chat skips recomputing it. Chat files may grow.`}">
-          <input type="checkbox" id="rpk_persist"><span>${t`⑧ Persistent display cache (optional)`}</span>
-        </label>
+      <div class="rpk-section">${t`Features`}</div>
+      <div class="rpk-features">
+        ${feature('rpk_profiler', t`① Profiler`, t`Measures each script's execution time. Almost free.`)}
+        ${feature('rpk_prefilter', t`② Literal prefilter`, t`Skips a regex when the message lacks a fixed string that every match must contain. Results are identical.`)}
+        ${feature('rpk_memo', t`③ Result cache (memory)`, t`Reuses the previous result when the same script runs on the same message again. Scripts with {{macros}} in the replacement, and text containing macros, are excluded automatically.`)}
+        ${feature('rpk_streaming', t`④ Skip display scripts while streaming`, t`While streaming, display-only (markdownOnly) scripts are skipped and applied once the generation finishes.`)}
+        ${feature('rpk_stream_throttle', t`④ Compromise: format while streaming`, t`With ④ on: instead of skipping them, display scripts format the completed lines of the streamed message at most every N ms (set under Limits); the line being written stays raw. The final render applies every script.`)}
+        ${feature('rpk_persist', t`⑤ Persistent display cache (optional)`, t`Stores the display result in the message (extra) so reopening the chat skips recomputing it. Chat files may grow.`, 'rpk_persist_label')}
       </div>
       <div class="rpk-note" id="rpk_persist_note"></div>
       <div class="rpk-note" id="rpk_usage"></div>
@@ -907,11 +922,11 @@ const settingsHtml = () => `
       <details class="rpk-limits">
         <summary>${t`Limits`}</summary>
         <div class="rpk-grid">
-          <label title="${t`Oldest results are evicted beyond this many.`}">${t`② Memo entries`} <input type="number" class="text_pole" id="rpk_memoMaxEntries"></label>
-          <label title="${t`Longer inputs are not memoized.`}">${t`② Memo max input (characters)`} <input type="number" class="text_pole" id="rpk_memoMaxLen"></label>
-          <label title="${t`Oldest results are evicted beyond this estimated size (2 bytes per character of input and output).`}">${t`② Memo memory (MB)`} <input type="number" class="text_pole" id="rpk_memoMaxMB"></label>
-          <label title="${t`Longer display results are not stored in the chat.`}">${t`⑧ Max stored result (characters)`} <input type="number" class="text_pole" id="rpk_persistMaxLen"></label>
-          <label>${t`⑥ Compromise interval (ms)`} <input type="number" class="text_pole" id="rpk_streamingThrottleMs"></label>
+          <label title="${t`Oldest results are evicted beyond this many.`}">${t`③ Memo entries`} <input type="number" class="text_pole" id="rpk_memoMaxEntries"></label>
+          <label title="${t`Longer inputs are not memoized.`}">${t`③ Memo max input (characters)`} <input type="number" class="text_pole" id="rpk_memoMaxLen"></label>
+          <label title="${t`Oldest results are evicted beyond this estimated size (2 bytes per character of input and output).`}">${t`③ Memo memory (MB)`} <input type="number" class="text_pole" id="rpk_memoMaxMB"></label>
+          <label title="${t`Longer display results are not stored in the chat.`}">${t`⑤ Max stored result (characters)`} <input type="number" class="text_pole" id="rpk_persistMaxLen"></label>
+          <label>${t`④ Compromise interval (ms)`} <input type="number" class="text_pole" id="rpk_streamingThrottleMs"></label>
         </div>
       </details>
 
@@ -924,6 +939,7 @@ const settingsHtml = () => `
       </div>
       <div class="rpk-note" id="rpk_measure_result"></div>
 
+      <div class="rpk-section">${t`Statistics`}</div>
       <div class="rpk-table-wrap">
         <table class="rpk-table" id="rpk_table">
           <thead><tr><th>#</th><th>${t`Script`}</th><th>${t`Runs`}</th><th>${t`Total ms`}</th><th>${t`Avg`}</th><th>${t`Max`}</th><th title="${t`Time spent in SillyTavern's replacer (group filling, trim strings, macros), included in Total ms`}">${t`Replacer`}</th><th title="${t`Runs that changed the text`}">${t`Changed`}</th><th>${t`Skips`}</th><th>${t`Hits`}</th><th>${t`Literal`}</th><th></th></tr></thead>
@@ -932,7 +948,7 @@ const settingsHtml = () => `
       </div>
 
       <details class="rpk-tips">
-        <summary>${t`⑥·⑦ What SillyTavern's own settings can do`}</summary>
+        <summary>${t`What SillyTavern's own settings can do`}</summary>
         <ul>
           <li>${t`<b>User Settings → "# Messages to Load"</b>: how many messages are rendered (= regex applied) when a chat opens. 0 = all. 50–100 makes loading much faster.`}</li>
           <li>${t`<b>User Settings → "Streaming FPS"</b>: screen updates per second while streaming. Every update runs all display regexes, so 10–15 reduces lag.`}</li>
@@ -963,20 +979,24 @@ function renderPanel() {
     if (!ui) return;
     const s = buildSummary();
     const c = s.counts;
-    let summary = '<div>' + [
-        t`Scripts <b>${c.active}</b>/${c.total} active (display ${c.markdownOnly}, prompt ${c.promptOnly})`,
+    const tile = (label, value) => `<div class="rpk-stat"><span class="rpk-stat-value">${value}</span><span class="rpk-stat-label">${label}</span></div>`;
+    let summary = '<div class="rpk-scripts">' + [
+        t`Active scripts <b>${c.active}</b>/${c.total}`,
+        typeCounts(c),
+        t`chat ${s.chatLen} messages`,
+    ].join(' · ') + '</div><div class="rpk-scripts rpk-dim">' + [
         t`no literal <b>${c.noNeedle}</b>`,
         t`<code>.*</code>-style <b>${c.heavy}</b>`,
         t`nested quantifiers <b>${c.nested}</b>`,
-        t`chat ${s.chatLen} messages`,
-    ].join(' · ') + '</div><div>' + [
-        t`Ran <b>${s.calls}</b> times / <b>${fmtMs(s.total)}</b> ms`,
-        t`prefilter skips <b>${s.skipped}</b>`,
-        t`cache hits <b>${s.hits}</b>`,
-        t`streaming skips <b>${s.streamSkipped}</b>`,
-        ...(persistAvailable ? [t`persistent cache hits <b>${persistStats.hits}</b>`] : []),
-        t`≈<b>${fmtMs(s.saved)}</b> ms saved (estimate)`,
-    ].join(' · ') + '</div>';
+    ].join(' · ') + '</div><div class="rpk-stats">' + [
+        tile(t`Runs`, s.calls),
+        tile(t`Total ms`, fmtMs(s.total)),
+        tile(t`Prefilter skips`, s.skipped),
+        tile(t`Cache hits`, s.hits),
+        tile(t`Streaming skips`, s.streamSkipped),
+        ...(persistAvailable ? [tile(t`Persistent cache hits`, persistStats.hits)] : []),
+        tile(t`Time saved (estimate)`, '≈' + fmtMs(s.saved) + ' ms'),
+    ].join('') + '</div>';
     if (s.top && s.calls > 0) {
         summary += `<div class="${s.topShare >= 50 ? 'rpk-warn' : ''}">${t`Slowest script: <b>${esc(s.top.name)}</b> — ${s.topShare.toFixed(0)}% of the total`}</div>`;
     }
@@ -1006,8 +1026,8 @@ function renderPanel() {
     }).join('') || `<tr><td colspan="12" class="rpk-dim">${t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
 
     setContent(ui.note, !persistAvailable
-        ? t`⑧ and ⑥'s compromise mode are unavailable: this SillyTavern version has no MessageFormatter hooks (needs a recent staging build).`
-        : settings.persist ? t`⑧ on: display results are stored in the message extra. Changing a script changes the key, so results are recomputed automatically.` : '', 'textContent');
+        ? t`⑤ and ④'s compromise mode are unavailable: this SillyTavern version has no MessageFormatter hooks (needs a recent staging build).`
+        : settings.persist ? t`⑤ on: display results are stored in the message extra. Changing a script changes the key, so results are recomputed automatically.` : '', 'textContent');
     setContent(ui.usage, s.usage, 'textContent');
     setContent(ui.measure, measured ? measureText(measured) : '', 'textContent');
 }

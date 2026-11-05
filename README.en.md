@@ -7,11 +7,11 @@ Speeds up SillyTavern's built-in Regex extension **without changing a single cha
 | Feature | Default | What it does |
 |---|---|---|
 | ① Profiler | ON | Per script: runs, total / max ms, the part spent in SillyTavern's replacer (macros), and how often a run actually changed the text. Finds the slowest scripts and the ones that do nothing. |
-| ④ Literal prefilter | ON | Skips a regex when the message lacks a fixed string every match must contain (e.g. `</status>`, `abc` inside `(?:abc)`, either of `foo\|bar`). Results are 100% identical; with the `i` flag the check folds case exactly like the regex engine. |
-| ② Result cache | ON | Reuses the result of the same script on the same message (re-renders, swipes, reloads). Scripts with `{{macros}}` in the replacement, and text containing macros, are excluded automatically. Oldest entries are evicted beyond 3000 entries or 64 MB. |
-| ⑥ Streaming skip | ON | While streaming, "Only Format Display" scripts are skipped and applied once the generation finishes. |
-| ⑥ Compromise mode | OFF | With ⑥ on: instead of skipping them, display scripts format the completed lines of the streamed message at most every N ms (default 500); the line being written stays raw, and the final render applies every script. Needs the MessageFormatter hooks, like ⑧. |
-| ⑧ Persistent cache | OFF | Stores the display result in the message's `extra` so reopening the chat skips recomputing it. Needs SillyTavern staging (MessageFormatter hooks). |
+| ② Literal prefilter | ON | Skips a regex when the message lacks a fixed string every match must contain (e.g. `</status>`, `abc` inside `(?:abc)`, either of `foo\|bar`). Results are 100% identical; with the `i` flag the check folds case exactly like the regex engine. |
+| ③ Result cache | ON | Reuses the result of the same script on the same message (re-renders, swipes, reloads). Scripts with `{{macros}}` in the replacement, and text containing macros, are excluded automatically. Oldest entries are evicted beyond 3000 entries or 64 MB. |
+| ④ Streaming skip | ON | While streaming, "Only Format Display" scripts are skipped and applied once the generation finishes. |
+| ④ Compromise mode | OFF | With ④ on: instead of skipping them, display scripts format the completed lines of the streamed message at most every N ms (default 500); the line being written stays raw, and the final render applies every script. Needs the MessageFormatter hooks, like ⑤. |
+| ⑤ Persistent cache | OFF | Stores the display result in the message's `extra` so reopening the chat skips recomputing it. Needs SillyTavern staging (MessageFormatter hooks). |
 
 ## Install
 
@@ -25,7 +25,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
 
 ## Use
 
-- Reopen the chat or render a few messages to fill the table.
+- Reopen the chat or render a few messages to fill the table. The summary counts scripts as active/total per origin (global / preset / scoped). Each feature is described under its checkbox in the panel too.
 - `/regexperf` shows the report in a popup, `/regexperf text` returns it as text, `/regexperf reset` resets the stats.
 - The summary's **estimated time saved** is (prefilter skips + cache hits + streaming skips) × each script's average run time.
 - **Measure on this chat** re-renders the current chat once with the features off and once on, and shows the time actually saved. The page is busy meanwhile; the measurement does not show up in the stats.
@@ -39,9 +39,9 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
   - `∅` ran 20+ times without ever changing the text (a candidate to disable, also listed in the summary)
 - Click a row to open the script in SillyTavern's regex editor; the power button at the end of the row turns the script off (same as its switch in the Regex extension's list). Patterns that are not scripts have no buttons.
 - Scripts showing "Literal: none" get no prefilter benefit and always run. Several literals (`"a" | "b"`) mean any one of them must be present.
-- **Limits** lets you change the result cache's entry count, max input length and memory (MB), ⑧'s max stored length and the ⑥ compromise interval. The line above it shows the result cache's usage and this chat's ⑧ storage.
+- **Limits** lets you change the result cache's entry count, max input length and memory (MB), ⑤'s max stored length and the ④ compromise interval. The line above it shows the result cache's usage and this chat's ⑤ storage.
 
-## SillyTavern settings that help (⑥·⑦)
+## SillyTavern settings that help
 
 - **User Settings → "# Messages to Load"**: how many messages are rendered when a chat opens. 0 = all. 50–100 makes loading much faster.
 - **User Settings → "Streaming FPS"**: screen updates per second while streaming. Every update runs all display regexes, so 10–15 reduces lag.
@@ -61,10 +61,10 @@ No SillyTavern core file is modified.
 ## Caveats
 
 - This extension runs arbitrary JS. All of it is in `index.js`; read it before installing. Nothing is sent anywhere.
-- ⑧ can make chat files larger. "Clear persistent cache (this chat)" removes its entries.
-- ⑧ stores display results, so values such as `{{random}}`, `{{time}}` or `{{getvar}}` in display scripts show what they were
+- ⑤ can make chat files larger. "Clear persistent cache (this chat)" removes its entries.
+- ⑤ stores display results, so values such as `{{random}}`, `{{time}}` or `{{getvar}}` in display scripts show what they were
   when stored. Script changes, renames (`{{user}}`/`{{char}}`) and message depth (min/max depth) are picked up automatically.
-  This version changes the storage key, so existing ⑧ entries are recomputed once.
+  This version changes the storage key, so existing ⑤ entries are recomputed once.
 - If a SillyTavern version has no `RegexProvider`, patching fails and the panel shows a warning (everything stays off, no side effects).
 
 ## Development
