@@ -122,5 +122,7 @@
     "Matched": "매치",
     "Runs where the pattern matched, even if the text came out the same": "패턴이 매치된 실행 횟수 (텍스트가 그대로였어도 포함)",
     "Last spike: ${0} ms on ${1} characters, starting ${2}": "마지막 스파이크: ${1}글자 입력에 ${0} ms. 시작 부분 ${2}",
-    "Spikes (newest run over ${0} ms per script)": "스파이크 (스크립트별 ${0} ms 초과 최근 실행)"
+    "Spikes (newest run over ${0} ms per script)": "스파이크 (스크립트별 ${0} ms 초과 최근 실행)",
+    "Slowest messages (features off): ${0}": "가장 느린 메시지 (기능 끈 상태): ${0}",
+    "#${0} (${1} chars) ${2} ms": "#${0} (${1}글자) ${2} ms"
 }
