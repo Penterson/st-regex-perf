@@ -20,6 +20,23 @@
     min-height: 1em;
 }
 
+.regex-perf-kit .rpk-limits {
+    margin: 4px 0;
+    font-size: 0.9em;
+}
+
+.regex-perf-kit .rpk-limits label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+}
+
+.regex-perf-kit .rpk-limits input {
+    width: 7em;
+    margin: 2px 0;
+}
+
 .regex-perf-kit .rpk-buttons {
     display: flex;
     flex-wrap: wrap;
@@ -49,13 +66,20 @@
     border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.08));
 }
 
+.regex-perf-kit .rpk-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.6));
+}
+
 .regex-perf-kit .rpk-table th:nth-child(2),
 .regex-perf-kit .rpk-table td:nth-child(2),
 .regex-perf-kit .rpk-table .rpk-lit {
     text-align: left;
 }
 
-.regex-perf-kit .rpk-table td:nth-child(2) {
+.regex-perf-kit .rpk-table td:nth-child(2),
+.regex-perf-kit .rpk-table td.rpk-lit {
     max-width: 220px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -63,45 +87,11 @@
 
 .regex-perf-kit .rpk-table td.rpk-lit {
     max-width: 160px;
-    overflow: hidden;
-    text-overflow: ellipsis;
     font-family: monospace;
 }
 
 .regex-perf-kit .rpk-table tr.rpk-script {
     cursor: pointer;
-}
-
-.regex-perf-kit .rpk-act span {
-    padding: 0 3px;
-    opacity: 0.7;
-}
-
-.regex-perf-kit .rpk-act span:hover {
-    opacity: 1;
-}
-
-.regex-perf-kit .rpk-limits {
-    margin: 4px 0;
-    font-size: 0.9em;
-}
-
-.regex-perf-kit .rpk-limits label {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-}
-
-.regex-perf-kit .rpk-limits input {
-    width: 7em;
-    margin: 2px 0;
-}
-
-.regex-perf-kit .rpk-table thead th {
-    position: sticky;
-    top: 0;
-    background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.6));
 }
 
 .regex-perf-kit .rpk-hot td {
@@ -119,6 +109,15 @@
     padding: 0 4px;
     border-radius: 4px;
     background: rgba(240, 160, 64, 0.25);
+}
+
+.regex-perf-kit .rpk-act span {
+    padding: 0 3px;
+    opacity: 0.7;
+}
+
+.regex-perf-kit .rpk-act span:hover {
+    opacity: 1;
 }
 
 .regex-perf-kit .rpk-warn {

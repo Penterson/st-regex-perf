@@ -68,7 +68,7 @@ function renderAll(h, rec, tag) {
  * Labels containing "live" are renders while a stream is running.
  */
 export async function equivalence(h, { profile }) {
-    const { corpus } = await importCorpus();
+    const corpus = await import('./corpus.js');
     const rpk = applyProfile(h, profile);
     h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: corpus.CHAT() });
     // ⑧ stores display output, so a {{random}} display script keeps its first roll there (documented in the README).
@@ -117,18 +117,18 @@ export async function equivalence(h, { profile }) {
     return { records: out, nativeReplaces: counted.stop() };
 }
 
-/** Counts RegExp.prototype[Symbol.replace] calls (regex executions) until stop(). */
-export function countNativeReplaces() {
+/** Counts regex executions (RegExp.prototype[Symbol.replace] calls) per pattern source; stop() returns the total. */
+function countNativeReplaces() {
     const orig = RegExp.prototype[Symbol.replace];
-    let n = 0;
+    const bySource = {};
+    let total = 0;
     RegExp.prototype[Symbol.replace] = function (...args) {
-        n++;
+        total++;
+        bySource[this.source] = (bySource[this.source] ?? 0) + 1;
         return orig.apply(this, args);
     };
-    return { stop: () => { RegExp.prototype[Symbol.replace] = orig; return n; } };
+    return { bySource, stop: () => { RegExp.prototype[Symbol.replace] = orig; return total; } };
 }
-
-const importCorpus = async () => ({ corpus: await import('./corpus.js') });
 
 export async function smoke(h) {
     h.extension_settings.regex = [script({ findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '[b]$1[/b]' })];
@@ -139,18 +139,13 @@ export async function smoke(h) {
 
 /** Runs fn while counting regex executions per pattern source. */
 function executionsBySource(fn) {
-    const orig = RegExp.prototype[Symbol.replace];
-    const counts = {};
-    RegExp.prototype[Symbol.replace] = function (...args) {
-        counts[this.source] = (counts[this.source] ?? 0) + 1;
-        return orig.apply(this, args);
-    };
+    const counter = countNativeReplaces();
     try {
         fn();
     } finally {
-        RegExp.prototype[Symbol.replace] = orig;
+        counter.stop();
     }
-    return counts;
+    return counter.bySource;
 }
 
 /** The extension's text report (the /regexperf text command), or '' without the extension. */
@@ -587,7 +582,7 @@ export async function ux(h) {
 
 /** tests/bench.mjs: cold and warm display renders of a long chat, and the save path on it. */
 export async function bench(h) {
-    const { corpus } = await importCorpus();
+    const corpus = await import('./corpus.js');
     h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: Array.from({ length: 40 }, () => corpus.CHAT()).flat() });
     await useScripts(h, corpus.SCRIPTS());
     const pass = () => {
@@ -607,7 +602,7 @@ export async function bench(h) {
 
 /** tests/bench.mjs: many save-path calls on unique inputs, with the given extension settings. */
 export async function benchSave(h, settings) {
-    const { corpus } = await importCorpus();
+    const corpus = await import('./corpus.js');
     applyProfile(h, settings);
     h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: corpus.CHAT() });
     await useScripts(h, corpus.SCRIPTS());
