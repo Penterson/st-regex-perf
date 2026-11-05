@@ -36,6 +36,7 @@ const PROFILES = {
     allOn: { profiler: true, prefilter: true, memo: true, streamingSkip: true, persist: true },
     allOff: { profiler: false, prefilter: false, memo: false, streamingSkip: false, persist: false },
     tinyMemo: { memoMaxEntries: 5, memoMaxLen: 60, persist: true },
+    compromise: { streamingThrottle: true, streamingThrottleMs: 0, persist: true },
 };
 
 /** Applies a profile to whichever extension variant is loaded (no-op for "none"). */
@@ -88,6 +89,11 @@ export async function equivalence(h, { profile }) {
     h.engine.RegexProvider.instance.clear();
     await h.eventSource.emit(h.event_types.CHAT_CHANGED);
     renderAll(h, rec, 'after clear');
+    // ⑨ re-renders the whole chat with the features off and on: nothing it leaves behind may change the output
+    document.querySelector('#rpk_measure')?.click();
+    await new Promise(r => setTimeout(r, 60));
+    h.st.reseed(); // its renders also rolled {{random}}, as any re-render does
+    renderAll(h, rec, 'after measure');
 
     // A swipe streams into the last message, as StreamingProcessor does: GENERATION_STARTED, live renders, the
     // final render once isFinished is set, then GENERATION_ENDED.
@@ -537,4 +543,44 @@ export async function streamThrottle(h, { throttle }) {
         performance.now = realNow;
     }
     return out;
+}
+
+/** What a user of main sees and does: settings, controls, toggles, /regexperf, clearing ⑧. */
+export async function ux(h) {
+    const root = document.getElementById('regex_perf_kit');
+    const rpk = h.extension_settings.regex_perf_kit;
+    const initial = { ...rpk };
+    const ids = [...root.querySelectorAll('[id]')].map(e => e.id);
+    const checked = Object.fromEntries(['rpk_profiler', 'rpk_prefilter', 'rpk_memo', 'rpk_streaming', 'rpk_persist']
+        .map(id => [id, { checked: root.querySelector('#' + id).checked, disabled: root.querySelector('#' + id).disabled }]));
+    // toggling memo off clears it: the next run executes again
+    await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y' })]);
+    h.engine.getRegexedString('x', P.AI);
+    const memoBox = root.querySelector('#rpk_memo');
+    const saves = h.st.counters.saveSettings;
+    memoBox.checked = false;
+    memoBox.dispatchEvent(new Event('change'));
+    memoBox.checked = true;
+    memoBox.dispatchEvent(new Event('change'));
+    const rerun = executionsBySource(() => h.engine.getRegexedString('x', P.AI)).x ?? 0;
+    const toggled = { memo: rpk.memo, saved: h.st.counters.saveSettings - saves, rerun };
+    // /regexperf: reset returns a message, text returns the report, no argument opens it in a popup
+    const cmd = h.commands.regexperf;
+    const slash = {
+        name: cmd.name,
+        args: cmd.unnamedArgumentList.map(a => a.description),
+        reset: await cmd.callback({}, 'reset'),
+        textStarts: String(await cmd.callback({}, 'text')).split('\n')[0].replace(/\(.*\)/, ''),
+        popup: (await cmd.callback({}, ''), h.popups.map(p => /^<pre class="rpk-report">/.test(p.content))),
+    };
+    // ⑧: entries stored in the chat, then cleared by the button (which saves the chat)
+    rpk.persist = true;
+    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: 'x', extra: {} }] });
+    h.st.messageFormatting('x', 'Char', false, false, 0);
+    const stored = Object.keys(h.st.chat[0].extra.regex_perf_cache ?? {}).sort();
+    const chatSaves = h.st.counters.saveChat;
+    root.querySelector('#rpk_clear_persist').click();
+    await new Promise(r => setTimeout(r, 0));
+    const cleared = { left: 'regex_perf_cache' in h.st.chat[0].extra, saved: h.st.counters.saveChat - chatSaves, toast: h.toasts.at(-1)?.[1] };
+    return { initial, ids, checked, toggled, slash, stored, cleared, note: root.querySelector('#rpk_persist_note').textContent };
 }

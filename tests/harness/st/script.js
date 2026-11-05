@@ -33,6 +33,8 @@ export async function saveChatConditional() { counters.saveChat++; }
 /** {{getvar::name}} values. */
 export const vars = {};
 let rolls = 0;
+/** Restarts the {{random}} sequence. */
+export function reseed() { rolls = 0; }
 const LEGACY = { user: 'user', bot: 'char', char: 'char', group: 'char', charifnotgroup: 'char' };
 
 /**

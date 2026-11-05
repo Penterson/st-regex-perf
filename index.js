@@ -315,7 +315,7 @@ function buildInfo() {
             // No macros, and no group reference that could complete one (<$1>, {$1}): the output then depends
             // only on the input, so it can be memoized.
             pure: !MACRO.test(replacement) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(replacement)
-                && !trims.some(t => MACRO.test(String(t))),
+                && !trims.some(trim => MACRO.test(String(trim))),
             replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
             needle,
             heavy,
@@ -541,8 +541,7 @@ function streamPass(mes, c) {
     // the last line is still being written, along with any ``` / ~~~ fence SillyTavern appends to balance it
     const cut = mes.replace(/(?:\n(?:```|~~~))+$/, '').lastIndexOf('\n') + 1;
     if (view?.out != null && mes.startsWith(view.prefix) && (cut <= view.prefix.length || now - view.at < settings.streamingThrottleMs)) {
-        bypass = true;
-        streamTail = mes.slice(view.prefix.length);
+        streamTail = mes.slice(view.prefix.length); // the streaming skip leaves the reused part alone
         return view.out;
     }
     streamView = { at: now, prefix: mes.slice(0, cut), out: null };
@@ -597,7 +596,7 @@ function installPersistHooks() {
             if (streamView) streamView.out = mes;
             const tail = streamTail;
             streamView = streamTail = null;
-            bypass = streamApply = false;
+            streamApply = false;
             return mes + tail;
         }
         if (bypass) {
@@ -885,7 +884,7 @@ const settingsHtml = () => `
         <label class="checkbox_label" title="${t`With ⑥ on: instead of skipping them, display scripts format the completed lines of the streamed message at most every N ms (set under Limits); the line being written stays raw. The final render applies every script.`}">
           <input type="checkbox" id="rpk_stream_throttle"><span>${t`⑥ Compromise: format while streaming`}</span>
         </label>
-        <label class="checkbox_label" title="${t`Stores the display result in the message (extra) so reopening the chat skips recomputing it. Chat files may grow.`}">
+        <label class="checkbox_label" id="rpk_persist_label" title="${t`Stores the display result in the message (extra) so reopening the chat skips recomputing it. Chat files may grow.`}">
           <input type="checkbox" id="rpk_persist"><span>${t`⑧ Persistent display cache (optional)`}</span>
         </label>
       </div>

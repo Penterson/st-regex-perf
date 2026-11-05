@@ -1,6 +1,6 @@
 // Boots a SillyTavern-like page: real i18n, events, regex engine and message formatter, a getContext() built from
 // the stand-ins, then the extension variant named in ?variant= (none | baseline | st-regex-perf).
-// Options: ?locale=ko-kr (UI language), ?hooks=0 (no MessageFormatter, like older SillyTavern).
+// Options: ?locale=ko-kr (UI language), ?hooks=0 (no MessageFormatter, like older SillyTavern), ?settings=<json>.
 const params = new URLSearchParams(location.search);
 const variant = params.get('variant') ?? 'none';
 localStorage.setItem('language', params.get('locale') ?? 'en');
@@ -55,6 +55,8 @@ globalThis.SillyTavern = {
     },
 };
 
+// ?settings=<json>: what the user had saved before the extension loads
+if (params.get('settings')) extension_settings.regex_perf_kit = JSON.parse(params.get('settings'));
 if (variant !== 'none') await import(`/scripts/extensions/third-party/${variant}/index.js`);
 await eventSource.emit(event_types.APP_READY);
 

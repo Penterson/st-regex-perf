@@ -22,14 +22,15 @@ export function sameRecords(a, b, what, skip = () => false) {
     return compared;
 }
 
-for (const profile of ['default', 'allOn', 'allOff', 'tinyMemo']) {
+for (const profile of ['default', 'allOn', 'allOff', 'tinyMemo', 'compromise']) {
     test(`equivalence (${profile}): main and this branch give SillyTavern's own output`, async ({ each }) => {
         const r = await each('equivalence', { profile });
         const live = (label) => label.startsWith('live display');
-        // With streaming skip on, display scripts are skipped while live by design: compare those renders with main only.
+        // With streaming skip on, display scripts are skipped while live by design: compare those renders with main
+        // only (compromise mode, new on this branch, formats them partially: compare it with neither).
         const vsNone = profile === 'allOff' ? () => false : live;
         const n = sameRecords(r.none.records, r.current.records, 'none vs current', vsNone);
-        sameRecords(r.baseline.records, r.current.records, 'baseline vs current');
+        sameRecords(r.baseline.records, r.current.records, 'baseline vs current', profile === 'compromise' ? live : () => false);
         assert.ok(n > 1500, `compared ${n} records`);
         // The workload must exercise the extension: fewer regex executions than plain SillyTavern...
         if (profile !== 'allOff') assert.ok(r.current.nativeReplaces < r.none.nativeReplaces * 0.8, `executions ${r.current.nativeReplaces} vs ${r.none.nativeReplaces}`);
@@ -272,4 +273,45 @@ test('item 16: streaming compromise mode formats completed lines at most every N
     assert.deepEqual(off.none.filter(x => typeof x === 'number'), [1, 1, 1, 1], 'plain SillyTavern formats every chunk');
     assert.deepEqual(off.current, off.baseline, 'off by default: same as main (display scripts skipped while live)');
     assert.equal(off.current.at(-1), final);
+});
+
+test('unchanged vs main: settings, controls, toggles, /regexperf and ⑧ clearing behave as before', async ({ each }) => {
+    for (const locale of ['ko-kr', 'en']) {
+        const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs'];
+        assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
+        for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
+        assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
+        for (const id of r.baseline.ids) assert.ok(r.current.ids.includes(id), `#${id}`);
+        assert.deepEqual(r.current.checked, r.baseline.checked);
+        assert.deepEqual(r.current.toggled, r.baseline.toggled);
+        assert.deepEqual(r.current.stored, r.baseline.stored);
+        if (locale === 'ko-kr') { // main's UI is Korean in every locale
+            assert.deepEqual(r.current.cleared, r.baseline.cleared);
+            assert.deepEqual(r.current.slash, r.baseline.slash);
+        } else {
+            assert.deepEqual({ ...r.current.cleared, toast: 0 }, { ...r.baseline.cleared, toast: 0 });
+            assert.equal(r.current.cleared.toast, 'Removed 1 persistent cache entries.');
+            assert.deepEqual({ ...r.current.slash, reset: 0 }, { ...r.baseline.slash, reset: 0 });
+            assert.equal(r.current.slash.reset, 'Stats reset');
+        }
+    }
+});
+
+test('unchanged vs main: saved user settings are kept as they are', async ({ each }) => {
+    const saved = { profiler: false, prefilter: false, memo: false, memoMaxEntries: 10, memoMaxLen: 99, streamingSkip: false, persist: true, persistMaxLen: 7 };
+    const r = await each('ux', null, { settings: saved, variants: ['baseline', 'current'] });
+    for (const [k, v] of Object.entries(saved)) {
+        assert.equal(r.baseline.initial[k], v);
+        assert.equal(r.current.initial[k], v, k);
+    }
+    assert.deepEqual(r.current.checked, r.baseline.checked);
+});
+
+test('unchanged vs main: without MessageFormatter hooks ⑧ is disabled with a note', async ({ each }) => {
+    const r = await each('ux', null, { hooks: false, variants: ['baseline', 'current'] });
+    assert.deepEqual(r.current.checked, r.baseline.checked);
+    assert.equal(r.current.checked.rpk_persist.disabled, true);
+    assert.match(r.current.note, /MessageFormatter/);
+    assert.deepEqual(r.current.stored, r.baseline.stored, 'nothing is stored without hooks');
 });
