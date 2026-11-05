@@ -153,10 +153,10 @@ const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Message
 const KO_PANEL = [
     '① 프로파일러', '② 리터럴 프리필터', '③ 결과 캐시',
     '④ 스트리밍 중 표시용 스크립트 건너뛰기', '절충안: 완성된 줄은 계속 꾸미기', '⑤ 영구 캐시 (채팅 파일에 저장)',
-    '</status> 같은 것인데', // the example tag in ②'s description survives HTML insertion
+    '</status>', // the example tag in ②'s description survives HTML insertion
     '한도', '이 채팅으로 측정', '리포트 복사', '측정 초기화', '새로고침', '저장된 결과 삭제 (이 채팅)',
     '번 실행했고', '번은 실행하지 않았습니다', '부터 측정', '표 읽는 법', '설정만으로 할 수 있는 것',
-    '스크립트', '총 ms', '평균', '최대', '치환', '변경', '스킵', '히트', '고정 문구',
+    '스크립트', '총 ms', '평균', '최대', '치환', '변경', '스킵', '히트', '리터럴',
 ];
 
 test('item 17: Korean locale shows the plain-language panel in Korean; nothing is left untranslated', async ({ each }) => {
