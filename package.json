@@ -1,0 +1,22 @@
+{
+    "name": "st-regex-perf",
+    "private": true,
+    "type": "module",
+    "description": "Development tooling for the Regex Perf Kit SillyTavern extension (not needed to use the extension).",
+    "scripts": {
+        "lint": "eslint .",
+        "fetch-st": "node tests/fetch-st.mjs",
+        "test:fuzz": "node tests/needle-fuzz.mjs",
+        "test:browser": "node tests/run.mjs",
+        "test": "npm run lint && npm run test:fuzz && npm run test:browser"
+    },
+    "devDependencies": {
+        "eslint": "^8.57.1",
+        "eslint-plugin-jsdoc": "^48.10.0",
+        "jquery": "^3.7.1",
+        "puppeteer-core": "^24.0.0"
+    },
+    "engines": {
+        "node": ">=20"
+    }
+}
