@@ -616,6 +616,44 @@ export async function rowActions(h) {
     };
 }
 
+/** Sortable table and name filter: per session, not saved. */
+export async function sortFilter(h) {
+    await useScripts(h, [
+        script({ scriptName: 'Beta', findRegex: '/b/g', replaceString: 'B' }),
+        script({ scriptName: 'Alpha', findRegex: '/a/g', replaceString: 'A' }),
+        script({ scriptName: 'Gamma', findRegex: '/g/g', replaceString: 'G' }),
+    ]);
+    for (let i = 0; i < 3; i++) h.engine.getRegexedString(`ab ${i}`, P.AI); // Beta and Alpha run 3 times, Gamma 0 (skipped)
+    h.engine.getRegexedString('aaaa 9', P.AI); // Alpha runs once more: 4
+    const root = document.getElementById('regex_perf_kit');
+    root.querySelector('#rpk_refresh').click();
+    const names = () => [...root.querySelectorAll('#rpk_table tbody tr[data-i]')].map(tr => tr.querySelector('.rpk-col-name').firstChild.textContent.trim());
+    const ranks = () => [...root.querySelectorAll('#rpk_table tbody tr[data-i]')].map(tr => tr.querySelector('.rpk-col-rank').textContent);
+    const header = (col) => root.querySelector(`#rpk_table thead th[data-col="${col}"]`);
+    const out = { initial: names(), initialRanks: ranks() };
+    header('runs').click();
+    out.byRuns = names();
+    out.runsHeader = header('runs').textContent;
+    header('runs').click();
+    out.byRunsAsc = names();
+    out.runsHeaderAsc = header('runs').textContent;
+    out.ranksAsc = ranks();
+    header('name').click();
+    out.byName = names();
+    header('act').click(); // not sortable: nothing changes
+    out.afterAct = names();
+    const filter = root.querySelector('#rpk_filter');
+    filter.value = 'A';
+    filter.dispatchEvent(new Event('input'));
+    out.filtered = names();
+    filter.value = 'zzz';
+    filter.dispatchEvent(new Event('input'));
+    out.noneLeft = root.querySelector('#rpk_table tbody .rpk-empty')?.textContent ?? '';
+    out.saved = Object.keys(h.extension_settings.regex_perf_kit).filter(k => /sort|nameFilter/i.test(k));
+    out.settingsSaves = h.st.counters.saveSettings;
+    return out;
+}
+
 /** Item 15. Hidden limits are editable in the panel; memo memory and this chat's ⑤ size are shown. */
 export async function limits(h) {
     const root = document.getElementById('regex_perf_kit');

@@ -184,6 +184,28 @@
 
 /* ---- table ---- */
 
+.regex-perf-kit .rpk-table-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.regex-perf-kit .rpk-table-head .text_pole {
+    width: 14em;
+    flex: 0 1 auto;
+    margin: 0;
+    font-size: 0.85em;
+}
+
+.regex-perf-kit .rpk-table th.rpk-sortable {
+    cursor: pointer;
+}
+
+.regex-perf-kit .rpk-table th.rpk-sorted {
+    opacity: 1;
+}
+
 .regex-perf-kit .rpk-table-wrap {
     max-height: 320px;
     overflow: auto;

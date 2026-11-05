@@ -390,6 +390,23 @@ test('item 14: a table row opens its script in the regex editor; its off button 
     assert.equal(r.current.unknownHasActions, false, 'patterns that are not scripts get no actions');
 });
 
+test('sortable table: a header click sorts by that column, again flips it; the filter box narrows by name; nothing is saved', async ({ each }) => {
+    const r = (await each('sortFilter', null, { variants: ['current'] })).current;
+    assert.deepEqual([...r.initial].sort(), ['Alpha', 'Beta', 'Gamma'], 'default: by total time (sub-millisecond runs may tie)');
+    assert.deepEqual(r.initialRanks, ['1', '2', '3']);
+    assert.deepEqual(r.byRuns, ['Alpha', 'Beta', 'Gamma'], 'runs 4, 3, 0');
+    assert.match(r.runsHeader, /Runs ▾$/);
+    assert.deepEqual(r.byRunsAsc, ['Gamma', 'Beta', 'Alpha']);
+    assert.match(r.runsHeaderAsc, /Runs ▴$/);
+    assert.equal(r.ranksAsc[0], String(r.initial.indexOf('Gamma') + 1), 'the # column keeps the rank by total time');
+    assert.deepEqual(r.byName, ['Alpha', 'Beta', 'Gamma'], 'text sorts A to Z first');
+    assert.deepEqual(r.afterAct, r.byName, 'the actions column is not sortable');
+    assert.deepEqual(r.filtered, ['Alpha', 'Beta', 'Gamma'].filter(n => /a/i.test(n)), 'filter "A" is case-insensitive');
+    assert.equal(r.noneLeft, 'No script name contains "zzz".');
+    assert.deepEqual(r.saved, [], 'sorting and filtering are not settings');
+    assert.equal(r.settingsSaves, 0);
+});
+
 test('item 15: memo and ⑤ limits are editable (validated) and memo / ⑤ usage is shown', async ({ each }) => {
     const r = await each('limits', null, { variants: ['baseline', 'current'] });
     assert.deepEqual(r.baseline.found, [false, false, false, false]);

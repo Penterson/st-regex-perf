@@ -135,5 +135,8 @@
     "⑤ Saved results per chat (MB)": "⑤ 채팅당 저장 용량 (MB)",
     "Beyond this, the oldest messages' results are dropped from the chat.": "초과 시 오래된 메시지의 결과부터 채팅에서 삭제.",
     "③ Key the cache by a hash of the input": "③ 캐시 키를 입력의 해시로",
-    "Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.": "입력 대신 64비트 해시만 보관. 긴 채팅에서 메모리 절반, 대신 입력마다 해시 계산. 충돌(길이와 해시가 같은 두 입력)이 나면 다른 입력의 결과가 나올 수 있으나 64비트에서는 수십억 건이 필요."
+    "Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.": "입력 대신 64비트 해시만 보관. 긴 채팅에서 메모리 절반, 대신 입력마다 해시 계산. 충돌(길이와 해시가 같은 두 입력)이 나면 다른 입력의 결과가 나올 수 있으나 64비트에서는 수십억 건이 필요.",
+    "Filter by name": "이름으로 필터",
+    "Shows only the scripts whose name contains this. Click a column header to sort by it, again to flip the direction.": "이름에 이 글자가 든 스크립트만 표시. 열 머리글 클릭: 그 열로 정렬, 다시 클릭: 방향 반전.",
+    "No script name contains \"${0}\".": "이름에 \"${0}\" 이 든 스크립트가 없습니다."
 }
