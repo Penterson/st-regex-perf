@@ -296,6 +296,22 @@ test('per-row stopwatch: re-renders the chat without that script and shows the m
     assert.ok(r.current.chatUnchanged);
 });
 
+test('order conflicts: an earlier script removing what a later one would have matched is flagged; unrelated pairs are not', async ({ each }) => {
+    const r = await each('orderConflict');
+    assert.deepEqual(r.none.out, ['a y b 0 ', 'a y b 1 ', 'a y b 2 ', 'plain R text', 'no y:  here']);
+    assert.deepEqual(r.baseline.out, r.none.out);
+    assert.deepEqual(r.current.out, r.none.out);
+    assert.doesNotMatch(r.baseline.report, /Order conflict/);
+    const text = '"Strip tag" runs first and removes what "Tagged" would have matched: 3 times';
+    assert.equal(r.current.taggedBadge, text);
+    assert.deepEqual(r.current.otherBadges, [null, null, null]);
+    assert.match(r.current.summary, /Order conflict: Strip tag runs first and removes what Tagged looks for \(3 times\)\. Swap them or merge them\./);
+    assert.match(r.current.report, new RegExp(`^Order conflicts \\(an earlier script removed what a later one looks for\\)\n${text.replace(/[()"]/g, '\\$&')}, e\\.g\\. "a <x>y b 0 "$`, 'm'));
+    assert.match(row(reportRows(r.current.report), 'Tagged').Warnings, /order conflict/);
+    const long = (await each('orderConflict', { long: true }, { variants: ['current'] })).current;
+    assert.match(long.taggedBadge, /removes the literal "Tagged" looks for: 3 times \(match not verified on long inputs\)$/, 'inputs over 4000 characters are not re-run');
+});
+
 test('per-message time: "Measure on this chat" lists the 5 slowest messages under the result and in the report', async ({ each }) => {
     const r = (await each('measure', null, { variants: ['current'] })).current;
     const entry = /#(\d+) \((\d+) chars\) ([\d.]+) ms/g;

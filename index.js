@@ -516,6 +516,12 @@ let statsSince = Date.now();
 const persistStats = { hits: 0, stores: 0 };
 let bypass = false; // set by the formatter hooks while a stored result is being shown
 let skipStat = null; // the pattern a per-row measurement renders the chat without
+// The previous call: scripts run in sequence on one message, so when a call's input is the previous call's output
+// they are neighbours in that pass. Used to spot an earlier script removing what a later one looks for.
+let prevStat = null;
+let prevIn = null;
+let prevOut = null;
+const conflicts = new Map(); // "earlierKey\0laterKey" -> {earlier, later, count, confirmed, sample}
 let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
 let displayPass = false; // set by the formatter hooks while a message is being formatted for display
 
@@ -579,11 +585,16 @@ class PerfRegExp extends RegExp {
         }
         if (settings.streamingSkip && markdownOnly && !streamApply && liveStream()) {
             stat.streamSkipped++;
+            prevStat = stat;
+            prevIn = prevOut = str;
             return str;
         }
         // a displayed message comes back on every re-render: its literal answers are kept (save-time inputs do not)
         if (settings.prefilter && test && !test(str, markdownOnly || displayPass)) {
             stat.skipped++;
+            if (prevOut === str && prevIn !== str && prevStat !== stat) noteConflict(prevStat, stat, prevIn, test, this._native);
+            prevStat = stat;
+            prevIn = prevOut = str;
             return str;
         }
 
@@ -597,6 +608,9 @@ class PerfRegExp extends RegExp {
                 memoLru.delete(hit); // mark as most recently used
                 memoLru.add(hit);
                 stat.hits++;
+                prevStat = stat;
+                prevIn = str;
+                prevOut = hit.out;
                 return hit.out;
             }
         }
@@ -630,6 +644,9 @@ class PerfRegExp extends RegExp {
             if (matched || (fn === replacer && (out !== str || str.length > 2000 || native.test(str)))) stat.matched++;
         }
         this.lastIndex = native.lastIndex; // leave this regex as a native replace would
+        prevStat = stat;
+        prevIn = str;
+        prevOut = out;
 
         const size = (str.length + out.length) * 2;
         if (bucket && size <= settings.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
@@ -641,6 +658,28 @@ class PerfRegExp extends RegExp {
         }
         return out;
     }
+}
+
+const CONFLICT_TEST_MAX = 4000; // the later pattern is really run on inputs up to this long to confirm a match
+
+/**
+ * The later script was skipped on the earlier one's output although its needle was in the earlier one's input: the
+ * earlier script removed it. Confirmed by running the later pattern on that input when it is short.
+ */
+function noteConflict(earlier, later, input, test, native) {
+    if (!test(input)) return;
+    let confirmed = null;
+    if (input.length <= CONFLICT_TEST_MAX) {
+        native.lastIndex = 0;
+        confirmed = native.test(input);
+        native.lastIndex = 0;
+        if (!confirmed) return;
+    }
+    const key = earlier.src + '\0' + later.src;
+    let c = conflicts.get(key);
+    if (!c) conflicts.set(key, c = { earlier, later, count: 0, confirmed: false, sample: input.slice(0, SPIKE_HEAD) });
+    c.count++;
+    if (confirmed) c.confirmed = true;
 }
 
 // ---- Patch RegexProvider.instance ----
@@ -825,6 +864,11 @@ const fmtNeedles = (r) => {
 const avoided = (r) => r.skipped + r.hits + r.streamSkipped;
 const savedMs = (r) => avoided(r) * avgMs(r);
 const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.matched;
+/** Conflicts in which r is the later script (the one whose match an earlier script removed). */
+const conflictsOf = (r) => [...conflicts.values()].filter(c => c.later === r);
+const conflictText = (c) => (c.confirmed
+    ? t`"${c.earlier.name}" runs first and removes what "${c.later.name}" would have matched: ${c.count} times`
+    : t`"${c.earlier.name}" runs first and removes the literal "${c.later.name}" looks for: ${c.count} times (match not verified on long inputs)`);
 /** The sample kept from a run over SPIKE_MS: how long the input was and how it started. */
 const spikeText = (sp) => t`Last spike: ${fmtMs(sp.ms)} ms on ${sp.len} characters, starting ${JSON.stringify(sp.head)}`;
 /** A pattern the extension has seen do anything: rows that never ran nor were skipped are left out of the table. */
@@ -835,6 +879,7 @@ const warnings = (r, badges = false) => [
     r.heavy && (badges ? badge('.*', t`Contains .* or similar: may be slow on long text (backtracking)`) : t`.*-style`),
     r.needle?.nested && (badges ? badge('(a+)+', t`Nested quantifier such as (a+)+: can become extremely slow on long text`) : t`nested quantifier`),
     r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)` + (r.spike ? '\n' + spikeText(r.spike) : '')) : t`spike`),
+    conflictsOf(r).length > 0 && (badges ? badge('⇅', conflictsOf(r).map(c => conflictText(c)).join('\n')) : t`order conflict`),
     ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without ever matching: consider turning it off`) : t`no match`),
 ].filter(Boolean);
 
@@ -912,6 +957,10 @@ function buildReportText() {
     s.rows.forEach((r, i) => {
         lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${fmtMs(r.replMs)} | ${r.matched} | ${r.changed} | ${r.skipped} | ${r.hits} | ${r.streamSkipped} | ${fmtNeedles(r) ?? '- (' + needleReason(r) + ')'} | ${r.needle?.minLen || '-'} | ${warnings(r).join(', ')}`);
     });
+    if (conflicts.size) {
+        lines.push('', t`Order conflicts (an earlier script removed what a later one looks for)`);
+        for (const c of conflicts.values()) lines.push(`${conflictText(c)}, e.g. ${JSON.stringify(c.sample)}`);
+    }
     const spikes = s.rows.filter(r => r.spike);
     if (spikes.length) {
         lines.push('', t`Spikes (newest run over ${SPIKE_MS} ms per script)`);
@@ -948,6 +997,7 @@ function measureChat(without = null) {
     const user = Object.fromEntries(Object.keys(FEATURES_OFF).map(k => [k, settings[k]]));
     const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => st[c])]));
     const savedPersist = { ...persistStats };
+    const savedConflicts = new Map([...conflicts].map(([k, c]) => [k, { ...c }]));
     const times = [];
     let first, second;
     try {
@@ -961,6 +1011,8 @@ function measureChat(without = null) {
         Object.assign(settings, user);
         for (const [k, st] of stats) COUNTERS.forEach((c, i) => { st[c] = saved.get(k)?.[i] ?? 0; });
         Object.assign(persistStats, savedPersist);
+        conflicts.clear();
+        for (const [k, c] of savedConflicts) conflicts.set(k, c);
     }
     if (without) return { with: first, without: second };
     return { messages: chat.length, off: first, on: second, slowest: times.sort((a, b) => b.ms - a.ms).slice(0, SLOWEST_MESSAGES) };
@@ -969,6 +1021,7 @@ function measureChat(without = null) {
 function resetStats() {
     stats.clear();
     rowMeasures.clear();
+    conflicts.clear();
     statsSince = Date.now();
     persistStats.hits = persistStats.stores = 0;
     wrapped.clear(); // wrappers hold their stat object; new ones link to fresh stats
@@ -1064,7 +1117,7 @@ const settingsHtml = () => `
           <li>${t`Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.`}</li>
           <li>${t`<b>Runs</b> are real regex executions; <b>Skips</b> and <b>Hits</b> are runs avoided by ② and ③. A script with 0 runs and many skips never had to run at all.`}</li>
           <li>${t`<b>Replacer</b> is the part of Total ms spent in the replacement; if it is large, the replacement (macros) is slow, not the pattern.`}</li>
-          <li>${t`Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${SPIKE_MS} ms, <code>∅</code> ran ${INEFFECTIVE_RUNS}+ times without ever matching.`}</li>
+          <li>${t`Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${SPIKE_MS} ms, <code>∅</code> ran ${INEFFECTIVE_RUNS}+ times without ever matching, <code>⇅</code> an earlier script removes what this one looks for (order conflict).`}</li>
           <li>${t`Click a row to open the script in the Regex extension; the stopwatch re-renders this chat without the script and shows the time it costs, the power icon turns it off.`}</li>
         </ul>
       </details>
@@ -1124,6 +1177,9 @@ function renderPanel() {
     }
     if (s.top && s.calls > 0) {
         lines.push(t`Slowest: <b>${esc(s.top.name)}</b>, ${s.topShare.toFixed(0)}% of the time.` + (s.topShare >= 50 ? ' ' + t`Turning it off or fixing it helps the most.` : ''));
+    }
+    for (const c of conflicts.values()) {
+        lines.push(t`Order conflict: <b>${esc(c.earlier.name)}</b> runs first and removes what <b>${esc(c.later.name)}</b> looks for (${c.count} times). Swap them or merge them.`);
     }
     if (s.ineffective.length) {
         lines.push(t`Never matched in ${INEFFECTIVE_RUNS}+ runs: <b>${esc(s.ineffective.join(', '))}</b>. Consider turning them off.`);
