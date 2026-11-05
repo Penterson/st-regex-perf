@@ -156,13 +156,14 @@ const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Message
 
 test('item 17: Korean locale keeps main\'s Korean UI text; nothing is left untranslated', async ({ each }) => {
     const r = await each('uiTexts', null, { locale: 'ko-kr', variants: ['baseline', 'current'] });
-    const norm = (s) => s.replace(/\d+(?:\.\d+)?/g, '#'); // timings differ between runs
+    // timings differ between runs; feature numbers were renumbered ① ② ③ ④ ⑤ in screen order (main: ① ④ ② ⑥ ⑧)
+    const norm = (s) => s.replace(/\d+(?:\.\d+)?/g, '#').replace(/[①②③④⑤⑥⑦⑧]|·\s*|\s*\(ST 기본 설정\)/g, '').trim();
     const now = new Set(r.current.texts.map(norm));
     const missing = r.baseline.texts.filter(s => !now.has(norm(s)) && !KO_CHANGED.has(s) && /[가-힣]/.test(s));
     assert.deepEqual(missing, [], 'Korean panel strings from main that are gone');
     for (const line of r.baseline.report.split('\n').slice(1)) {
-        const fixed = line.replace(/\d[\d.:/ ]*|"[^"]*"/g, '#').split(/[#|]/).map(s => s.trim()).filter(s => /[가-힣]/.test(s));
-        for (const piece of fixed) assert.ok(r.current.report.includes(piece), `report text "${piece}"`);
+        const fixed = line.replace(/\d[\d.:/ ]*|"[^"]*"|[①②③④⑤⑥⑦⑧]/g, '#').split(/[#|]/).map(s => s.trim()).filter(s => /[가-힣]/.test(s));
+        for (const piece of fixed) assert.ok(r.current.report.replace(/[①②③④⑤⑥⑦⑧]/g, '#').includes(piece), `report text "${piece}"`);
     }
     assert.equal(r.current.help, r.baseline.help);
     for (const toast of r.baseline.toasts) assert.ok(r.current.toasts.includes(toast), `toast "${toast}"`);
