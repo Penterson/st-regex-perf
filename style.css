@@ -273,6 +273,13 @@
     opacity: 1;
 }
 
+/* the time a script costs, from its stopwatch */
+.regex-perf-kit .rpk-act .rpk-row-ms {
+    opacity: 0.85;
+    cursor: help;
+    padding-right: 6px;
+}
+
 /* Narrow drawers (phones, a slim extensions column): keep the columns that answer "what is slow and what was
    skipped", and leave the averages, replacer time and literal to the text report. */
 @container (max-width: 560px) {

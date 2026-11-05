@@ -71,7 +71,6 @@
     "Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.": "오래 걸린 순서. 굵게 표시된 행은 혼자 전체 시간의 절반 이상.",
     "<b>Runs</b> are real regex executions; <b>Skips</b> and <b>Hits</b> are runs avoided by ② and ③. A script with 0 runs and many skips never had to run at all.": "<b>실행</b>은 정규식이 실제로 돌아간 횟수. <b>스킵</b>은 ②가, <b>히트</b>는 ③이 막은 횟수. 실행 0에 스킵만 있으면 이 채팅에서 한 번도 돌 필요가 없었던 스크립트.",
     "<b>Replacer</b> is the part of Total ms spent in the replacement; if it is large, the replacement (macros) is slow, not the pattern.": "<b>치환</b>은 총 시간 중 치환문 쪽(그룹 채우기, 매크로)에 쓴 시간. 총 시간에 가까우면 패턴보다 치환문 점검.",
-    "Click a row to open the script in the Regex extension; the power icon turns it off.": "행 클릭: 정규식 편집기에서 열기. 오른쪽 전원 아이콘: 끄기.",
     "Contains .* or similar: may be slow on long text (backtracking)": ".* 계열 패턴. 긴 글에서 느려질 수 있음 (백트래킹)",
     "Nested quantifier such as (a+)+: can become extremely slow on long text": "(a+)+ 같은 중첩 수량자. 긴 글에서 급격히 느려질 수 있음",
     "One run took ${0} ms (more than ${1} ms)": "한 번 실행에 ${0} ms 소요 (${1} ms 초과)",
@@ -124,5 +123,8 @@
     "Last spike: ${0} ms on ${1} characters, starting ${2}": "마지막 스파이크: ${1}글자 입력에 ${0} ms. 시작 부분 ${2}",
     "Spikes (newest run over ${0} ms per script)": "스파이크 (스크립트별 ${0} ms 초과 최근 실행)",
     "Slowest messages (features off): ${0}": "가장 느린 메시지 (기능 끈 상태): ${0}",
-    "#${0} (${1} chars) ${2} ms": "#${0} (${1}글자) ${2} ms"
+    "#${0} (${1} chars) ${2} ms": "#${0} (${1}글자) ${2} ms",
+    "Click a row to open the script in the Regex extension; the stopwatch re-renders this chat without the script and shows the time it costs, the power icon turns it off.": "행 클릭: 정규식 편집기에서 열기. 스톱워치: 이 스크립트만 빼고 채팅을 다시 그려 이 스크립트가 드는 시간 표시. 전원 아이콘: 끄기.",
+    "Measure this chat without this script": "이 스크립트만 빼고 이 채팅 측정",
+    "Without this script the chat renders in ${0} ms instead of ${1} ms (③ and ⑤ off)": "이 스크립트를 빼면 채팅 렌더링이 ${1} ms에서 ${0} ms로 (③·⑤ 끈 상태)"
 }

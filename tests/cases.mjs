@@ -280,6 +280,22 @@ test('item 9: "Measure on this chat" renders with the features off and on and sh
     assert.ok(r.current.chatUnchanged);
 });
 
+test('per-row stopwatch: re-renders the chat without that script and shows the ms it costs inline; stats restored', async ({ each }) => {
+    const r = await each('rowMeasure', null, { variants: ['baseline', 'current'] });
+    assert.equal(r.baseline, null, 'baseline has no stopwatch');
+    const m = /^−([\d.]+) ms$/.exec(r.current.text);
+    assert.ok(m, `inline difference: ${JSON.stringify(r.current.text)}`);
+    const t = /renders in ([\d.]+) ms instead of ([\d.]+) ms/.exec(r.current.title);
+    assert.ok(t, r.current.title);
+    const [without, with_] = t.slice(1).map(Number);
+    assert.ok(with_ > without * 2, `the slow script dominates: ${r.current.title}`);
+    assert.ok(Math.abs(Number(m[1]) - (with_ - without)) <= 0.1 + with_ * 0.01, 'shown difference = with - without');
+    assert.equal(r.current.boldHas, false, 'only the measured row shows a time');
+    assert.ok(r.current.toasts.includes('Measuring...'));
+    assert.ok(r.current.statsUnchanged, 'measuring does not count as activity');
+    assert.ok(r.current.chatUnchanged);
+});
+
 test('per-message time: "Measure on this chat" lists the 5 slowest messages under the result and in the report', async ({ each }) => {
     const r = (await each('measure', null, { variants: ['current'] })).current;
     const entry = /#(\d+) \((\d+) chars\) ([\d.]+) ms/g;
