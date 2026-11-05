@@ -38,7 +38,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
   - `⚡` a single run took over 50 ms
   - `∅` ran 20+ times without ever changing the text (a candidate to disable, also listed in the summary)
 - Click a row to open the script in SillyTavern's regex editor; the power button at the end of the row turns the script off (same as its switch in the Regex extension's list). Patterns that are not scripts have no buttons.
-- Scripts whose **Literal** column says "none" get no benefit from ② and always run (unless the minimum length alone rules a message out). `"a" & "b"` means both must be present, `"a" | "b"` any one of them; hover a cell for the shortest possible match. The table lists only patterns that ran or were skipped at least once; in a narrow panel (phones) the Avg, Replacer and Literal columns are hidden and remain in the text report.
+- Scripts whose **Literal** column says "none" get no benefit from ② and always run (unless the minimum length alone rules a message out). `"a" & "b"` means both must be present, `"a" | "b"` any one of them; hover a cell for the shortest possible match and, when there is no literal, the reason (only classes, every literal optional, a branch without one, ...). The table lists only patterns that ran or were skipped at least once; in a narrow panel (phones) the Avg, Replacer and Literal columns are hidden and remain in the text report.
 - **Limits** lets you change ③'s entry count, longest cached input and memory (MB), ⑤'s longest saved result and the compromise interval. The line above it shows ③'s usage and this chat's ⑤ storage.
 
 ## SillyTavern settings that help

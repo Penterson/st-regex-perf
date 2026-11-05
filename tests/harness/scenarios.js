@@ -390,13 +390,16 @@ export async function uiTexts(h) {
         }
     };
     walk(root);
+    const litTitles = Object.fromEntries([...root.querySelectorAll('#rpk_table tbody tr')].map(tr => [tr.querySelector('.rpk-col-name').firstChild.textContent.trim(), tr.querySelector('.rpk-lit').title]));
+    const reportText = await report(h); // with the table rows, before the stats reset below
     root.querySelector('#rpk_reset').click();
     return {
         texts: [...texts],
         all: root.innerText + '\n' + [...root.querySelectorAll('[title]')].map(e => e.title).join('\n'),
-        report: await report(h),
+        report: reportText,
         help: h.commands.regexperf.helpString,
         toasts: h.toasts.map(([, msg]) => msg),
+        litTitles,
     };
 }
 
