@@ -87,8 +87,8 @@ const BAIL = Symbol('bail');
 /**
  * Parses a pattern once. needles: literals of which every match contains at least one (null if none is certain),
  * decided by test(str). nested: an unbounded quantifier inside an unboundedly repeated group, e.g. (a+)+.
- * Conservative: classes, class escapes, backreferences, lookarounds, (?i:) modifier groups and the v flag
- * contribute no literal. Literals in groups that must match join the surrounding run; an alternation yields one
+ * Conservative: classes, class escapes, backreferences, lookarounds and modifier groups contribute no literal;
+ * patterns with the v flag or a case modifier ((?i:), (?-i:)) get no needle at all. Literals in groups that must match join the surrounding run; an alternation yields one
  * needle per branch (any of them must occur), provided every branch has one.
  * @param {string} source RegExp.source
  * @param {string} flags RegExp.flags
@@ -128,7 +128,11 @@ export function extractNeedle(source, flags) {
         if (c === '\\') {
             const nx = source[i + 1];
             i += 2;
-            if (nx === undefined || 'dDwWsSbB0123456789'.includes(nx)) return { lit: null }; // classes, boundaries, backreferences
+            if (nx === undefined || 'dDwWsSbB'.includes(nx)) return { lit: null }; // classes, boundaries
+            if (nx >= '0' && nx <= '9') { // backreference or (without u) a legacy octal escape: take every digit
+                while (source[i] >= '0' && source[i] <= '9') i++;
+                return { lit: null };
+            }
             if ('pPku'.includes(nx) && (source[i] === '{' || source[i] === '<')) { // \p{..} \u{..} \k<..>: skip the argument
                 const e = source.indexOf(source[i] === '<' ? '>' : '}', i + 1);
                 if (e !== -1) {
@@ -252,7 +256,9 @@ export function extractNeedle(source, flags) {
 
     let needles = null;
     try {
-        if (flags.includes('v')) throw BAIL;
+        // (?i:) / (?-i:) groups: V8 (13.x) has been seen to match literals outside such a group case-insensitively
+        // after many regexes ran in the same page, which the spec does not allow. Such patterns are left to the engine.
+        if (flags.includes('v') || /\(\?[a-z-]*i[a-z-]*:/.test(source)) throw BAIL;
         const top = alternation();
         if (i < n) throw BAIL;
         needles = top.best;

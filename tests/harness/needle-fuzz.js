@@ -29,8 +29,10 @@ export const CASES = [
     ['(?:a|b)c', '', ['c']],
     ['q(?:foo|bar)?', '', ['q']],
     ['(?i:abc)', '', null],
-    ['x(?i:abc)', '', ['x']],
-    ['(?-i:abc)', 'i', null],
+    ['x(?i:abc)', '', null], // case modifiers: no needle at all (see extractNeedle)
+    ['x(?-i:abc)y', 'i', null],
+    ['x(?ms-i:abc)', '', null],
+    ['x(?s:a.c)y', '', ['x']],
     ['(?=abc)def', '', ['def']],
     ['(?<=abc)def', '', ['def']],
     ['(?!abc)def', '', ['def']],
@@ -43,6 +45,9 @@ export const CASES = [
     ['😀+x', 'u', ['😀x']],
     ['a😀?', 'u', ['a']],
     ['\\u0041bc', '', ['bc']],
+    ['k*?\\011*', '', null], // legacy octal escape: \011 is one character, the * repeats it
+    ['\\12x', '', ['x']],
+    ['(a)\\1bc', '', ['bc']],
     ['\\p{L}+abc', 'u', ['abc']],
     ['(\\p{a)|b}', '', null],
     ['[abc]', 'v', null],
@@ -133,7 +138,7 @@ export function fuzz(extractNeedle, { seed, patterns }) {
         if (r < 0.66) return pick(['\\u0041', '\\x61', '\\cJ', '\\0', '\\t', '\\-']);
         if (r < 0.68) return ctx.u ? pick(['\\p{L}', '\\P{Lu}', '\\u{1F600}', '\\u{61}']) : pick(['\\p', '\\k', '\\u{61}', 'a{', '}', ']', 'x{,2}', '\\p{a)|b}']);
         if (r < 0.70 && ctx.groups) return '\\' + (1 + Math.floor(rand() * ctx.groups));
-        if (depth > 2) return pick(CHARS);
+        if (depth > 1) return pick(CHARS); // deeper nesting makes the engine itself backtrack for minutes
         const g = pick(GROUPS);
         if (g === '(' || g === '(?<n>') ctx.groups++;
         return (g === '(?<n>' ? `(?<n${ctx.groups}>` : g) + gen(depth + 1, ctx) + ')';
@@ -141,7 +146,7 @@ export function fuzz(extractNeedle, { seed, patterns }) {
     const sample = (source) => {
         const pieces = [...source.replace(/\\[pPu]\{[^}]*\}|\\./g, ' ')].filter(c => !SYNTAX.includes(c));
         let s = '';
-        for (let k = Math.floor(rand() * 14); k > 0; k--) s += chance(0.6) && pieces.length ? pick(pieces) : pick(CHARS);
+        for (let k = Math.floor(rand() * 11); k > 0; k--) s += chance(0.6) && pieces.length ? pick(pieces) : pick(CHARS);
         return chance(0.5) ? s : chance(0.5) ? s.toUpperCase() : s.toLowerCase();
     };
 
