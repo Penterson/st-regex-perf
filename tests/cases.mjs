@@ -14,7 +14,8 @@ function reportRows(text) {
     const lines = text.split('\n');
     const head = lines.indexOf('') + 1; // the table header follows the first blank line
     const cols = lines[head].split(' | ');
-    return lines.slice(head + 1).filter(Boolean).map(l => Object.fromEntries(l.split(' | ').map((v, i) => [cols[i], v])));
+    const end = lines.indexOf('', head); // the table ends at the next blank line (sections may follow)
+    return lines.slice(head + 1, end === -1 ? undefined : end).filter(Boolean).map(l => Object.fromEntries(l.split(' | ').map((v, i) => [cols[i], v])));
 }
 
 /** Asserts two record lists ([label, value][]) are identical, naming the first differing record. */
@@ -322,6 +323,20 @@ test('item 13: nested quantifiers and execution spikes are flagged', async ({ ea
     assert.match(row(rows, 'Slow macro').Warnings, /spike/);
     assert.ok(num(row(rows, 'Slow macro')['Max ms']) > 50);
     assert.doesNotMatch(row(rows, 'Changes').Warnings, /nested|spike/);
+});
+
+test('spike samples: the newest run over 50 ms keeps its input length and first 80 characters, in the ⚡ tooltip and the report', async ({ each }) => {
+    const r = (await each('insights', null, { variants: ['current'] })).current;
+    const head = '@'.repeat(30) + '2'; // the third (newest) slow input
+    const sample = new RegExp(`Last spike: [\\d.]+ ms on 31 characters, starting ${JSON.stringify(head)}`);
+    assert.match(r.badges['Slow macro']['⚡'], /^One run took [\d.]+ ms \(more than 50 ms\)\n/);
+    assert.match(r.badges['Slow macro']['⚡'], sample);
+    const section = r.text.slice(r.text.indexOf('\nSpikes (newest run over 50 ms per script)\n'));
+    assert.match(section, new RegExp(`^Slow macro: ${sample.source}$`, 'm'));
+    assert.doesNotMatch(section, /^Changes:/m, 'only scripts with a spike');
+    assert.equal(row(reportRows(r.text), 'Slow macro').Script, 'Slow macro', 'the table is still parsed up to the section');
+    const long = (await each('insights', { longHead: true }, { variants: ['current'] })).current;
+    assert.match(long.badges['Slow macro']['⚡'], /on 101 characters, starting "@{80}"$/, 'the sample is cut at 80 characters');
 });
 
 test('item 14: a table row opens its script in the regex editor; its off button disables the script', async ({ each }) => {

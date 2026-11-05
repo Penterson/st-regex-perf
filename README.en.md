@@ -35,7 +35,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
 - Badges next to a name:
   - `.*` a pattern that may backtrack a lot
   - `(a+)+` a nested quantifier (can backtrack catastrophically on long text)
-  - `⚡` a single run took over 50 ms
+  - `⚡` a single run took over 50 ms; hover the badge for the newest spike's input length and first 80 characters, also listed in the text report's "Spikes" section
   - `∅` ran 20+ times without ever matching (a candidate to disable, also listed in the summary); a script that matches but leaves the text as it is gets no mark
 - Click a row to open the script in SillyTavern's regex editor; the power button at the end of the row turns the script off (same as its switch in the Regex extension's list). Patterns that are not scripts have no buttons.
 - Scripts whose **Literal** column says "none" get no benefit from ② and always run (unless the minimum length alone rules a message out). `"a" & "b"` means both must be present, `"a" | "b"` any one of them; hover a cell for the shortest possible match and, when there is no literal, the reason (only classes, every literal optional, a branch without one, ...). The table lists only patterns that ran or were skipped at least once; in a narrow panel (phones) the Avg, Replacer and Literal columns are hidden and remain in the text report.

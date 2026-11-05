@@ -493,7 +493,8 @@ export async function measure(h) {
 }
 
 /** Items 10–13. Report columns and warnings: estimate, changed count, replacer time, nested quantifiers, spikes. */
-export async function insights(h) {
+export async function insights(h, arg) {
+    const longHead = !!arg?.longHead;
     await useScripts(h, [
         script({ scriptName: 'Changes', findRegex: '/\\bcat\\b/g', replaceString: 'dog' }),
         script({ scriptName: 'Never changes', findRegex: '/\\d{5}/g', replaceString: 'N' }), // never matches either
@@ -510,8 +511,14 @@ export async function insights(h) {
         h.engine.getRegexedString(mes, P.AI); // memo hits for the pure scripts
     }
     for (let i = 0; i < 3; i++) h.engine.getRegexedString(`user ${i}`, P.USER);
-    for (let i = 0; i < 3; i++) h.engine.getRegexedString('@'.repeat(30) + i, P.AI); // ~60 ms per call
-    return { text: await report(h) };
+    for (let i = 0; i < 3; i++) h.engine.getRegexedString('@'.repeat(longHead ? 100 : 30) + i, P.AI); // ~60 ms per call (200 ms with longHead)
+    const root = document.getElementById('regex_perf_kit');
+    root?.querySelector('#rpk_refresh').click();
+    const badges = Object.fromEntries([...root?.querySelectorAll('#rpk_table tbody tr[data-i]') ?? []].map(tr => [
+        tr.querySelector('.rpk-col-name').firstChild.textContent.trim(),
+        Object.fromEntries([...tr.querySelectorAll('.rpk-badge')].map(b => [b.textContent, b.title])),
+    ]));
+    return { text: await report(h), badges };
 }
 
 /** Item 14. Clicking a table row opens the script in SillyTavern's regex editor; the row's off button disables it. */
