@@ -148,5 +148,8 @@
     "Hint about \"# Messages to Load\" when opening a chat takes longer than (ms)": "채팅 열기가 이보다 오래 걸리면 \"# Messages to Load\" 안내 (ms)",
     "Shown once per session as a toast.": "세션당 한 번 토스트로 표시.",
     "Runs \"Measure on this chat\" once after a chat opens. The page freezes for a moment each time.": "채팅을 열면 \"이 채팅으로 측정\"을 한 번 실행. 그때마다 화면이 잠깐 멈춤.",
-    "Measure automatically when a chat opens": "채팅을 열 때 자동 측정"
+    "Measure automatically when a chat opens": "채팅을 열 때 자동 측정",
+    "Settings restored to their defaults.": "설정을 기본값으로 되돌렸습니다.",
+    "Turns every feature and limit back to its default.": "모든 기능과 한도를 기본값으로.",
+    "Reset settings": "설정 초기화"
 }
