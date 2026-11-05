@@ -35,3 +35,8 @@ jobs:
         run: npm run test:browser
         env:
           CHROME_PATH: /usr/bin/google-chrome
+      - name: Benchmark gate (warm display render vs tests/bench-baseline.json)
+        if: matrix.st == 'staging'
+        run: npm run bench -- --gate
+        env:
+          CHROME_PATH: /usr/bin/google-chrome
