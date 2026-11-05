@@ -31,12 +31,12 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
 - **Measure on this chat** re-renders the current chat once with the features off and once on, and shows the time actually saved. The page is busy meanwhile; the measurement does not show up in the stats.
 - Scripts taking **50% or more of the total time** are highlighted: turning off or fixing those helps most.
   - **Replacer** is the part of the total spent in SillyTavern's replacer (group filling, trim strings, macros). If it is large, the replacement is slow, not the pattern.
-  - **Changed** counts the runs that actually changed the text.
+  - **Matched** counts the runs where the pattern matched (even if the text came out the same); **Changed** those that actually changed the text.
 - Badges next to a name:
   - `.*` a pattern that may backtrack a lot
   - `(a+)+` a nested quantifier (can backtrack catastrophically on long text)
   - `⚡` a single run took over 50 ms
-  - `∅` ran 20+ times without ever changing the text (a candidate to disable, also listed in the summary)
+  - `∅` ran 20+ times without ever matching (a candidate to disable, also listed in the summary); a script that matches but leaves the text as it is gets no mark
 - Click a row to open the script in SillyTavern's regex editor; the power button at the end of the row turns the script off (same as its switch in the Regex extension's list). Patterns that are not scripts have no buttons.
 - Scripts whose **Literal** column says "none" get no benefit from ② and always run (unless the minimum length alone rules a message out). `"a" & "b"` means both must be present, `"a" | "b"` any one of them; hover a cell for the shortest possible match and, when there is no literal, the reason (only classes, every literal optional, a branch without one, ...). The table lists only patterns that ran or were skipped at least once; in a narrow panel (phones) the Avg, Replacer and Literal columns are hidden and remain in the text report.
 - **Limits** lets you change ③'s entry count, longest cached input and memory (MB), ⑤'s longest saved result and the compromise interval. The line above it shows ③'s usage and this chat's ⑤ storage.

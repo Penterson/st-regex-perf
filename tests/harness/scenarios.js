@@ -496,7 +496,8 @@ export async function measure(h) {
 export async function insights(h) {
     await useScripts(h, [
         script({ scriptName: 'Changes', findRegex: '/\\bcat\\b/g', replaceString: 'dog' }),
-        script({ scriptName: 'Never changes', findRegex: '/\\d{5}/g', replaceString: 'N' }),
+        script({ scriptName: 'Never changes', findRegex: '/\\d{5}/g', replaceString: 'N' }), // never matches either
+        script({ scriptName: 'Same', findRegex: '/\\bsat\\b/g', replaceString: 'sat' }), // matches, leaves the text as it is
         script({ scriptName: 'Rarely runs', findRegex: '/\\d{6}/g', replaceString: 'N', placement: [P.USER] }),
         script({ scriptName: 'Slow regex', findRegex: '/x[\\s\\S]*?\\d{3}/g', replaceString: '' }), // needle "x": each one scans to the end
         script({ scriptName: 'Slow macro', findRegex: '/@/g', replaceString: '{{slow}}' }), // 2 ms per match

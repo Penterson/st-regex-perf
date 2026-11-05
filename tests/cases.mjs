@@ -290,14 +290,18 @@ test('item 10: summary shows the estimated time saved = (skips + hits + streamin
     assert.ok(Math.abs(num(m[1]) - want) <= want * 0.02 + 0.05, `${m[1]} vs ${want}`);
 });
 
-test('item 11: scripts that ran many times without changing the text are flagged', async ({ each }) => {
+test('item 11: scripts that ran many times without ever matching are flagged; matched is counted apart from changed', async ({ each }) => {
     const r = await each('insights', null, { variants: ['current'] });
     const rows = reportRows(r.current.text);
     assert.ok(num(row(rows, 'Changes').Changed) > 0);
+    assert.equal(num(row(rows, 'Changes').Matched), num(row(rows, 'Changes').Changed));
     assert.equal(num(row(rows, 'Never changes').Changed), 0);
-    for (const name of ['Never changes', 'Slow regex']) assert.match(row(rows, name).Warnings, /no effect/, name);
-    for (const name of ['Changes', 'Rarely runs']) assert.doesNotMatch(row(rows, name).Warnings, /no effect/, name);
-    assert.match(r.current.text, /Candidates to disable.*Never changes/);
+    assert.equal(num(row(rows, 'Never changes').Matched), 0);
+    assert.equal(num(row(rows, 'Same').Changed), 0, 'the replacement equals the match');
+    assert.equal(num(row(rows, 'Same').Matched), 25, 'but it matched on every message');
+    for (const name of ['Never changes', 'Slow regex']) assert.match(row(rows, name).Warnings, /no match/, name);
+    for (const name of ['Changes', 'Rarely runs', 'Same']) assert.doesNotMatch(row(rows, name).Warnings, /no match/, name);
+    assert.match(r.current.text, /Candidates to disable \(ran 20\+ times, never matched\): Slow regex, Never changes$/m, 'slowest first; Same is not listed');
 });
 
 test('item 12: replacer (macro) time is measured separately from regex time', async ({ each }) => {
