@@ -151,9 +151,9 @@ const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Message
 
 /** What the Korean panel must say (the plain-language wording of the panel redesign), as shown on screen. */
 const KO_PANEL = [
-    '① 실행 시간 측정 (프로파일러)', '② 매치할 수 없는 실행 건너뛰기 (리터럴 프리필터)', '③ 결과 재사용 (메모리 캐시)',
-    '④ 스트리밍 중에는 표시용 스크립트 쉬기', '④ 절충 모드: 완성된 줄은 스트리밍 중에도 꾸미기', '⑤ 결과를 채팅 파일에 저장 (영구 캐시)',
-    '예: </status>', // the example tag in ②'s description survives HTML insertion
+    '① 실행 시간 측정 (프로파일러)', '② 맞을 리 없는 정규식은 돌리지 않기 (리터럴 프리필터)', '③ 한 번 한 계산은 다시 쓰기 (메모리 캐시)',
+    '④ 스트리밍 중에는 표시용 스크립트 쉬기', '절충안: 다 써진 줄은 꾸며 가며 보기', '⑤ 꾸민 결과를 채팅 파일에 같이 저장 (영구 캐시)',
+    '예를 들어 </status>', // the example tag in ②'s description survives HTML insertion
     '한도', '이 채팅으로 측정', '리포트 복사', '측정 초기화', '새로고침', '저장된 결과 삭제 (이 채팅)',
     '회 실행해', '회는 실행하지 않았습니다', '측정 시작', '표 읽는 법', '설정만으로 할 수 있는 것',
     '스크립트', '총 ms', '평균', '최대', '치환', '변경', '스킵', '히트', '고정 문구',
