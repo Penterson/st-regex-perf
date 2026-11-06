@@ -1536,6 +1536,12 @@ export async function htmlMemoBudget(h) {
     return out;
 }
 
+/** The verdict lines of "Measure on this chat" for hand-made results (timings on a fast machine are a few ms either way). */
+export async function verdictLines(h, results) {
+    const { measureVerdict } = await extension();
+    return Object.fromEntries(Object.entries(results).map(([k, m]) => [k, measureVerdict(m)]));
+}
+
 /** The pattern analysis behind ④ incremental formatting: which patterns cannot match across a line. */
 export async function lineLocal(h, patterns) {
     const { isLineLocal } = await extension();

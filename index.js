@@ -2432,7 +2432,7 @@ async function measureChat(without = null) {
  * fewer messages over a frame), what the regex stage is as a share of the render, and what to change when it is not
  * the cost (SillyTavern's own settings).
  */
-function measureVerdict(m) {
+export function measureVerdict(m) {
     const savedMs = m.off - m.on;
     const share = m.off > 0 ? savedMs / m.off : 0;
     const perMsg = m.messages ? m.on / m.messages : 0;
@@ -2443,12 +2443,14 @@ function measureVerdict(m) {
         if (total > 0) lines.push(t`Of the render with the features off, the regex stage was ${Math.round(s.regex / total * 100)}%, markdown ${Math.round(s.markdown / total * 100)}%, sanitizing ${Math.round(s.sanitize / total * 100)}%.`);
     }
     if (m.over16) lines.push(t`Messages over a frame (${Math.round(FRAME_BUDGET_MS)} ms) on their own: ${m.over16.off} → ${m.over16.on}.`);
-    if (savedMs < FRAME_BUDGET_MS && m.over16?.on === m.over16?.off) {
+    const unfelt = savedMs < FRAME_BUDGET_MS && m.over16?.on === m.over16?.off;
+    if (unfelt) {
         lines.push(t`The saving is under one frame for the whole chat: nothing a user can feel here. The extension costs nothing either; the profiler is what remains useful.`);
     } else if (share < 0.1 && perMsg > FRAME_BUDGET_MS) {
         lines.push(t`The regex stage is not the cost in this chat: each message still takes over a frame to render with every feature on.`);
     }
-    if (perMsg > FRAME_BUDGET_MS || share < 0.1) {
+    // With an unfelt saving the share is noise on a fast machine (a few ms either way), so the settings hint goes with it.
+    if (unfelt || perMsg > FRAME_BUDGET_MS || share < 0.1) {
         lines.push(t`What helps more: User Settings → "# Messages to Load" at 50–100 (fewer renders when a chat opens) and "Streaming FPS" at 10–15 (fewer renders while streaming).`);
     }
     return lines;

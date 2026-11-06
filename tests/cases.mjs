@@ -916,6 +916,19 @@ test('① adaptive: when regex is a negligible share of the renders, the profile
     assert.ok(r.verdict.some(v => /What helps more: User Settings/.test(v)), JSON.stringify(r.verdict));
 });
 
+test('① verdict: an unfelt saving comes with the SillyTavern settings hint, whatever share of a tiny render it is', async ({ each }) => {
+    const stages = { off: { regex: 0, markdown: 99, sanitize: 1, hook: 0 } };
+    const r = (await each('verdictLines', {
+        // a fast CI runner: 4 ms saved out of 10 is a 40% share, still under a frame for the whole chat
+        unfeltBigShare: { off: 10, on: 6, messages: 10, over16: { off: 0, on: 0 }, stages },
+        // a felt saving on short messages: no hint, the extension is what helps
+        felt: { off: 200, on: 100, messages: 20, over16: { off: 3, on: 0 }, stages },
+    }, { variants: ['current'] })).current;
+    const hint = v => v.some(l => /What helps more: User Settings/.test(l));
+    assert.ok(r.unfeltBigShare.some(l => /nothing a user can feel/.test(l)) && hint(r.unfeltBigShare), JSON.stringify(r.unfeltBigShare));
+    assert.ok(!r.felt.some(l => /nothing a user can feel/.test(l)) && !hint(r.felt), JSON.stringify(r.felt));
+});
+
 test('① felt: the frame sampler counts frames during a generation only; long tasks where the browser reports them', async ({ each }) => {
     const r = (await each('frameStats', null, { variants: ['current'] })).current;
     assert.equal(r.before.frames, 0);
