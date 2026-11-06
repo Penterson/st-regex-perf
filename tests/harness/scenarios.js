@@ -1257,7 +1257,7 @@ export async function autoRefresh(h) {
  * over breakerMs, with an Undo in the toast. ② and ③ are off, so the slow runs really happen.
  */
 export async function breakerFuse(h, { mode }) {
-    const rpk = applyProfile(h, { prefilter: false, memo: false, ...(mode === 'fuse' ? { fuse: true, fuseLen: 1000 } : mode === 'breaker' ? { breaker: true, breakerMs: 20, breakerCount: 2 } : {}) });
+    const rpk = applyProfile(h, { prefilter: false, memo: false, ...(mode === 'fuse' ? { fuse: true, fuseLen: 1000 } : mode === 'breaker' ? { breaker: true, breakerMs: 5, breakerCount: 2 } : {}) }); // 5 ms: a fast CI runner finished the slow input under 20
     await useScripts(h, [
         script({ scriptName: 'Risky', findRegex: '/(x+x+)+y/g', replaceString: 'Y' }), // exponential on a run of x without a y
         script({ scriptName: 'Plain', findRegex: '/q/g', replaceString: 'Q' }),

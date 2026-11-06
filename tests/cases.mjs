@@ -734,7 +734,7 @@ test('feature list 1.5: the circuit breaker turns a script off after N long runs
     assert.deepEqual(r.outs.slice(0, 3), ['Y' + 'a'.repeat(1500) + ' Q', 'x'.repeat(22) + ' Q', 'x'.repeat(22) + ' Q']);
     assert.equal(r.outs[3], 'xxy Q', 'skipped after the trip');
     assert.deepEqual(r.after, { fused: 0, broken: 1, tripped: true, redos: 'exp' });
-    assert.match(r.toastText, /^"Risky" was turned off for this session: 2 runs took over 20 ms\. Undo Open script$/);
+    assert.match(r.toastText, /^"Risky" was turned off for this session: 2 runs took over 5 ms\. Undo Open script$/);
     assert.match(r.toast, /class="rpk-undo"/);
     assert.equal(r.undone, 'Y Q', 'Undo turns it back on');
 });
