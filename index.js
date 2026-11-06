@@ -49,6 +49,8 @@ const defaultSettings = {
     breaker: false, // ⑧ a script with breakerCount runs over breakerMs is skipped for the session (off by default)
     breakerMs: 500,
     breakerCount: 3,
+    lint: true, // checks on the scripts (missing g, group references, double escapes, browser support, duplicates), shown only
+    listBadges: true, // a cost chip after each script's name in the Regex extension's own list
 };
 
 // ST keeps this object for the whole session, so it is resolved once instead of on every replace.
@@ -836,8 +838,19 @@ function cached(map, key, make) {
     }
     return v;
 }
+// regexFromString() swallows the engine's error; the invalid-pattern list (feature list 2.2) shows it, so the pattern is
+// compiled again the way SillyTavern splits it.
 const compile = (pattern) => cached(compiledCache, pattern, () => {
-    try { return regexFromString(pattern) ?? null; } catch { return null; }
+    try {
+        const re = regexFromString(pattern);
+        if (re) return { re, error: null };
+    } catch { /* reported below */ }
+    let error = t`Not a valid pattern`;
+    try {
+        const m = /(\/?)(.+)\1([a-z]*)/i.exec(pattern);
+        new RegExp(m ? m[2] : pattern, m ? m[3] : '');
+    } catch (e) { error = String(e?.message ?? e); }
+    return { re: null, error };
 });
 const needleOf = (re) => cached(needleCache, keyOf(re), () => extractNeedle(re.source, re.flags));
 
@@ -872,7 +885,8 @@ function buildInfo(groups) {
     const { substituteParamsExtended } = ctx();
     const map = new Map();
     const dynamic = []; // {raw, substitute, shape, info} of RAW/ESCAPED scripts whose pattern has macros, see resolveDynamic()
-    const counts = { total: 0, active: 0, noNeedle: 0, redos: 0, redosExp: 0, types: {} };
+    const counts = { total: 0, active: 0, noNeedle: 0, redos: 0, redosExp: 0, invalid: 0, types: {} };
+    const invalid = []; // {id, name, type, error} of scripts whose pattern does not compile (feature list 2.2)
     const versionParts = [];
     const displayParts = []; // the parts that can change a display result: the ⑤ key's version (feature list 3, row 4)
     const depthRules = []; // [min, max] of display scripts with depth limits, for the ⑤ key
@@ -892,8 +906,12 @@ function buildInfo(groups) {
             if (substitute === 1 || substitute === 2) { // RAW / ESCAPED, as runRegexScript() compiles them
                 try { rs = substituteParamsExtended(rs, {}, substitute === 2 ? sanitizeRegexMacro : undefined); } catch { /* keep the raw pattern */ }
             }
-            const re = compile(rs);
-            if (!re) continue;
+            const { re, error } = compile(rs);
+            if (!re) { // SillyTavern returns the input unchanged for such a script: listed, so it does not stay silent
+                invalid.push({ id: s.id, name: s.scriptName || t`(no name)`, type: origin, error });
+                counts.invalid++;
+                continue;
+            }
 
             const key = keyOf(re);
             const prev = map.get(key);
@@ -945,9 +963,13 @@ function buildInfo(groups) {
             if (isDynamic) dynamic.push({ raw: s.findRegex, substitute, shape: shapeOf(s.findRegex), info });
             // ⑥: a pure replacement as a template (no trim strings) or a lean callback (trim strings), until a run disagrees
             const fastKey = key + '\u0001' + info.replaceSig;
+            const tpl = cached(templateCache, fastKey, () => buildTemplate(replaceString, re));
+            info.refs = tpl.refs; // for the lint
+            info.find = s.findRegex;
+            info.source = re.source;
+            info.flags = re.flags;
             info.fast = null;
             if (info.pure && !fastPathOff.has(fastKey)) {
-                const tpl = cached(templateCache, fastKey, () => buildTemplate(replaceString, re));
                 if (tpl.template !== null) {
                     info.fast = {
                         key: fastKey,
@@ -972,7 +994,7 @@ function buildInfo(groups) {
     }
     const version = fnv1a(versionParts.join('\u0003'));
     if (version !== infoCache?.version) clearLitCache(); // other scripts, other literals
-    return { map, dynamic, counts, depthRules, version, displayVersion: fnv1a(displayParts.join('\u0003')), fp: fingerprint(groups), checkedAt: Date.now(), builtAt: Date.now() };
+    return { map, dynamic, invalid, counts, depthRules, version, displayVersion: fnv1a(displayParts.join('\u0003')), fp: fingerprint(groups), checkedAt: Date.now(), builtAt: Date.now() };
 }
 
 // ---- Instrumented RegExp ----
@@ -984,6 +1006,8 @@ let burstStart = 0;
 let lastCall = -Infinity;
 const SPIKE_MS = 50; // a single run slower than this is flagged, with a sample of its input
 const SPIKE_HEAD = 80; // characters of the input kept in the sample
+const SPIKE_KEEP = 20; // spikes kept per script
+let passMessageId = null; // the message a display pass formats (null outside one): spikes record it
 const SAMPLE_AFTER = 1000; // ① with profilerSampling, a script past this many runs is timed on 1 run in SAMPLE_EVERY
 const SAMPLE_EVERY = 8;
 let statsDirty = false; // the stats changed since the panel was last rendered
@@ -1084,7 +1108,9 @@ function getStat(key, re) {
             calls: 0, totalMs: 0, maxMs: 0, replMs: 0, matched: 0, changed: 0,
             skipped: 0, hits: 0, streamSkipped: 0, bypass: 0, fast: 0,
             seen: 0, // every run that executed, also the ones sampling left untimed
-            spike: null, // {ms, len, head}: the newest run over SPIKE_MS
+            spike: null, // {ms, len, head, messageId}: the newest run over SPIKE_MS
+            spikes: [], // the SPIKE_KEEP newest such runs, newest first (feature list 2.2)
+            moreMatches: 0, // runs of a pattern without g that would have matched again (lint "missing g")
             needle: null, // the needle the wrapper uses (and its nested flag), set with its meta
             redos: NO_REDOS, // the analyzer's verdict, set with its meta
             fused: 0, // ⑦ inputs the fuse skipped
@@ -1224,7 +1250,11 @@ class PerfRegExp extends RegExp {
             stat.replMs += replMs * weight;
             if (fastRun) stat.fast += weight;
             if (dt > stat.maxMs) stat.maxMs = dt;
-            if (dt > SPIKE_MS) stat.spike = { ms: dt, len: str.length, head: str.slice(0, SPIKE_HEAD) };
+            if (dt > SPIKE_MS) {
+                stat.spike = { ms: dt, len: str.length, head: str.slice(0, SPIKE_HEAD), messageId: passMessageId };
+                stat.spikes.unshift(stat.spike);
+                if (stat.spikes.length > SPIKE_KEEP) stat.spikes.length = SPIKE_KEEP;
+            }
             if (out !== str) stat.changed += weight;
             if (!matched) {
                 // A template changed the text or not: unchanged means no match unless a match can be its own replacement.
@@ -1233,6 +1263,11 @@ class PerfRegExp extends RegExp {
                 else if (fn === replacer) matched = out !== str || str.length > 2000 || native.test(str);
             }
             if (matched) stat.matched += weight;
+            // lint "missing g": a pattern without g that would have matched again further on (short inputs only)
+            if (matched && !native.global && str.length <= CONFLICT_TEST_MAX) {
+                const m = native.exec(str);
+                if (m && m.index + m[0].length < str.length && native.test(str.slice(m.index + m[0].length))) stat.moreMatches++;
+            }
         }
         this.lastIndex = native.lastIndex; // leave this regex as a native replace would
 
@@ -1329,6 +1364,7 @@ function patchProvider() {
             if (info) stat.name = info.name;
             if (info?.raw) stat.src = info.raw;
             stat.ids = info?.ids ?? [];
+            for (const id of stat.ids) statById.set(id, stat);
             stat.needle = info?.needle ?? needleOf(base);
             stat.redos = info?.redos ?? redosOf(base);
             stat.tripped = false; // ⑧ an edit resets the breaker
@@ -1394,7 +1430,7 @@ function depthAt(chat, i) {
 /** Clears the state the two hooks share for one formatting pass. */
 function resetPass() {
     bypass = streamApply = displayPass = false;
-    pending = streamView = streamTail = passChName = passStatic = passStaticTrim = null;
+    pending = streamView = streamTail = passChName = passStatic = passStaticTrim = passMessageId = null;
 }
 
 /**
@@ -1430,6 +1466,7 @@ function installPersistHooks() {
         displayPass = true;
         if (c.messageId < 0 || c.isSystem) return mes;
         passChName = c.ch_name ?? c.characterName ?? ''; // static-macro scripts resolve their key on first use
+        passMessageId = c.messageId;
         const sp = cfg.persist || cfg.streamingThrottle ? liveStream() : null;
         if (sp) return cfg.streamingSkip && cfg.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;
         if (!cfg.persist || c.isReasoning) return mes;
@@ -1523,7 +1560,10 @@ const spikeText = (sp) => t`Last spike: ${fmtMs(sp.ms)} ms on ${sp.len} characte
 const fastText = (n) => t`⑥ fast path: ${n} runs without SillyTavern's callback`;
 /** A pattern the extension has seen do anything: rows that never ran nor were skipped are left out of the table. */
 const active = (r) => r.calls + avoided(r) + r.bypass > 0;
-const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">${text}</span>`;
+const badge = (text, title, cls = '', attrs = '') => ` <span class="rpk-badge${cls ? ' ' + cls : ''}"${attrs} title="${esc(title)}">${text}</span>`;
+/** The older spikes of a script, for the ⚡ tooltip, and where a click goes. */
+const spikeHistory = (r) => r.spikes.slice(1, 5).map(sp => '\n' + t`${fmtMs(sp.ms)} ms on ${sp.len} characters` + (sp.messageId != null ? ` (#${sp.messageId})` : '')).join('')
+    + (r.spike?.messageId != null ? '\n' + t`Click to scroll to message #${r.spike.messageId}` : '');
 /** A row's warnings: words for the report, or badges for the panel. */
 function warnings(r, badges = false) {
     const conflicted = conflictsOf(r);
@@ -1532,14 +1572,14 @@ function warnings(r, badges = false) {
         r.redos.severity === 'poly' && (badges ? badge('a*a*', t`Polynomial backtracking: ${redosReason(r.redos)}. ${redosSuggestion(r.redos)}`) : t`polynomial backtracking (${redosReason(r.redos)})`),
         r.fused > 0 && (badges ? badge('fuse', t`${r.fused} inputs over ${settings.fuseLen} characters were skipped by the fuse`) : t`fused`),
         r.tripped && (badges ? ` <span class="rpk-badge rpk-undo" data-trip="${r.tripId}" title="${esc(t`Turned off by the circuit breaker: ${r.slowRuns} runs took over ${settings.breakerMs} ms. Click to turn it back on.`)}">off</span>` : t`breaker`),
-        r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)` + (r.spike ? '\n' + spikeText(r.spike) : '')) : t`spike`),
+        r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)` + (r.spike ? '\n' + spikeText(r.spike) + spikeHistory(r) : ''), 'rpk-spike', r.spike?.messageId != null ? ` data-mesid="${r.spike.messageId}"` : '') : t`spike`),
         conflicted.length > 0 && (badges ? badge('⇅', conflicted.map(conflictText).join('\n')) : t`order conflict`),
         ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without ever matching: consider turning it off`) : t`no match`),
     ].filter(Boolean);
 }
 
 function buildSummary() {
-    const { counts } = ensureInfo();
+    const { counts, invalid } = ensureInfo();
     const rows = [...stats.values()].filter(active).sort((a, b) => b.totalMs - a.totalMs || avoided(b) - avoided(a));
     const sum = (key) => rows.reduce((acc, r) => acc + r[key], 0);
     const total = sum('totalMs');
@@ -1547,6 +1587,7 @@ function buildSummary() {
     const { chat } = ctx();
     return {
         counts,
+        invalid,
         rows,
         total,
         calls: sum('calls'),
@@ -1669,7 +1710,10 @@ function buildReportText() {
     const spikes = s.rows.filter(r => r.spike);
     if (spikes.length) {
         lines.push('', t`Spikes (newest run over ${SPIKE_MS} ms per script)`);
-        spikes.forEach(r => lines.push(`${r.name}: ${spikeText(r.spike)}`));
+        for (const r of spikes) {
+            lines.push(`${r.name}: ${spikeText(r.spike)}` + (r.spike.messageId != null ? ` (#${r.spike.messageId})` : ''));
+            for (const sp of r.spikes.slice(1)) lines.push(`  ${fmtMs(sp.ms)} ms / ${sp.len}` + (sp.messageId != null ? ` (#${sp.messageId})` : ''));
+        }
     }
     const risks = s.rows.filter(r => r.redos.kind);
     if (risks.length) {
@@ -1678,6 +1722,15 @@ function buildReportText() {
             const sev = r.redos.severity === 'exp' ? t`exponential` : r.redos.severity === 'poly' ? t`polynomial` : null;
             lines.push(`${r.name}: ${sev ? `${sev}: ${redosReason(r.redos)}. ${redosSuggestion(r.redos)}` : redosReason(r.redos)}`);
         }
+    }
+    if (s.invalid.length) {
+        lines.push('', t`Invalid patterns (${s.invalid.length})`);
+        for (const i of s.invalid) lines.push(`${i.name}: ${i.error}`);
+    }
+    const lint = lintRows();
+    if (lint.length) {
+        lines.push('', t`Lint (${lint.length})`);
+        for (const row of lint) lines.push(`${row.info.name}: ${row.text}`);
     }
     return lines.join('\n');
 }
@@ -1695,12 +1748,14 @@ function buildReportData() {
         measured,
         candidatesToDisable: s.ineffective,
         orderConflicts: [...conflicts.values()].map(c => ({ earlier: c.earlier.name, later: c.later.name, count: c.count, confirmed: c.confirmed, sample: c.sample })),
+        invalidPatterns: s.invalid,
+        lint: lintRows().map(row => ({ script: row.info.name, ids: row.info.ids, rule: row.rule, text: row.text, fixable: !!row.fix })),
         rows: s.rows.map((r, i) => ({
             rank: i + 1, name: r.name, pattern: r.src, runs: r.calls, totalMs: r.totalMs, avgMs: avgMs(r), maxMs: r.maxMs, replacerMs: r.replMs,
             matched: r.matched, changed: r.changed, skips: r.skipped, hits: r.hits, streamSkips: r.streamSkipped, fastRuns: r.fast,
             sampled: !!settings.profilerSampling && r.seen > SAMPLE_AFTER, // runs, totals, matched and changed are scaled from 1 run in 8
             redos: r.redos, fused: r.fused, broken: r.broken, tripped: r.tripped,
-            literal: r.needle?.terms ?? [], literalReason: r.needle?.reason ?? null, minLength: r.needle?.minLen ?? 0, warnings: warnings(r), spike: r.spike,
+            literal: r.needle?.terms ?? [], literalReason: r.needle?.reason ?? null, minLength: r.needle?.minLen ?? 0, warnings: warnings(r), spike: r.spike, spikes: r.spikes,
         })),
     };
 }
@@ -1719,19 +1774,137 @@ function buildReportCsv() {
 }
 
 /** Turns off the scripts whose name matches (exactly, else as the only one containing it); the message to show. */
-function turnOffByName(name) {
+async function turnOffByName(name) {
     const want = name.trim().toLowerCase();
     if (!want) return t`Usage: /regexperf off <script name>`;
     const infos = [...ensureInfo().map.values()];
     const found = infos.filter(r => r.name.toLowerCase() === want);
     const hits = found.length ? found : infos.filter(r => r.name.toLowerCase().includes(want));
     if (hits.length !== 1) return hits.length ? t`"${name}" matches several scripts: ${hits.map(r => r.name).join(', ')}` : t`"${name}" is not in the Regex extension's list.`;
-    scriptAction(hits[0], true);
+    await scriptAction(hits[0], true);
     renderPanel();
     return t`Turned off: ${hits[0].name}`;
 }
 
-const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'seen', 'fused', 'broken', 'slowRuns', 'spike'];
+// ---- Lint (feature list 2.3) and saving through the engine ----
+
+/**
+ * Saves a change to the scripts with these ids through the engine (no Regex drawer involved) and re-reads the script
+ * info; false when this SillyTavern cannot (no saveScriptsByType).
+ */
+async function saveScript(ids, patch) {
+    if (typeof engine.saveScriptsByType !== 'function' || typeof getScriptsByType !== 'function' || !SCRIPT_TYPES) return false;
+    let saved = false;
+    for (const type of Object.values(SCRIPT_TYPES)) {
+        const list = getScriptsByType(type, { allowedOnly: false }) ?? [];
+        if (!list.some(s => ids.includes(s?.id))) continue;
+        await engine.saveScriptsByType(list.map(s => (ids.includes(s?.id) ? { ...s, ...patch } : s)), type);
+        saved = true;
+    }
+    if (saved) markDirty();
+    return saved;
+}
+
+const LINT_TEXT = {
+    'missing-g': () => t`Matched more than once in a message, but without the g flag only the first match is replaced`,
+    'group-ref': (refs) => t`Group references the pattern cannot fill: ${refs}`,
+    'double-escape': () => t`Double escapes such as \\\\n in the pattern (a JSON copy): they match a backslash and a letter, not a newline`,
+    'browser-compat': (what) => t`Not supported by every browser: ${what} (invalid on iOS and Safari before 16.4 / 17, where the script does nothing)`,
+    'duplicate': (names) => t`Several scripts share this pattern (${names}): one wrapper serves all of them, so ③ and ④ apply only when they suit every one`,
+};
+
+/** The lint findings for every active script: {rule, info, text, fix}, fix = {label, patch} where it is mechanical. */
+function lintRows() {
+    if (!settings.lint) return [];
+    const rows = [];
+    for (const info of ensureInfo().map.values()) {
+        const stat = stats.get(info.statKey);
+        const find = String(info.find ?? '');
+        if (!info.flags.includes('g') && stat?.moreMatches >= 3) {
+            const m = /^\/([\s\S]+)\/([a-z]*)$/i.exec(find);
+            rows.push({ rule: 'missing-g', info, text: LINT_TEXT['missing-g'](), fix: { label: t`Add g`, patch: { findRegex: m ? `/${m[1]}/${m[2]}g` : `/${find}/g` } } });
+        }
+        const bad = [...new Set(info.refs.filter(r => !r.ok).map(r => r.ref))];
+        if (bad.length) rows.push({ rule: 'group-ref', info, text: LINT_TEXT['group-ref'](bad.join(' ')), fix: null });
+        if (/\\\\[nrtsdwb]/.test(find)) rows.push({ rule: 'double-escape', info, text: LINT_TEXT['double-escape'](), fix: { label: t`Unescape`, patch: { findRegex: find.replace(/\\\\([nrtsdwb])/g, '\\$1') } } });
+        const compat = [];
+        if (/\(\?<[=!]/.test(info.source)) compat.push(t`lookbehind`);
+        if (info.flags.includes('v')) compat.push(t`the v flag`);
+        if (info.flags.includes('d')) compat.push(t`the d flag`);
+        const names = info.source.match(/\(\?<([^>=!][^>]*)>/g) ?? [];
+        if (new Set(names).size < names.length) compat.push(t`duplicate group names`);
+        if (compat.length) rows.push({ rule: 'browser-compat', info, text: LINT_TEXT['browser-compat'](compat.join(', ')), fix: null });
+        if (info.ids.length > 1) rows.push({ rule: 'duplicate', info, text: LINT_TEXT.duplicate(info.name), fix: null });
+    }
+    return rows;
+}
+
+/** A yes/no popup; true without SillyTavern's popups. */
+async function confirmPopup(html) {
+    const { callGenericPopup, POPUP_TYPE } = ctx();
+    if (typeof callGenericPopup !== 'function') return true;
+    const r = await callGenericPopup(html, POPUP_TYPE?.CONFIRM ?? 2);
+    return r === 1 || r === true;
+}
+
+// ---- Cost chips in the Regex extension's own list (feature list 2.1) ----
+
+const LIST_IDS = ['saved_regex_scripts', 'saved_scoped_scripts', 'saved_preset_scripts'];
+const observedLists = new WeakSet();
+const statById = new Map(); // script id -> its stat, for the chips
+let chipTimer = 0;
+/** Watches the Regex drawer's lists (SillyTavern rebuilds them) once they exist; called from the refresh interval. */
+function installListBadges() {
+    for (const id of LIST_IDS) {
+        const box = document.getElementById(id);
+        if (!box || observedLists.has(box)) continue;
+        observedLists.add(box);
+        new MutationObserver(() => {
+            if (!chipTimer) chipTimer = setTimeout(() => { chipTimer = 0; updateListBadges(); }, 50);
+        }).observe(box, { childList: true, subtree: true });
+    }
+}
+/** The chip after a script's name: total ms, share of all regex time, and the marks of the table. */
+function chipText(r, total) {
+    const parts = [`${fmtMs(r.totalMs)} ms`];
+    if (total > 0 && r.calls) parts.push(`${Math.round(r.totalMs / total * 100)}%`);
+    if (ineffective(r)) parts.push('∅');
+    if (r.redos.severity === 'exp') parts.push('(a+)+');
+    if (r.maxMs > SPIKE_MS) parts.push('⚡');
+    if (r.tripped) parts.push('off');
+    return parts.join(' · ');
+}
+function updateListBadges() {
+    if (!settings.listBadges) {
+        for (const el of document.querySelectorAll('.rpk-chip')) el.remove();
+        return;
+    }
+    const total = [...stats.values()].reduce((acc, r) => acc + r.totalMs, 0);
+    for (const id of LIST_IDS) {
+        const box = document.getElementById(id);
+        if (!box) continue;
+        for (const row of box.querySelectorAll('.regex-script-label[id]')) {
+            const name = row.querySelector('.regex_script_name');
+            const stat = statById.get(row.id);
+            let chip = row.querySelector('.rpk-chip');
+            if (!name || !stat || !active(stat)) {
+                chip?.remove();
+                continue;
+            }
+            if (!chip) {
+                chip = document.createElement('span');
+                chip.className = 'rpk-chip';
+                name.after(chip);
+            }
+            const text = chipText(stat, total);
+            if (chip.textContent !== text) chip.textContent = text;
+            const title = warnings(stat).join(', ');
+            if (chip.title !== title) chip.title = title;
+        }
+    }
+}
+
+const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'seen', 'fused', 'broken', 'slowRuns', 'moreMatches', 'spike', 'spikes'];
 const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false, breaker: false }; // what a measurement turns off
 
 const CACHES_OFF = { profiler: false, memo: false, persist: false, breaker: false }; // a per-row measurement keeps the prefilter as set
@@ -1775,7 +1948,7 @@ async function measureChat(without = null) {
         }
         return total;
     };
-    const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => st[c])]));
+    const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => (Array.isArray(st[c]) ? [...st[c]] : st[c]))]));
     const savedPersist = { ...persistStats };
     const savedConflicts = new Map([...conflicts].map(([k, c]) => [k, { ...c }]));
     const times = [];
@@ -1807,6 +1980,7 @@ function resetStats() {
     conflicts.clear();
     statsSince = Date.now();
     persistStats.hits = persistStats.stores = 0;
+    statById.clear();
     wrapped.clear(); // wrappers hold their stat object; new ones link to fresh stats
 }
 
@@ -1904,6 +2078,8 @@ const settingsHtml = () => `
           ${limit('memoHashKeys', t`③ Key the cache by a hash of the input`, t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`, 'checkbox')}
           ${limit('loadHintMs', t`Hint about "# Messages to Load" when opening a chat takes longer than (ms)`, t`Shown once per session as a toast.`)}
           ${limit('autoMeasure', t`Measure automatically when a chat opens`, t`Runs "Measure on this chat" once after a chat opens.`, 'checkbox')}
+          ${limit('lint', t`Lint the scripts`, t`Missing g, group references the pattern cannot fill, double escapes, browser support, duplicate patterns. Shown under Lint; a fix is applied only when you confirm it.`, 'checkbox')}
+          ${limit('listBadges', t`Show each script's cost in the Regex extension's list`, t`A chip after the script name: total ms, share of all regex time, and the marks of the table.`, 'checkbox')}
         </div>
       </details>
 
@@ -1929,6 +2105,10 @@ const settingsHtml = () => `
           <tbody></tbody>
         </table>
       </div>
+      <details class="rpk-lint" data-section="lint">
+        <summary>${t`Lint`} <span class="rpk-dim" id="rpk_lint_count"></span></summary>
+        <ul id="rpk_lint_list"></ul>
+      </details>
       <details class="rpk-tips rpk-legend" data-section="legend">
         <summary>${t`How to read the table`}</summary>
         <ul>
@@ -1952,7 +2132,7 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
+const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure', rpk_lint: 'lint', rpk_listBadges: 'listBadges' };
 // editable limits: setting -> [min, max]
 const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], fuseLen: [1000, 1e7], breakerMs: [50, 60000], breakerCount: [1, 100], loadHintMs: [100, 600000] };
 
@@ -2004,6 +2184,9 @@ function renderPanel() {
     if (s.ineffective.length) {
         lines.push(t`Never matched in ${INEFFECTIVE_RUNS}+ runs: <b>${esc(s.ineffective.join(', '))}</b>. Consider turning them off.`);
     }
+    if (s.invalid.length) {
+        lines.push(`<span class="rpk-warn">${t`Invalid patterns (${s.invalid.length}), doing nothing: ${s.invalid.map(i => `<b>${esc(i.name)}</b> (${esc(i.error)})`).join('; ')}`}</span>`);
+    }
     if (!patched) lines.push(`<span class="rpk-warn">${t`⚠ Could not patch the regex engine — this SillyTavern version is not supported.`}</span>`);
     checkWrapper();
     if (wrapperWarning) lines.push(`<span class="rpk-warn">⚠ ${esc(wrapperWarning)}</span>`);
@@ -2025,6 +2208,7 @@ function renderPanel() {
         const m = rowMeasures.get(r);
         const actions = (m ? `<span class="rpk-row-ms" title="${esc(t`Without this script the chat renders in ${fmtMs(m.without)} ms instead of ${fmtMs(m.with)} ms (③ and ⑤ off)`)}">${m.with >= m.without ? '−' : '+'}${fmtMs(Math.abs(m.with - m.without))} ms</span>` : '')
             + `<span class="rpk-measure-row fa-solid fa-stopwatch" title="${t`Measure this chat without this script`}"></span>`
+            + (r.spike ? ` <span class="rpk-repro fa-solid fa-copy" title="${t`Copy a repro of the newest spike (pattern, input length and head) for a bug report`}"></span>` : '')
             + (r.ids.length ? ` <span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span> <span class="rpk-off fa-solid fa-power-off" title="${t`Turn this script off`}"></span>` : '');
         return `<tr class="${cls}${r.ids.length ? ' rpk-script' : ''}" title="${esc(r.src)}" data-i="${i}">
           ${td('rank', ranks.get(r))}${td('name', esc(r.name) + warnings(r, true).join(''))}
@@ -2040,13 +2224,26 @@ function renderPanel() {
         : settings.persist ? t`⑤ is on: display results are being saved in this chat. Changing a script invalidates them automatically.` : '', 'textContent');
     setContent(ui.usage, s.usage, 'textContent');
     setContent(ui.measure, measured ? `<p>${esc(measureText(measured))}</p><p class="rpk-dim">${esc(slowestText(measured))}</p>` : '');
+
+    const lint = lintRows();
+    ui.lint = lint;
+    setContent(ui.lintCount, lint.length ? `(${lint.length})` : '', 'textContent');
+    setContent(ui.lintList, lint.length ? lint.map((row, i) => `<li data-rule="${row.rule}" data-script="${esc(row.info.name)}" data-i="${i}"><b>${esc(row.info.name)}</b>: ${esc(row.text)}`
+        + (row.fix ? ` <span class="menu_button rpk-fix" title="${esc(t`Shows the change and saves it through the regex engine when you confirm`)}">${esc(row.fix.label)}</span>` : '')
+        + (row.info.ids.length ? ` <span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span>` : '') + '</li>').join('')
+        : `<li class="rpk-dim">${settings.lint ? t`Nothing to report` : t`Lint is off (Limits)`}</li>`);
 }
 
 /**
- * The Regex extension has no API to open or toggle a script, so its own list is used: each script row has the
- * script's id, an .edit_existing_regex button and a .regex-toggle-on switch (the one that disables it).
+ * Turning a script off goes through the engine (saveScriptsByType, feature list 3 row 9); opening it in the editor
+ * has no API, so the Regex drawer's own list is used: each script row has the script's id and an .edit_existing_regex
+ * button (and a .regex-toggle-on switch, the fallback for turning it off on an engine without saveScriptsByType).
  */
-function scriptAction(r, off) {
+async function scriptAction(r, off) {
+    if (off && await saveScript(r.ids, { disabled: true })) {
+        toastr.info(t`Turned off: ${r.name}`);
+        return;
+    }
     const rows = r.ids.map(id => document.getElementById(id));
     if (!rows[0]) {
         toastr.warning(t`"${r.name}" is not in the Regex extension's list.`);
@@ -2063,7 +2260,7 @@ function scriptAction(r, off) {
 function bindUi() {
     const root = document.getElementById('regex_perf_kit');
     const find = (sel) => root.querySelector(sel);
-    ui = { summary: find('#rpk_summary'), thead: find('#rpk_table thead'), tbody: find('#rpk_table tbody'), note: find('#rpk_persist_note'), usage: find('#rpk_usage'), measure: find('#rpk_measure_result'), rows: [] };
+    ui = { summary: find('#rpk_summary'), thead: find('#rpk_table thead'), tbody: find('#rpk_table tbody'), note: find('#rpk_persist_note'), usage: find('#rpk_usage'), measure: find('#rpk_measure_result'), lintList: find('#rpk_lint_list'), lintCount: find('#rpk_lint_count'), rows: [], lint: [] };
 
     /** Shows the current settings in the toggles and limit fields (at start and after a reset). */
     const syncControls = () => {
@@ -2168,18 +2365,50 @@ function bindUi() {
                 if (m) rowMeasures.set(r, m);
                 renderPanel();
             });
+        } else if (e.target.closest('.rpk-spike')) { // ⚡: scroll to the message of the newest spike
+            const id = e.target.closest('.rpk-spike').dataset.mesid;
+            if (id) document.querySelector(`.mes[mesid="${id}"]`)?.scrollIntoView({ block: 'center' });
+        } else if (e.target.closest('.rpk-repro')) {
+            if (r.spike) copyText(`${r.src}\n${r.spike.len} chars\n${JSON.stringify(r.spike.head)}`);
         } else if (r.ids.length) {
             scriptAction(r, !!e.target.closest('.rpk-off'));
         }
     });
+    ui.lintList.addEventListener('click', async (e) => {
+        const row = ui.lint[e.target.closest('li[data-i]')?.dataset.i];
+        if (!row) return;
+        if (e.target.closest('.rpk-fix')) {
+            const ok = await confirmPopup(`<p>${esc(t`Change the pattern of "${row.info.name}"?`)}</p><pre class="rpk-report">${esc(String(row.info.find ?? ''))}</pre><p>→</p><pre class="rpk-report">${esc(row.fix.patch.findRegex)}</pre>`);
+            if (!ok) return;
+            if (await saveScript(row.info.ids, row.fix.patch)) toastr.success(t`Saved: ${row.info.name}`);
+            else toastr.warning(t`This SillyTavern cannot save scripts from here: edit it in the Regex extension.`);
+            renderPanel();
+        } else if (e.target.closest('.rpk-edit')) {
+            scriptAction(row.info, false);
+        }
+    });
 
-    // auto-refresh: when the stats changed, on the next frame, at most every RENDER_MIN_MS, only while the drawer is open
+    // auto-refresh: when the stats changed, on the next frame, at most every RENDER_MIN_MS, only while the drawer is open;
+    // the cost chips in the Regex drawer's lists follow the same beat
     const content = find('.inline-drawer-content');
     setInterval(() => {
-        if (!statsDirty || content.offsetParent === null) return;
+        installListBadges();
+        if (!statsDirty) return;
+        if (settings.listBadges) updateListBadges();
+        if (content.offsetParent === null) return;
         statsDirty = false;
         requestAnimationFrame(renderPanel);
     }, RENDER_MIN_MS);
+}
+
+/** Copies text to the clipboard, with a toast either way. */
+async function copyText(text) {
+    try {
+        await navigator.clipboard.writeText(text);
+        toastr.success(t`Copied to the clipboard.`);
+    } catch {
+        toastr.warning(t`Could not copy — use the /regexperf command to see the report in a popup.`);
+    }
 }
 
 function registerSlash() {

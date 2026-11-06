@@ -632,7 +632,7 @@ export async function exports(h) {
         offExact: await run('off BETA'), // ...but an exact (case-insensitive) name wins
         offPartial: await run('off max'),
         offNone: await run('off'),
-        disabled: scripts.map(s => !!s.disabled),
+        disabled: h.extension_settings.regex.map(s => !!s.disabled), // saved through the engine: new script objects
         help: cmd.helpString,
     };
 }
@@ -739,7 +739,7 @@ export async function rowActions(h) {
     return {
         events,
         ids: scripts.map(s => s.id),
-        disabled: scripts.map(s => !!s.disabled),
+        disabled: h.extension_settings.regex.map(s => !!s.disabled), // saved through the engine: new script objects
         unknownHasActions: !!root.querySelector('#rpk_table tbody tr[title*="gamma"] .rpk-off, #rpk_table tbody tr[title*="gamma"] .rpk-edit'),
     };
 }
@@ -1305,6 +1305,91 @@ export async function redosReport(h) {
     ]));
     const json = JSON.parse(await h.commands.regexperf.callback({}, 'json'));
     return { report: await report(h), badges, redos: Object.fromEntries(json.rows.map(r => [r.name, r.redos])), counts: json.scripts };
+}
+
+/** Feature list 2.2. Invalid patterns are listed with the engine's error: summary, report and JSON. */
+export async function invalidList(h) {
+    await useScripts(h, [
+        script({ scriptName: 'Broken', findRegex: '/(abc/g', replaceString: '' }),
+        script({ scriptName: 'Fine', findRegex: '/ok/g', replaceString: 'OK' }),
+    ]);
+    const out = h.engine.getRegexedString('ok (abc', P.AI);
+    const root = panel(true);
+    const json = JSON.parse(await h.commands.regexperf.callback({}, 'json'));
+    return { out, summary: root?.querySelector('#rpk_summary').textContent ?? '', report: await report(h), invalid: json.invalidPatterns, counts: json.scripts };
+}
+
+/** Feature list 2.2. Spikes keep a history with the message id; the ⚡ badge scrolls to the message; a repro can be copied. */
+export async function spikes(h) {
+    await useScripts(h, [script({ scriptName: 'Slow macro', findRegex: '/@/g', replaceString: '{{slow}}', markdownOnly: true })]);
+    h.st.setState({ chat: [0, 1, 2].map(i => msg('@'.repeat(30) + i)) });
+    const mesDiv = document.createElement('div');
+    mesDiv.innerHTML = [0, 1, 2].map(i => `<div class="mes" mesid="${i}"></div>`).join('');
+    document.body.append(mesDiv);
+    const scrolled = [];
+    const orig = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = function () { scrolled.push(this.getAttribute('mesid')); };
+    let copied = null;
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (text) => { copied = text; } }, configurable: true });
+    try {
+        for (let i = 0; i < 3; i++) h.st.messageFormatting(h.st.chat[i].mes, 'Char', false, false, i);
+        const root = panel(true);
+        const row = rowOf(root, 'Slow macro');
+        const badge = [...row.querySelectorAll('.rpk-badge')].find(b => b.textContent === '⚡');
+        badge.click();
+        row.querySelector('.rpk-repro').click();
+        await sleep(10);
+        const json = JSON.parse(await h.commands.regexperf.callback({}, 'json'));
+        return { spikes: json.rows[0].spikes.map(s => ({ len: s.len, messageId: s.messageId, head: s.head })), title: badge.title, scrolled, copied, report: await report(h), toasts: h.toasts.map(([, m]) => m) };
+    } finally {
+        Element.prototype.scrollIntoView = orig;
+        delete navigator.clipboard;
+        mesDiv.remove();
+    }
+}
+
+/** Feature list 2.3. Lint rows, a one-click fix through saveScriptsByType, and on/off without the Regex drawer's DOM. */
+export async function lintRules(h) {
+    const noG = script({ scriptName: 'NoG', findRegex: '/foo/', replaceString: 'bar' });
+    await useScripts(h, [
+        noG,
+        script({ scriptName: 'Ref', findRegex: '/(\\d+)-/g', replaceString: '$2' }),
+        script({ scriptName: 'Esc', findRegex: '/\\\\n/g', replaceString: ' ' }), // the pattern text is \\n: a JSON double escape
+        script({ scriptName: 'Look', findRegex: '/(?<=x)y/g', replaceString: 'Y' }),
+        script({ scriptName: 'Dup1', findRegex: '/dup/g', replaceString: '1' }),
+        script({ scriptName: 'Dup2', findRegex: '/dup/g', replaceString: '2' }),
+    ]);
+    const outs = [];
+    for (let i = 0; i < 3; i++) outs.push(h.engine.getRegexedString(`foo foo foo ${i}`, P.AI)); // distinct inputs: ③ must not serve them
+    outs.push(h.engine.getRegexedString('xy dup', P.AI));
+    const root = panel(true);
+    const rows = [...root.querySelectorAll('#rpk_lint_list li[data-rule]')].map(li => ({ rule: li.dataset.rule, script: li.dataset.script, fix: li.querySelector('.rpk-fix')?.textContent ?? null }));
+    const json = JSON.parse(await h.commands.regexperf.callback({}, 'json'));
+    const saves = h.st.counters.saveSettings;
+    root.querySelector('#rpk_lint_list li[data-rule="missing-g"] .rpk-fix')?.click(); // the confirm popup resolves at once in the harness
+    await sleep(30);
+    const fixed = h.extension_settings.regex.find(s => s.id === noG.id).findRegex;
+    rowOf(root, 'Ref').querySelector('.rpk-off').click(); // no Regex drawer in the page: the engine's save is used
+    await sleep(30);
+    const off = h.extension_settings.regex.find(s => s.scriptName === 'Ref').disabled;
+    return { outs, rows, lint: json.lint, fixed, off, saves: h.st.counters.saveSettings - saves, popups: h.popups.length, toasts: h.toasts.map(([, m]) => m) };
+}
+
+/** Feature list 2.1. Cost chips in the Regex extension's own list, kept up to date when SillyTavern re-renders it. */
+export async function listBadges(h) {
+    const s = script({ scriptName: 'Status card', findRegex: '/<status>([\\s\\S]*?)<\\/status>/g', replaceString: '$1', markdownOnly: true });
+    await useScripts(h, [s]);
+    const list = document.getElementById('saved_regex_scripts'); // the harness page has the drawer's global list
+    const render = () => { list.innerHTML = `<div id="${s.id}" class="regex-script-label"><span class="regex_script_name">Status card</span></div>`; };
+    render();
+    for (let i = 0; i < 5; i++) h.engine.getRegexedString(`<status>${i}</status>`, P.AI, { isMarkdown: true });
+    await sleep(1200); // the panel's refresh interval installs the observer and draws the chip
+    const chip1 = list.querySelector('.rpk-chip')?.textContent ?? null;
+    render(); // SillyTavern re-renders the list: the chip must come back
+    await sleep(150);
+    const chip2 = list.querySelector('.rpk-chip')?.textContent ?? null;
+    list.innerHTML = '';
+    return { chip1, chip2 };
 }
 
 /** tests/screenshots.mjs: a realistic session in the panel (the corpus chat, a measurement, a per-row stopwatch). */

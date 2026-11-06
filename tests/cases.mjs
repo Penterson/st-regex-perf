@@ -381,7 +381,7 @@ test('spike samples: the newest run over 50 ms keeps its input length and first 
     assert.doesNotMatch(section, /^Changes:/m, 'only scripts with a spike');
     assert.equal(row(reportRows(r.text), 'Slow macro').Script, 'Slow macro', 'the table is still parsed up to the section');
     const long = (await each('insights', { longHead: true }, { variants: ['current'] })).current;
-    assert.match(long.badges['Slow macro']['⚡'], /on 101 characters, starting "@{80}"$/, 'the sample is cut at 80 characters');
+    assert.match(long.badges['Slow macro']['⚡'], /on 101 characters, starting "@{80}"(\n|$)/, 'the sample is cut at 80 characters');
 });
 
 test('exports and slash verbs: JSON and CSV (buttons and /regexperf), /regexperf measure, /regexperf off <name>', async ({ each }) => {
@@ -408,8 +408,9 @@ test('exports and slash verbs: JSON and CSV (buttons and /regexperf), /regexperf
     assert.match(r.measureShown, /^This chat \(1 messages\)/, 'the panel shows it too');
     assert.equal(r.offMissing, '"nope" is not in the Regex extension\'s list.');
     assert.equal(r.offAmbiguous, 'Turned off: Beta', 'an exact name wins over a longer one containing it');
-    assert.equal(r.offExact, 'Turned off: Beta');
-    assert.equal(r.offPartial, 'Turned off: Betamax', 'a unique partial match works');
+    // Beta is off now (saved through the engine, so the script info knows at once): "beta" only matches Betamax
+    assert.equal(r.offExact, 'Turned off: Betamax', 'a unique partial match works');
+    assert.equal(r.offPartial, '"max" is not in the Regex extension\'s list.', 'both are off: nothing active matches');
     assert.equal(r.offNone, 'Usage: /regexperf off <script name>');
     assert.deepEqual(r.disabled, [false, true, true]);
     assert.match(r.help, /\/regexperf json|\/regexperf csv|\/regexperf measure|\/regexperf off/);
@@ -430,18 +431,18 @@ test('chat open: optional auto-measure and a one-time hint when the first render
 
 test('reset settings restores the defaults; open sections are remembered across loads', async ({ each }) => {
     const r = (await each('resetSettings', null, { variants: ['current'] })).current;
-    assert.deepEqual(r.openAtStart, { limits: false, legend: false, tips: false }, 'closed by default');
+    assert.deepEqual(r.openAtStart, { limits: false, lint: false, legend: false, tips: false }, 'closed by default');
     assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3 }, 'defaultSettings');
+    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
     assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistMaxMB: '8' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
     assert.deepEqual(r.uiAfterOpen, { limits: true }, 'opening a section is remembered');
     assert.deepEqual(r.uiAfterClose, { limits: false });
     const again = (await each('resetSettings', null, { settings: { ui: { limits: true, tips: true } }, variants: ['current'] })).current;
-    assert.deepEqual(again.openAtStart, { limits: true, legend: false, tips: true }, 'remembered sections open on load');
+    assert.deepEqual(again.openAtStart, { limits: true, lint: false, legend: false, tips: true }, 'remembered sections open on load');
 });
 
 test('other wrappers of RegexProvider.instance.get are noticed, at patch time and later, and warned about once', async ({ each }) => {
@@ -465,8 +466,9 @@ test('other wrappers of RegexProvider.instance.get are noticed, at patch time an
 test('item 14: a table row opens its script in the regex editor; its off button disables the script', async ({ each }) => {
     const r = await each('rowActions', null, { variants: ['current'] });
     const [alpha, beta] = r.current.ids;
-    assert.deepEqual(r.current.events, [`edit ${alpha}`, `save ${beta} disabled=true`]);
+    assert.deepEqual(r.current.events, [`edit ${alpha}`], 'opening uses the drawer; turning off goes through the engine, not the switch');
     assert.deepEqual(r.current.disabled, [false, true]);
+    assert.ok(beta);
     assert.equal(r.current.unknownHasActions, false, 'patterns that are not scripts get no actions');
 });
 
@@ -562,7 +564,7 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
@@ -753,6 +755,54 @@ test('feature list 1.5: the report and the badges explain each backtracking risk
     assert.match(section, /^Dot: \(\.\|\\n\)\* → a character class such as \[\\s\\S\]$/m);
     assert.doesNotMatch(section, /^Fine:/m);
     assert.deepEqual([r.counts.redos, r.counts.redosExp], [2, 1]);
+});
+
+test('feature list 2.2: invalid patterns are listed with the engine\'s error in the summary, the report and the JSON', async ({ each }) => {
+    const r = (await each('invalidList', null, { variants: ['current'] })).current;
+    assert.equal(r.out, 'OK (abc', 'SillyTavern leaves the text alone for a broken script');
+    assert.equal(r.invalid.length, 1);
+    assert.equal(r.invalid[0].name, 'Broken');
+    assert.equal(r.invalid[0].type, 'global');
+    assert.match(r.invalid[0].error, /Unterminated group/);
+    assert.equal(r.counts.invalid, 1);
+    assert.match(r.summary, /Invalid patterns \(1\), doing nothing: Broken \(Invalid regular expression: \/\(abc\/g: Unterminated group\)/);
+    assert.match(r.report, /^Invalid patterns \(1\)\nBroken: Invalid regular expression: \/\(abc\/g: Unterminated group$/m);
+});
+
+test('feature list 2.2: spikes keep a history with the message; the ⚡ badge scrolls to it; a repro can be copied', async ({ each }) => {
+    const r = (await each('spikes', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.spikes.map(s => s.messageId), [2, 1, 0], 'newest first');
+    assert.deepEqual(r.spikes.map(s => s.len), [31, 31, 31]);
+    assert.deepEqual(r.scrolled, ['2']);
+    assert.match(r.copied, /^\/@\/g\n31 chars\n"@{30}2"$/);
+    assert.match(r.title, /Click to scroll to message #2/);
+    assert.match(r.title, /\n[\d.]+ ms on 31 characters \(#1\)\n[\d.]+ ms on 31 characters \(#0\)/);
+    assert.match(r.report, /^Slow macro: Last spike: [\d.]+ ms on 31 characters, starting "@{30}2" \(#2\)\n {2}[\d.]+ ms \/ 31 \(#1\)\n {2}[\d.]+ ms \/ 31 \(#0\)$/m);
+    assert.ok(r.toasts.includes('Copied to the clipboard.'));
+});
+
+test('feature list 2.3: lint rows (missing g, group references, double escapes, browser support, duplicates); a fix and the off switch save through the engine', async ({ each }) => {
+    const r = (await each('lintRules', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.outs, ['bar foo foo 0', 'bar foo foo 1', 'bar foo foo 2', 'xY 1']);
+    const rules = Object.fromEntries(r.rows.map(x => [x.rule, x]));
+    assert.deepEqual(Object.keys(rules).sort(), ['browser-compat', 'double-escape', 'duplicate', 'group-ref', 'missing-g']);
+    assert.deepEqual([rules['missing-g'].script, rules['missing-g'].fix], ['NoG', 'Add g']);
+    assert.deepEqual([rules['group-ref'].script, rules['group-ref'].fix], ['Ref', null]);
+    assert.deepEqual([rules['double-escape'].script, rules['double-escape'].fix], ['Esc', 'Unescape']);
+    assert.deepEqual([rules['browser-compat'].script, rules['browser-compat'].fix], ['Look', null]);
+    assert.deepEqual([rules.duplicate.script, rules.duplicate.fix], ['Dup1, Dup2', null]);
+    assert.ok(r.lint.some(x => x.rule === 'missing-g' && x.fixable && x.ids.length === 1), JSON.stringify(r.lint));
+    assert.equal(r.fixed, '/foo/g', 'the fix was saved through saveScriptsByType');
+    assert.equal(r.off, true, 'turned off through saveScriptsByType, no Regex drawer in the page');
+    assert.ok(r.saves >= 2, `saveSettingsDebounced ran for both saves (${r.saves})`);
+    assert.ok(r.popups >= 1, 'the fix was confirmed in a popup first');
+    assert.ok(r.toasts.includes('Saved: NoG') && r.toasts.includes('Turned off: Ref'), r.toasts.join(' | '));
+});
+
+test('feature list 2.1: a cost chip after each script in the Regex extension\'s list, restored when the list is re-rendered', async ({ each }) => {
+    const r = (await each('listBadges', null, { variants: ['current'] })).current;
+    assert.match(r.chip1 ?? '', /^[\d.]+ ms · \d+%$/, `chip ${r.chip1}`);
+    assert.equal(r.chip2, r.chip1);
 });
 
 test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with a note', async ({ each }) => {

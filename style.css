@@ -375,3 +375,26 @@
     overflow: auto;
     max-height: 70vh;
 }
+
+/* cost chips in the Regex extension's own list (feature list 2.1) */
+.rpk-chip {
+    margin-left: 0.4em;
+    font-size: 0.8em;
+    opacity: 0.75;
+    white-space: nowrap;
+}
+
+/* lint (feature list 2.3) */
+.regex-perf-kit .rpk-lint li {
+    margin: 0.2em 0;
+}
+.regex-perf-kit .rpk-lint .rpk-fix {
+    display: inline-block;
+    padding: 0 0.5em;
+    font-size: 0.85em;
+    margin-left: 0.4em;
+}
+.regex-perf-kit .rpk-lint .rpk-edit {
+    cursor: pointer;
+    margin-left: 0.3em;
+}
