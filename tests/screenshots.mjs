@@ -2,6 +2,7 @@
 // with a SillyTavern-like theme (tests/harness/theme.css) after a realistic session (the screenshot scenario).
 // Usage: node tests/screenshots.mjs [locale]   (default ko-kr)
 import { mkdir } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { launch } from './server.mjs';
 
 const locale = process.argv[2] ?? 'ko-kr';
@@ -14,7 +15,7 @@ for (const [name, width] of [['desktop', 1000], ['mobile', 390]]) {
     await page.waitForFunction('window.__ready === true');
     await page.evaluate(() => window.__run('screenshot', {}));
     const panel = await page.$('#regex_perf_kit');
-    const path = new URL(`../docs/screenshot-${name}.png`, import.meta.url).pathname;
+    const path = fileURLToPath(new URL(`../docs/screenshot-${name}.png`, import.meta.url));
     await panel.screenshot({ path });
     console.log(`${path} (${width}px wide)`);
     await page.close();

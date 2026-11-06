@@ -1803,7 +1803,7 @@ function lintRows() {
         if (info.flags.includes('d')) compat.push(t`the d flag`);
         const names = info.source.match(/\(\?<([^>=!][^>]*)>/g) ?? [];
         if (new Set(names).size < names.length) compat.push(t`duplicate group names`);
-        if (compat.length) rows.push({ rule: 'browser-compat', info, text: t`Not supported by every browser: ${compat.join(', ')} (invalid on iOS and Safari before 16.4 / 17, where the script does nothing)`, fix: null });
+        if (compat.length) rows.push({ rule: 'browser-compat', info, text: t`Not supported by every browser: ${compat.join(', ')} (invalid in older browsers, such as Safari and iOS before 16.4 for lookbehind, 17 for the v flag and duplicate group names, 15 for the d flag, where the script does nothing)`, fix: null });
         if (info.ids.length > 1) rows.push({ rule: 'duplicate', info, text: t`Several scripts share this pattern (${info.name}): one wrapper serves all of them, so ③ and ④ apply only when they suit every one`, fix: null });
     }
     return rows;
@@ -1995,7 +1995,7 @@ const headerHtml = () => `<tr>
             ${th('rank', '#')}${th('name', t`Script`)}
             ${th('runs', t`Runs`, t`Regex runs that really happened`)}${th('total', t`Total ms`)}${th('avg', t`Avg`, t`Time per run, averaged`)}${th('max', t`Max`, t`Slowest single run`)}
             ${th('repl', t`Replacer`, t`Time spent in the replacement (group filling, trim strings, macros), included in Total ms`)}${th('matched', t`Matched`, t`Runs where the pattern matched, even if the text came out the same`)}${th('changed', t`Changed`, t`Runs that changed the text`)}
-            ${th('skips', t`Skips`, t`Runs skipped by ② (the fixed text was absent)`)}${th('hits', t`Hits`, t`Results reused by ③`)}${th('lit', t`Literal`, t`The fixed text ② looks for before running this script: every literal joined by & must be present, one of those joined by |. Hover a cell for the shortest possible match.`)}${th('act', '')}
+            ${th('skips', t`Skips`, t`Runs skipped by ② (the fixed text was absent, or the message was shorter than the least possible match)`)}${th('hits', t`Hits`, t`Results reused by ③`)}${th('lit', t`Literal`, t`The fixed text ② looks for before running this script: every literal joined by & must be present, one of those joined by |. Hover a cell for the shortest possible match.`)}${th('act', '')}
           </tr>`;
 
 const settingsHtml = () => `
@@ -2012,13 +2012,13 @@ const settingsHtml = () => `
       <div class="rpk-features">
         <div class="rpk-feature-group">
         ${feature('rpk_profiler', t`① Measure run time (profiler)`, t`Counts how often each script runs and how long it takes, for the table below. Costs almost nothing.`)}
-        ${feature('rpk_profilerSampling', t`Sample: past 1000 runs of a script, time 1 run in 8`, t`Timing is two clock reads per run; with sampling, the totals of a busy script are scaled from every eighth run. On by default on devices with 4 GB or less.`, { sub: true })}
+        ${feature('rpk_profilerSampling', t`Sample: past 1000 runs of a script, time 1 run in 8`, t`Timing is two clock reads per run; with sampling, the totals of a busy script are scaled from every eighth run. On by default on devices reporting 4 GB or less (only Chromium-based browsers report it).`, { sub: true })}
         ${feature('rpk_timeReplacer', t`Time the replacement separately (the Replacer column)`, t`Two more clock reads per match. Off, that column stays 0.`, { sub: true })}
         </div>
         ${feature('rpk_prefilter', t`② Skip runs that cannot match (literal prefilter)`, t`If the message does not even contain the fixed text a script looks for (such as &lt;/status&gt;), the regex is not run. The result is exactly the same.`)}
         <div class="rpk-feature-group">
         ${feature('rpk_memo', t`③ Reuse results (memory cache)`, t`When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with {{macros}} are left out automatically.`)}
-        ${feature('rpk_memoStatic', t`Also cache scripts that use {{user}}, {{char}}, {{persona}} or {{group}}`, t`These macros keep their value while a message is rendered, so the result is cached per name set and computed again after a rename or a persona change. Other macros still exclude a script.`, { sub: true })}
+        ${feature('rpk_memoStatic', t`Also cache scripts that use {{user}}, {{char}}, {{persona}} or {{group}}`, t`These macros keep their value while a message is rendered, so the result is cached per name set and computed again after a rename or a persona change. Other macros still exclude a script. Needs the MessageFormatter hooks, like ⑤ (display renders only).`, { sub: true })}
         ${feature('rpk_memoPostHoc', t`Also cache messages that show macro syntax`, t`A message with {{ outside the matched text (a code sample, for instance) is cached when no match itself contained macro syntax.`, { sub: true })}
         </div>
         <div class="rpk-feature-group">
@@ -2044,7 +2044,7 @@ const settingsHtml = () => `
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
           ${limit('fuseLen', t`⑦ Fuse: longest input a risky pattern runs on (characters)`)}
           ${limit('breakerMs', t`⑧ Breaker: a run counts as long over (ms)`)}
-          ${limit('breakerCount', t`⑧ Breaker: long runs before the script is turned off`)}
+          ${limit('breakerCount', t`⑧ Breaker: long runs that turn the script off`)}
           ${limit('memoHashKeys', t`③ Key the cache by a hash of the input`, t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`, 'checkbox')}
           ${limit('loadHintMs', t`Hint about "# Messages to Load" when opening a chat takes longer than (ms)`, t`Shown once per session as a toast.`)}
           ${limit('autoMeasure', t`Measure automatically when a chat opens`, t`Runs "Measure on this chat" once after a chat opens.`, 'checkbox')}
@@ -2190,7 +2190,7 @@ function renderPanel() {
     }).join('') || `<tr><td colspan="13" class="rpk-dim rpk-empty">${nameFilter && s.rows.length ? t`No script name contains "${nameFilter}".` : t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
 
     setContent(ui.note, !persistAvailable
-        ? t`⑤ and the compromise mode need a newer SillyTavern (staging with MessageFormatter hooks).`
+        ? t`⑤, the compromise mode and ③'s name-macro option need a newer SillyTavern (staging with MessageFormatter hooks).`
         : settings.persist ? t`⑤ is on: display results are being saved in this chat. Changing a script invalidates them automatically.` : '', 'textContent');
     setContent(ui.usage, s.usage, 'textContent');
     setContent(ui.measure, measured ? `<p>${esc(measureText(measured))}</p><p class="rpk-dim">${esc(slowestText(measured))}</p>` : '');
@@ -2244,7 +2244,7 @@ function bindUi() {
             renderPanel();
         });
     }
-    if (!persistAvailable) find('#rpk_persist').disabled = find('#rpk_stream_throttle').disabled = true;
+    if (!persistAvailable) find('#rpk_persist').disabled = find('#rpk_stream_throttle').disabled = find('#rpk_memoStatic').disabled = true;
 
     for (const [key, [min, max]] of Object.entries(LIMITS)) {
         const el = find('#rpk_' + key);

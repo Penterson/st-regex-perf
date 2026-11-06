@@ -310,13 +310,18 @@
     padding-right: 6px;
 }
 
-/* Narrow drawers (phones, a slim extensions column): keep the columns that answer "what is slow and what was
-   skipped", and leave the averages, replacer time and literal to the text report. */
+/* Narrow drawers (phones, a slim extensions column): every column stays, the table scrolls sideways inside
+   .rpk-table-wrap, and the script name sticks to the left edge so a row can be read while scrolling. */
 @container (max-width: 560px) {
-    .regex-perf-kit .rpk-table .rpk-col-avg,
-    .regex-perf-kit .rpk-table .rpk-col-repl,
-    .regex-perf-kit .rpk-table .rpk-col-lit {
-        display: none;
+    .regex-perf-kit .rpk-table .rpk-col-name {
+        position: sticky;
+        left: 0;
+        z-index: 1;
+        background: var(--SmartThemeBlurTintColor, rgba(0, 0, 0, 0.6));
+    }
+
+    .regex-perf-kit .rpk-table thead .rpk-col-name {
+        z-index: 2; /* the corner cell stays above both the sticky header and the sticky column */
     }
 
     .regex-perf-kit .rpk-table td.rpk-col-name {
@@ -325,16 +330,13 @@
 }
 
 @container (max-width: 400px) {
-    .regex-perf-kit .rpk-table .rpk-col-changed,
-    .regex-perf-kit .rpk-table .rpk-col-matched,
-    .regex-perf-kit .rpk-table .rpk-col-max,
-    .regex-perf-kit .rpk-act .rpk-row-ms {
-        display: none;
-    }
-
     .regex-perf-kit .rpk-table th,
     .regex-perf-kit .rpk-table td {
         padding-right: 5px;
+    }
+
+    .regex-perf-kit .rpk-table td.rpk-col-name {
+        max-width: 120px;
     }
 
     .regex-perf-kit .rpk-act span {

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- The settings panel lists the features in order, ① to ⑧ (⑥ sat between ③ and ④).
+- Narrow panels (phones) no longer hide the Avg, Replacer, Max, Matched and Changed columns: the table scrolls sideways and the Script column sticks to the left.
+- ③'s name-macro option says that it needs the MessageFormatter hooks (its key is only resolved in a display render), and its checkbox is disabled with ⑤'s where they are missing.
+- Wording: the ∅ mark and the "never matched" line say 20 runs or more (the code counts `>=`); the ⑧ count limit no longer reads as runs that are tolerated; the Skips tooltip mentions the minimum-length skip; the sampling default says "devices reporting 4 GB or less"; the browser-support lint names the version per feature (lookbehind 16.4, v flag and duplicate group names 17, d flag 15, on Safari and iOS); the READMEs say "the browser's" template replace instead of V8's; Korean particles after script names are 이(가) and are attached.
+- `npm run screenshots` works on Windows (the output path is built with `fileURLToPath`).
+
 ## 0.3.0 — 2026-11-06
 
 ### Measurements
