@@ -112,7 +112,7 @@ async function startServer() {
 export async function launch() {
     await fetchSt();
     const server = await startServer();
-    const browser = await puppeteer.launch({ executablePath: chromePath(), headless: true, args: ['--no-sandbox'] });
+    const browser = await puppeteer.launch({ executablePath: chromePath(), headless: true, args: ['--no-sandbox', '--lang=en-US'] });
     return {
         server,
         browser,
