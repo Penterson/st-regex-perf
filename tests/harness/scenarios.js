@@ -1102,6 +1102,50 @@ export async function fastPathAssembled(h) {
     return [h.engine.getRegexedString('{x{user}}', P.AI), h.engine.getRegexedString('{x{user}} and {x{user}}', P.AI)];
 }
 
+/**
+ * Feature list 1.2. A display script whose replacement is {{char}} is memoized per value set: hits while name2 stays
+ * (whoever the message author is: replacements resolve {{char}} to name2), a miss after a rename; a {{random}} script
+ * is never memoized.
+ */
+export async function memoStatic(h) {
+    h.st.setState({ name1: 'Ann', name2: 'Cat', chat: [msg('me', { name: 'Cat' }), msg('me', { name: 'Kit' }), msg('roll [d]', { name: 'Cat' })] });
+    await useScripts(h, [
+        script({ scriptName: 'Who', findRegex: '/\\bme\\b/g', replaceString: '{{char}}', markdownOnly: true }),
+        script({ scriptName: 'Dice', findRegex: '/\\[d\\]/g', replaceString: '{{random::1::2::3::4::5::6}}', markdownOnly: true }),
+    ]);
+    const render = (i) => h.st.messageFormatting(h.st.chat[i].mes, h.st.chat[i].name, false, false, i);
+    const outs = [render(0), render(0), render(1), render(1)];
+    h.st.setState({ name2: 'Dog' });
+    outs.push(render(0), render(2), render(2));
+    const json = h.commands.regexperf ? JSON.parse(await h.commands.regexperf.callback({}, 'json')) : null;
+    return { outs, hits: Object.fromEntries(json?.rows.map(r => [r.name, r.hits]) ?? []) };
+}
+
+/** Feature list 1.2. An input with macro syntax outside the matches is memoized; one with it inside a match is not. */
+export async function memoPostHoc(h) {
+    await useScripts(h, [script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>' })]);
+    h.st.setState({ name1: 'Ann', name2: 'Cat' });
+    const hitsOf = async () => (h.commands.regexperf ? JSON.parse(await h.commands.regexperf.callback({}, 'json')).rows.find(r => r.name === 'Bold')?.hits ?? 0 : 0);
+    const outside = 'use {{user}} like this: **x**';
+    const outs = [h.engine.getRegexedString(outside, P.AI), h.engine.getRegexedString(outside, P.AI)];
+    const afterOutside = await hitsOf();
+    const inside = 'say **{{user}}** now';
+    outs.push(h.engine.getRegexedString(inside, P.AI));
+    h.st.setState({ name1: 'Bob' });
+    outs.push(h.engine.getRegexedString(inside, P.AI));
+    return { outs, afterOutside, afterInside: await hitsOf() };
+}
+
+/** Feature list 1.2. A run that leaves the text as it is stores a marker, not a copy of the output. */
+export async function memoSame(h) {
+    applyProfile(h, { prefilter: false });
+    await useScripts(h, [script({ scriptName: 'Nine', findRegex: '/\\d{9}/g', replaceString: '#' })]);
+    const str = 'letters only '.repeat(77); // 1001 characters, no digits
+    const out = [h.engine.getRegexedString(str, P.AI), h.engine.getRegexedString(str, P.AI)];
+    const json = h.commands.regexperf ? JSON.parse(await h.commands.regexperf.callback({}, 'json')) : null;
+    return { same: out[0] === str && out[1] === str, bytes: json?.memo.bytes ?? 0, hits: json?.rows[0]?.hits ?? 0, len: str.length };
+}
+
 /** tests/screenshots.mjs: a realistic session in the panel (the corpus chat, a measurement, a per-row stopwatch). */
 export async function screenshot(h) {
     const corpus = await import('./corpus.js');

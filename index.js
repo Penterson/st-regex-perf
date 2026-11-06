@@ -20,14 +20,19 @@ const { t, translate, extensionSettings, eventSource, event_types, getCurrentLoc
 
 // ---- Settings ----
 
+// Chromium reports the device's memory class (GB, rounded), other browsers nothing: the memo's default size follows it.
+const deviceMemory = Number(globalThis.navigator?.deviceMemory) || 0;
+
 const defaultSettings = {
     profiler: true,
     prefilter: true,
     memo: true,
+    memoStatic: true, // ③ also for scripts whose only macros are {{user}} {{char}} {{persona}} {{group}}: keyed by their values
+    memoPostHoc: true, // ③ also for inputs with macro syntax outside the matched text
     fastPath: true, // ⑥ macro-free replacements run as a native string template instead of SillyTavern's callback
     memoMaxEntries: 3000,
     memoMaxLen: 20000,
-    memoMaxMB: 64,
+    memoMaxMB: deviceMemory && deviceMemory <= 2 ? 16 : deviceMemory && deviceMemory <= 4 ? 32 : 64,
     streamingSkip: true,
     streamingThrottle: false, // ④ compromise mode: format the streamed message at most every streamingThrottleMs
     streamingThrottleMs: 500,
@@ -85,6 +90,10 @@ function liveStream() {
 
 // SillyTavern's macro syntax: {{...}} and the legacy <USER> <BOT> <CHAR> <GROUP> <CHARIFNOTGROUP> markers.
 const MACRO = /{{|<(?:user|bot|char(?:ifnotgroup)?|group)>/i;
+// Macros whose value holds for a whole message render: {{user}} {{char}} {{persona}} {{group}} and the legacy markers
+// SillyTavern maps to them. A replacement or trim string using only these is memoized per value set (feature list 1.2);
+// any other macro, known or not, keeps the script out of ③.
+const STATIC_MACRO = /{{(?:user|char|persona|group)}}|<(?:user|bot|char|group)>/gi;
 
 let macroIn = null;
 let macroOut = false;
@@ -111,9 +120,10 @@ const BAIL = Symbol('bail');
 
 // ② Literal presence per input: each literal (or case-insensitive check) gets a small id, and an input's answers are
 // kept in an array by id, so a string flowing through every script is scanned once per literal. The last input needs
-// no hashing; with keep (displayed messages, which re-render) the LIT_CACHE_MAX most recent inputs up to the memo's
+// no hashing; with keep (displayed messages, which re-render) the litCacheMax() most recent inputs up to the memo's
 // length limit are remembered too. Save-time inputs never come back, so hashing them would cost more than it saves.
-const LIT_CACHE_MAX = 256;
+let chatLen = 0; // messages in the current chat: a re-render brings each displayed one back, so the cache grows with it
+const litCacheMax = () => Math.max(256, 2 * chatLen);
 const litIds = new Map(); // literal or "\0source/flags" -> id
 const litCache = new Map(); // input -> answers by id
 let litIn = null;
@@ -131,7 +141,7 @@ function litPresent(str, id, lit, re, keep) {
         } else {
             litSeen = litCache.get(str);
             if (!litSeen) {
-                if (litCache.size >= LIT_CACHE_MAX) litCache.delete(litCache.keys().next().value);
+                if (litCache.size >= litCacheMax()) litCache.delete(litCache.keys().next().value);
                 litCache.set(str, litSeen = []);
             }
         }
@@ -620,13 +630,19 @@ function buildInfo() {
 
             // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
             const replacement = replaceString.replace(/{{match}}/gi, '$0');
+            // No macros, and no group reference that could complete one (<$1>, {$1}): the output then depends only
+            // on the input, so it can be memoized. semiPure: the same once the static macros are taken out, so it
+            // depends on the input and their values.
+            const pureOf = (rep, trimList) => !MACRO.test(rep) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(rep) && !trimList.some(trim => MACRO.test(String(trim)));
+            const pure = pureOf(replacement, trims);
+            const strippedTrims = trims.map(trim => String(trim).replace(STATIC_MACRO, ''));
+            const semiPure = !pure && pureOf(replacement.replace(STATIC_MACRO, ''), strippedTrims);
             const info = {
                 name: s.scriptName || t`(no name)`,
                 markdownOnly: !!s.markdownOnly,
-                // No macros, and no group reference that could complete one (<$1>, {$1}): the output then depends
-                // only on the input, so it can be memoized.
-                pure: !MACRO.test(replacement) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(replacement)
-                    && !trims.some(trim => MACRO.test(String(trim))),
+                pure,
+                semiPure,
+                semiPureTrims: semiPure && strippedTrims.some((trim, k) => trim !== String(trims[k])), // a trim string holds a static macro
                 replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
                 needle,
                 ids: [s.id], // for the row actions in the table
@@ -638,6 +654,8 @@ function buildInfo() {
                 info.ids = [...prev.ids, s.id];
                 info.markdownOnly &&= prev.markdownOnly;
                 info.pure &&= prev.pure && prev.replaceSig === info.replaceSig;
+                info.semiPure &&= prev.semiPure && prev.replaceSig === info.replaceSig;
+                info.semiPureTrims &&= info.semiPure;
                 info.statKey = prev.statKey;
                 info.raw = prev.raw;
                 for (const d of dynamic) if (d.info === prev) d.info = info;
@@ -699,6 +717,31 @@ const conflicts = new Map(); // "earlierKey\0laterKey" -> {earlier, later, count
 let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
 let displayPass = false; // set by the formatter hooks while a message is being formatted for display
 
+// ③ for static-macro scripts: what {{user}} {{char}} {{persona}} {{group}} resolve to in the display pass being
+// formatted (null outside one), as SillyTavern resolves them for a replacement and, with the message author as
+// {{char}}, for a trim string. Recomputed only when the names, group or persona behind them change.
+let passChName = null; // the message author of the display pass being formatted (null outside one)
+let passStatic = null;
+let passStaticTrim = null;
+let staticFp = null;
+let staticVals = null;
+/** The key for a static-macro script in this pass (level 2: a trim string holds one), resolved on first use. */
+function staticKeyFor(level) {
+    if (passStatic === null) setPassStatic(passChName);
+    return level === 2 ? passStaticTrim : passStatic;
+}
+function setPassStatic(chName) {
+    const { name1, name2, groupId, groups, powerUserSettings, substituteParams } = ctx();
+    const group = groupId ? groups?.find?.(g => g.id === groupId) : null;
+    const fp = [name1, name2, chName, groupId, group?.members?.join(), group?.disabled_members?.join(), powerUserSettings?.persona_description].join('\u0000');
+    if (fp !== staticFp) {
+        staticFp = fp;
+        const base = substituteParams('{{user}}\u0000{{char}}\u0000{{persona}}\u0000{{group}}');
+        staticVals = [fnv1a(base), fnv1a(base + '\u0000' + substituteParams('{{char}}', { name2Override: chName }))];
+    }
+    [passStatic, passStaticTrim] = staticVals;
+}
+
 // ③ Memo: memoPrefix -> Map(key -> entry). The key is the input itself (no key is built per call; V8 caches string
 // hashes) or, with memoHashKeys, its 64-bit hash and length, so the entry holds no input: half the memory, for the
 // cost of hashing every input and the chance of a collision returning another input's result. memoLru orders all
@@ -751,7 +794,7 @@ class PerfRegExp extends RegExp {
     }
 
     [Symbol.replace](str, replacer) {
-        const { stat, markdownOnly, test, memoPrefix } = this._meta;
+        const { stat, markdownOnly, test, memoPrefix, memoStatic } = this._meta;
 
         if (stat === skipStat) return str;
         if (bypass && displayPass) { // a stored ⑤ result is being shown for this message
@@ -772,17 +815,22 @@ class PerfRegExp extends RegExp {
 
         let bucket;
         let memoKey;
-        // Matched text with macros is substituted again after the groups are inserted, so it is not memoized.
-        if (settings.memo && memoPrefix && str.length <= settings.memoMaxLen && !hasMacro(str)) {
+        let postHoc = false; // the input has macro syntax: memoized only if no match contains any (checked as the callback runs)
+        // Matched text with macros is substituted again after the groups are inserted, so it is not memoized. A script
+        // with static macros is keyed by their values, which are known inside a display pass only.
+        const staticKey = memoStatic === 0 ? '' : settings.memoStatic && passChName !== null ? staticKeyFor(memoStatic) : null;
+        if (settings.memo && memoPrefix && staticKey !== null && str.length <= settings.memoMaxLen
+            && (!hasMacro(str) || (postHoc = settings.memoPostHoc && typeof replacer === 'function'))) {
             bucket = memo.get(memoPrefix);
             if (!bucket) memo.set(memoPrefix, bucket = new Map());
             memoKey = settings.memoHashKeys ? hash64(str) + ':' + str.length : str;
+            if (staticKey) memoKey = staticKey + '\u0000' + memoKey;
             const hit = bucket.get(memoKey);
             if (hit) {
                 memoLru.delete(hit); // mark as most recently used
                 memoLru.add(hit);
                 stat.hits++;
-                return done(stat, str, hit.out);
+                return done(stat, str, hit.same ? str : hit.out);
             }
         }
 
@@ -794,6 +842,7 @@ class PerfRegExp extends RegExp {
         let fn = replacer;
         let out;
         let fastRun = false;
+        let macroSeen = false; // a match contained macro syntax: SillyTavern substituted it, the result is not memoizable
         const t0 = profile ? performance.now() : 0;
         // ⑥ With no macro syntax in the input, SillyTavern's per-match callback amounts to its template, which V8 applies
         // without a JS call per match. Should group text assemble macro syntax anyway, the callback is used instead.
@@ -812,13 +861,14 @@ class PerfRegExp extends RegExp {
             // fast-path script's first runs, what the template gives for each match is compared with the callback's
             // result (self-verification): one difference turns ⑥ off for the script.
             let checked = false;
-            if (typeof replacer === 'function' && (profile || fast)) {
+            if (typeof replacer === 'function' && (profile || fast || postHoc)) {
                 const meta = this._meta;
                 fn = function () {
                     matched = true;
                     const t1 = profile ? performance.now() : 0;
                     const r = replacer.apply(this, arguments);
                     if (profile) replMs += performance.now() - t1;
+                    if (postHoc && !macroSeen && MACRO.test(arguments[0])) macroSeen = true;
                     if (fast && meta.fast) {
                         const mine = fast.template !== null ? expandTemplate(fast.template, arguments) : fast.replacer.apply(this, arguments);
                         if (MACRO.test(mine)) return r; // the fast path would have fallen back here: nothing to compare
@@ -856,10 +906,12 @@ class PerfRegExp extends RegExp {
         }
         this.lastIndex = native.lastIndex; // leave this regex as a native replace would
 
-        if (bucket) {
-            const size = (memoKey.length + out.length) * 2;
+        if (bucket && !macroSeen) {
+            // an unchanged output is kept as a marker: V8 shares the string anyway, and counting it twice evicts early
+            const same = out === str;
+            const size = (memoKey.length + (same ? 0 : out.length)) * 2;
             if (size <= settings.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
-                const entry = { bucket, key: memoKey, out, size };
+                const entry = { bucket, key: memoKey, out: same ? null : out, same, size };
                 bucket.set(memoKey, entry);
                 memoLru.add(entry);
                 memoBytes += size;
@@ -951,7 +1003,8 @@ function patchProvider() {
                 stat,
                 markdownOnly: !!info?.markdownOnly,
                 test: stat.needle.test,
-                memoPrefix: info?.pure ? key + '\u0001' + info.replaceSig + '\u0001' : null,
+                memoPrefix: info?.pure || info?.semiPure ? key + '\u0001' + info.replaceSig + (info.pure ? '\u0001' : '\u0002') : null,
+                memoStatic: info?.semiPure ? (info.semiPureTrims ? 2 : 1) : 0, // 1: static macros in the replacement, 2: in a trim string too
                 fast: info?.fast ?? null,
             };
             w._version = version;
@@ -990,7 +1043,7 @@ let streamTail = null; // raw text this pass appends after the regex stage
 /** Clears the state the two hooks share for one formatting pass. */
 function resetPass() {
     bypass = streamApply = displayPass = false;
-    pending = streamView = streamTail = null;
+    pending = streamView = streamTail = passChName = passStatic = passStaticTrim = null;
 }
 
 /**
@@ -1025,6 +1078,7 @@ function installPersistHooks() {
         resetPass();
         displayPass = true;
         if (c.messageId < 0 || c.isSystem) return mes;
+        passChName = c.ch_name ?? c.characterName ?? ''; // static-macro scripts resolve their key on first use
         const sp = settings.persist || settings.streamingThrottle ? liveStream() : null;
         if (sp) return settings.streamingSkip && settings.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;
         if (!settings.persist || c.isReasoning) return mes;
@@ -1413,7 +1467,11 @@ const settingsHtml = () => `
       <div class="rpk-features">
         ${feature('rpk_profiler', t`① Measure run time (profiler)`, t`Counts how often each script runs and how long it takes, for the table below. Costs almost nothing.`)}
         ${feature('rpk_prefilter', t`② Skip runs that cannot match (literal prefilter)`, t`If the message does not even contain the fixed text a script looks for (such as &lt;/status&gt;), the regex is not run. The result is exactly the same.`)}
+        <div class="rpk-feature-group">
         ${feature('rpk_memo', t`③ Reuse results (memory cache)`, t`When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with {{macros}} are left out automatically.`)}
+        ${feature('rpk_memoStatic', t`Also cache scripts that use {{user}}, {{char}}, {{persona}} or {{group}}`, t`These macros keep their value while a message is rendered, so the result is cached per name set and computed again after a rename or a persona change. Other macros still exclude a script.`, { sub: true })}
+        ${feature('rpk_memoPostHoc', t`Also cache messages that show macro syntax`, t`A message with {{ outside the matched text (a code sample, for instance) is cached when no match itself contained macro syntax.`, { sub: true })}
+        </div>
         ${feature('rpk_fastPath', t`⑥ Replace without SillyTavern's callback (fast path)`, t`When a script's replacement has no macros, the browser's own template replacement is used instead of SillyTavern's per-match callback, where most of the replacer time goes. The first runs of every script are compared with SillyTavern's result; on any difference the script goes back to the callback.`)}
         <div class="rpk-feature-group">
         ${feature('rpk_streaming', t`④ Rest display scripts while streaming`, t`While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. This removes most streaming lag.`)}
@@ -1484,7 +1542,7 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
+const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
 // editable limits: setting -> [min, max]
 const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], loadHintMs: [100, 600000] };
 
@@ -1763,9 +1821,13 @@ for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPE
     });
 }
 let loadHintShown = false; // once per session
+for (const event of [event_types.CHARACTER_MESSAGE_RENDERED, event_types.USER_MESSAGE_RENDERED]) {
+    if (event) eventSource.on(event, () => { chatLen++; });
+}
 eventSource.on(event_types.CHAT_CHANGED, () => {
     markDirty();
     streamViews.clear();
+    chatLen = ctx().chat?.length ?? 0;
     const now = performance.now();
     const loadMs = now - lastCall < BURST_GAP_MS ? lastCall - burstStart : 0; // the render burst that just ended
     if (!loadHintShown && loadMs > settings.loadHintMs) {

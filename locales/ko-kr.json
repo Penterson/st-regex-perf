@@ -156,5 +156,9 @@
     "Another extension replaced the regex engine's get() after Regex Perf Kit: the features may no longer apply. Check the extension load order.": "Regex Perf Kit 이후에 다른 확장이 정규식 엔진의 get()을 바꿈. 기능이 적용되지 않을 수 있음. 확장 로드 순서 확인 필요.",
     "⑥ Replace without SillyTavern's callback (fast path)": "⑥ 치환 고속 경로",
     "When a script's replacement has no macros, the browser's own template replacement is used instead of SillyTavern's per-match callback, where most of the replacer time goes. The first runs of every script are compared with SillyTavern's result; on any difference the script goes back to the callback.": "치환 문자열에 매크로가 없으면 SillyTavern의 콜백(매치마다 실행되며 치환 시간의 대부분을 차지) 대신 브라우저 자체의 템플릿 치환 사용. 스크립트마다 처음 몇 번은 SillyTavern의 결과와 대조하고, 한 번이라도 다르면 그 스크립트는 콜백으로 복귀.",
-    "⑥ fast path: ${0} runs without SillyTavern's callback": "⑥ 고속 경로: ${0}회는 SillyTavern 콜백 없이 치환"
+    "⑥ fast path: ${0} runs without SillyTavern's callback": "⑥ 고속 경로: ${0}회는 SillyTavern 콜백 없이 치환",
+    "Also cache scripts that use {{user}}, {{char}}, {{persona}} or {{group}}": "{{user}}, {{char}}, {{persona}}, {{group}}를 쓰는 스크립트도 캐시",
+    "These macros keep their value while a message is rendered, so the result is cached per name set and computed again after a rename or a persona change. Other macros still exclude a script.": "이 매크로들은 메시지 하나를 그리는 동안 값이 바뀌지 않으므로 이름 조합별로 결과를 캐시. 이름이나 페르소나가 바뀌면 다시 계산. 그 밖의 매크로가 든 스크립트는 여전히 제외.",
+    "Also cache messages that show macro syntax": "매크로 문법이 보이는 메시지도 캐시",
+    "A message with {{ outside the matched text (a code sample, for instance) is cached when no match itself contained macro syntax.": "매치된 부분 밖에만 {{ 가 있는 메시지(코드 예시 등)는 매치 자체에 매크로 문법이 없을 때 캐시."
 }

@@ -193,7 +193,7 @@ test('extra: ⑤ persisted display output refreshes when the message depth or a 
 
 // Words the Korean UI keeps in English: product and SillyTavern setting names, slash command verbs, data formats,
 // units, the test's script names.
-const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|staging|regexperf|reset|text|json|csv|measure|\boff\b|JSON|CSV|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b/g;
+const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|staging|regexperf|reset|text|json|csv|measure|\boff\b|JSON|CSV|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b|{{(?:user|char|persona|group)}}/g;
 
 /** What the Korean panel must say (the plain-language wording of the panel redesign), as shown on screen. */
 const KO_PANEL = [
@@ -434,7 +434,7 @@ test('reset settings restores the defaults; open sections are remembered across 
     assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, prefilter: true, memo: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000 }, 'defaultSettings');
+    assert.deepEqual(features, { profiler: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000 }, 'defaultSettings');
     assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistMaxMB: '8' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
@@ -562,7 +562,7 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
@@ -649,6 +649,30 @@ test('feature list 1.1: matched text that assembles a macro with the replacement
     const r = await each('fastPathAssembled', null, { variants: ['none', 'current'] });
     assert.deepEqual(r.none, ['Ann', 'Ann and Ann']);
     assert.deepEqual(r.current, r.none);
+});
+
+test('feature list 1.2: {{char}} replacements are cached per value set and miss after a rename; {{random}} is never cached', async ({ each }) => {
+    const r = await each('memoStatic', null, { variants: ['none', 'current'] });
+    assert.deepEqual(r.none.outs.slice(0, 5), ['Cat', 'Cat', 'Cat', 'Cat', 'Dog']);
+    assert.deepEqual(r.current.outs.slice(0, 5), r.none.outs.slice(0, 5));
+    assert.notEqual(r.current.outs[5], r.current.outs[6], 'two rolls');
+    assert.equal(r.current.hits.Who, 3, JSON.stringify(r.current.hits));
+    assert.equal(r.current.hits.Dice ?? 0, 0);
+});
+
+test('feature list 1.2: macro syntax outside the matched text does not prevent caching; inside a match it does', async ({ each }) => {
+    const r = await each('memoPostHoc', null, { variants: ['none', 'current'] });
+    assert.deepEqual(r.none.outs, ['use {{user}} like this: <b>x</b>', 'use {{user}} like this: <b>x</b>', 'say <b>Ann</b> now', 'say <b>Bob</b> now']);
+    assert.deepEqual(r.current.outs, r.none.outs);
+    assert.equal(r.current.afterOutside, 1, 'the second run was a hit');
+    assert.equal(r.current.afterInside, 1, 'a match with macro syntax is never served from the memo');
+});
+
+test('feature list 1.2: an unchanged output is stored as a marker, not as a copy', async ({ each }) => {
+    const r = (await each('memoSame', null, { variants: ['current'] })).current;
+    assert.equal(r.same, true);
+    assert.equal(r.hits, 1);
+    assert.ok(r.bytes > 0 && r.bytes <= r.len * 2 + 64, `bytes ${r.bytes} for a ${r.len}-character input`);
 });
 
 test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with a note', async ({ each }) => {
