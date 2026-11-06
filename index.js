@@ -103,14 +103,15 @@ const sanitizeRegexMacro = (x) => (x && typeof x === 'string'
     : x);
 
 const CONTROL_ESCAPES = { n: '\n', t: '\t', r: '\r', f: '\f', v: '\v' };
+const HEX_DIGITS = { u: 4, x: 2 }; // digits after \u and \x
+const HEX = /^[0-9a-fA-F]+$/;
+const ASCII_LETTER = /[a-zA-Z]/;
 const BAIL = Symbol('bail');
 
-// ② Literal presence per input: each literal (or case-insensitive check) gets a small id once, and an input remembers
-// the answers in an array by id, so the same string flowing through every script is scanned once per literal. The
-// last input is found without hashing. With keep, the input also goes into a map of the LIT_CACHE_MAX most recent
-// ones (no longer than the memo's limit) for the re-renders of displayed messages; hashing a fresh long string
-// costs about as much as a few scans, so save-time inputs, which never come back, are not kept. Cleared when the
-// script info changes.
+// ② Literal presence per input: each literal (or case-insensitive check) gets a small id, and an input's answers are
+// kept in an array by id, so a string flowing through every script is scanned once per literal. The last input needs
+// no hashing; with keep (displayed messages, which re-render) the LIT_CACHE_MAX most recent inputs up to the memo's
+// length limit are remembered too. Save-time inputs never come back, so hashing them would cost more than it saves.
 const LIT_CACHE_MAX = 256;
 const litIds = new Map(); // literal or "\0source/flags" -> id
 const litCache = new Map(); // input -> answers by id
@@ -145,13 +146,13 @@ const clearLitCache = () => {
 
 /**
  * Parses a pattern once. Every match contains, for each of terms, at least one of its literals (a one-literal term
- * is a mandatory run, a longer one comes from an alternation) and is at least minLen UTF-16 units long; test(str)
- * (keep: remember this input's answers for a re-render) checks both, needles is the single best term (null if none is certain, with a NEEDLE_REASONS code in reason).
- * nested: an unbounded quantifier inside an unboundedly repeated group, e.g. (a+)+.
+ * is a mandatory run, a longer one comes from an alternation) and is at least minLen UTF-16 units long; test(str, keep)
+ * checks both (keep: remember this input's answers for a re-render). needles is the single best term, null with a
+ * NEEDLE_REASONS code in reason when none is certain; nested flags an unbounded quantifier inside an unboundedly
+ * repeated group, e.g. (a+)+.
  * Conservative: classes, class escapes, backreferences, lookarounds and modifier groups contribute no literal, and
- * patterns with the v flag or a case modifier ((?i:), (?-i:)) get nothing at all. Literals in groups that must
- * match join the surrounding run; an alternation yields one literal per branch (any of them must occur), provided
- * every branch has one.
+ * patterns with the v flag or a case modifier ((?i:), (?-i:)) get nothing at all. Literals in groups that must match
+ * join the surrounding run; an alternation yields one literal per branch, provided every branch has one.
  * @param {string} source RegExp.source
  * @param {string} flags RegExp.flags
  * @returns {{needles: string[] | null, reason: string | null, terms: string[][], minLen: number, test: ((str: string, keep?: boolean) => boolean) | null, nested: boolean}}
@@ -185,7 +186,12 @@ export function extractNeedle(source, flags) {
 
     // A needle set is better if its shortest needle is longer, then if it has fewer needles.
     const score = (set) => Math.min(...set.map(s => s.length));
-    const better = (a, b) => !b || score(a) > score(b) || (score(a) === score(b) && a.length < b.length);
+    const better = (a, b) => {
+        if (!b) return true;
+        const sa = score(a);
+        const sb = score(b);
+        return sa > sb || (sa === sb && a.length < b.length);
+    };
 
     // {lit, len} for a literal character, {group, opaque, zero} for a group (zero: a lookaround, which consumes
     // nothing), {lit: null, len} for anything else; len is the least number of UTF-16 units the atom matches.
@@ -212,17 +218,17 @@ export function extractNeedle(source, flags) {
                 }
                 return nx === 'k' ? none : one;
             }
-            const hex = { u: 4, x: 2 }[nx]; // \uXXXX \xXX: skip the digits; without them (and u) it is the letter itself
+            const hex = HEX_DIGITS[nx]; // \uXXXX \xXX: skip the digits; without them (and u) it is the letter itself
             if (hex) {
                 const digits = source.slice(i, i + hex);
-                if (digits.length === hex && /^[0-9a-fA-F]+$/.test(digits)) {
+                if (digits.length === hex && HEX.test(digits)) {
                     i += hex;
                     return one;
                 }
                 return u ? one : literal(nx);
             }
             if (nx === 'c') {
-                if (/[a-zA-Z]/.test(source[i] ?? '')) i++;
+                if (ASCII_LETTER.test(source[i] ?? '')) i++;
                 return one;
             }
             return literal(CONTROL_ESCAPES[nx] ?? nx); // \n \t \r \f \v, or an escaped character
@@ -547,11 +553,10 @@ const conflicts = new Map(); // "earlierKey\0laterKey" -> {earlier, later, count
 let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
 let displayPass = false; // set by the formatter hooks while a message is being formatted for display
 
-// ③ Memo: memoPrefix -> Map(key -> entry). The key is the input string itself (its hash is cached and the same
-// string object flows through consecutive scripts, so no key is built per call) or, with memoHashKeys, its 64-bit
-// hash and length: the entry then holds no input, which halves the memory, at the cost of hashing every input and
-// of trusting 64 bits + length to tell inputs apart (a collision would return another input's result). memoLru
-// orders all entries, least recently used first; memoBytes is their estimated size (2 bytes per UTF-16 unit).
+// ③ Memo: memoPrefix -> Map(key -> entry). The key is the input itself (no key is built per call; V8 caches string
+// hashes) or, with memoHashKeys, its 64-bit hash and length, so the entry holds no input: half the memory, for the
+// cost of hashing every input and the chance of a collision returning another input's result. memoLru orders all
+// entries, least recently used first; memoBytes is their estimated size (2 bytes per UTF-16 unit).
 const memo = new Map();
 const memoLru = new Set();
 let memoBytes = 0;
@@ -609,17 +614,14 @@ class PerfRegExp extends RegExp {
         }
         if (settings.streamingSkip && markdownOnly && !streamApply && liveStream()) {
             stat.streamSkipped++;
-            prevStat = stat;
-            prevIn = prevOut = str;
-            return str;
+            return unchanged(stat, str);
         }
         // a displayed message comes back on every re-render: its literal answers are kept (save-time inputs do not)
-        if (settings.prefilter && test && !test(str, markdownOnly || displayPass)) {
+        const keep = markdownOnly || displayPass;
+        if (settings.prefilter && test && !test(str, keep)) {
             stat.skipped++;
-            if (prevOut === str && prevIn !== str && prevStat !== stat) noteConflict(prevStat, stat, prevIn, test, this._native, markdownOnly || displayPass);
-            prevStat = stat;
-            prevIn = prevOut = str;
-            return str;
+            if (prevOut === str && prevIn !== str && prevStat !== stat) noteConflict(prevStat, stat, prevIn, test, this._native, keep);
+            return unchanged(stat, str);
         }
 
         let bucket;
@@ -634,10 +636,7 @@ class PerfRegExp extends RegExp {
                 memoLru.delete(hit); // mark as most recently used
                 memoLru.add(hit);
                 stat.hits++;
-                prevStat = stat;
-                prevIn = str;
-                prevOut = hit.out;
-                return hit.out;
+                return done(stat, str, hit.out);
             }
         }
 
@@ -672,21 +671,29 @@ class PerfRegExp extends RegExp {
             if (matched || (fn === replacer && (out !== str || str.length > 2000 || native.test(str)))) stat.matched++;
         }
         this.lastIndex = native.lastIndex; // leave this regex as a native replace would
-        prevStat = stat;
-        prevIn = str;
-        prevOut = out;
 
-        const size = ((memoKey === str ? str.length : memoKey?.length ?? 0) + out.length) * 2;
-        if (bucket && size <= settings.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
-            const entry = { bucket, key: memoKey, out, size };
-            bucket.set(memoKey, entry);
-            memoLru.add(entry);
-            memoBytes += size;
-            trimMemo();
+        if (bucket) {
+            const size = (memoKey.length + out.length) * 2;
+            if (size <= settings.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
+                const entry = { bucket, key: memoKey, out, size };
+                bucket.set(memoKey, entry);
+                memoLru.add(entry);
+                memoBytes += size;
+                trimMemo();
+            }
         }
-        return out;
+        return done(stat, str, out);
     }
 }
+
+/** Records a call's input and output for the order-conflict check (see prevStat) and returns the output. */
+function done(stat, str, out) {
+    prevStat = stat;
+    prevIn = str;
+    prevOut = out;
+    return out;
+}
+const unchanged = (stat, str) => done(stat, str, str);
 
 const CONFLICT_TEST_MAX = 4000; // the later pattern is really run on inputs up to this long to confirm a match
 
@@ -718,6 +725,8 @@ function noteConflict(earlier, later, input, test, native, keep) {
 /** @type {Map<string, PerfRegExp>} */
 const wrapped = new Map();
 let patched = false;
+let patchedGet = null; // our RegexProvider.instance.get, to notice a later replacement
+let wrapperWarning = ''; // shown once in the panel (and the console)
 
 function patchProvider() {
     const inst = RegexProvider?.instance;
@@ -774,8 +783,6 @@ function patchProvider() {
     patched = true;
 }
 
-let patchedGet = null; // our RegexProvider.instance.get, to notice a later replacement
-let wrapperWarning = ''; // shown once in the panel (and the console)
 function warnWrapper(text) {
     if (wrapperWarning) return;
     wrapperWarning = text;
@@ -923,13 +930,16 @@ const spikeText = (sp) => t`Last spike: ${fmtMs(sp.ms)} ms on ${sp.len} characte
 const active = (r) => r.calls + avoided(r) + r.bypass > 0;
 const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">${text}</span>`;
 /** A row's warnings: words for the report, or badges for the panel. */
-const warnings = (r, badges = false) => [
-    r.heavy && (badges ? badge('.*', t`Contains .* or similar: may be slow on long text (backtracking)`) : t`.*-style`),
-    r.needle?.nested && (badges ? badge('(a+)+', t`Nested quantifier such as (a+)+: can become extremely slow on long text`) : t`nested quantifier`),
-    r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)` + (r.spike ? '\n' + spikeText(r.spike) : '')) : t`spike`),
-    conflictsOf(r).length > 0 && (badges ? badge('⇅', conflictsOf(r).map(c => conflictText(c)).join('\n')) : t`order conflict`),
-    ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without ever matching: consider turning it off`) : t`no match`),
-].filter(Boolean);
+function warnings(r, badges = false) {
+    const conflicted = conflictsOf(r);
+    return [
+        r.heavy && (badges ? badge('.*', t`Contains .* or similar: may be slow on long text (backtracking)`) : t`.*-style`),
+        r.needle?.nested && (badges ? badge('(a+)+', t`Nested quantifier such as (a+)+: can become extremely slow on long text`) : t`nested quantifier`),
+        r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)` + (r.spike ? '\n' + spikeText(r.spike) : '')) : t`spike`),
+        conflicted.length > 0 && (badges ? badge('⇅', conflicted.map(conflictText).join('\n')) : t`order conflict`),
+        ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without ever matching: consider turning it off`) : t`no match`),
+    ].filter(Boolean);
+}
 
 function buildSummary() {
     const { counts } = ensureInfo();
@@ -960,14 +970,23 @@ function buildSummary() {
 /** Size of a ⑤ entry, in characters (about its bytes in the chat file). */
 const persistSize = (e) => String(e.k).length + (e.v?.length ?? 0);
 
+/** The ⑤ entries in a chat: how many messages hold one and their total size. */
+function persistTotals(chat) {
+    let entries = 0;
+    let chars = 0;
+    for (const m of chat ?? []) {
+        const e = m?.extra?.[EXTRA_KEY];
+        if (!e) continue;
+        entries++;
+        chars += persistSize(e);
+    }
+    return { entries, chars };
+}
+
 /** Drops ⑤ entries from the oldest messages until the chat is within persistMaxMB. */
 function trimPersisted(chat) {
     if (!chat) return;
-    let chars = 0;
-    for (const m of chat) {
-        const e = m?.extra?.[EXTRA_KEY];
-        if (e) chars += persistSize(e);
-    }
+    let { chars } = persistTotals(chat);
     const max = settings.persistMaxMB * 1048576;
     for (let i = 0; chars > max && i < chat.length; i++) {
         const e = chat[i]?.extra?.[EXTRA_KEY];
@@ -979,14 +998,7 @@ function trimPersisted(chat) {
 
 /** ⑤ storage in this chat against its cap (only scanned when the hooks exist). */
 function persistUsage(chat) {
-    let entries = 0;
-    let chars = 0;
-    for (const m of chat ?? []) {
-        const e = m?.extra?.[EXTRA_KEY];
-        if (!e) continue;
-        entries++;
-        chars += persistSize(e);
-    }
+    const { entries, chars } = persistTotals(chat);
     return t`⑤ saved in this chat: ${entries} messages, ≈${Math.round(chars / 1024)} KB of ${settings.persistMaxMB} MB`;
 }
 
@@ -997,6 +1009,8 @@ const SLOWEST_MESSAGES = 5;
 /** "#12 (4321 chars) 85 ms, ..." for the slowest messages of a measurement. */
 const slowestText = (m) => t`Slowest messages (features off): ${m.slowest.map(x => t`#${x.i} (${x.len} chars) ${fmtMs(x.ms)} ms`).join(', ')}`;
 const measureText = (m) => t`This chat (${m.messages} messages): ${fmtMs(m.off)} ms with the features off, ${fmtMs(m.on)} ms on — ${fmtMs(m.off - m.on)} ms saved (${m.off > 0 ? Math.round((m.off - m.on) / m.off * 100) : 0}%)`;
+/** The table's columns, in the text report and the CSV. */
+const reportHeader = () => t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Matched | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`;
 
 /** "global 3/40 · preset 2/8 · scoped 0/0": active/total per script origin. */
 const typeCounts = (c) => {
@@ -1021,7 +1035,7 @@ function buildReportText() {
     if (measured) lines.push(measureText(measured), slowestText(measured));
     if (s.top) lines.push(t`#1 "${s.top.name}" takes ${s.topShare.toFixed(0)}% of the total time`);
     if (s.ineffective.length) lines.push(t`Candidates to disable (ran ${INEFFECTIVE_RUNS}+ times, never matched): ${s.ineffective.join(', ')}`);
-    lines.push('', t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Matched | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`);
+    lines.push('', reportHeader());
     s.rows.forEach((r, i) => {
         lines.push(`${i + 1} | ${r.name} | ${r.calls} | ${fmtMs(r.totalMs)} | ${fmtMs(avgMs(r))} | ${fmtMs(r.maxMs)} | ${fmtMs(r.replMs)} | ${r.matched} | ${r.changed} | ${r.skipped} | ${r.hits} | ${r.streamSkipped} | ${fmtNeedles(r) ?? '- (' + needleReason(r) + ')'} | ${r.needle?.minLen || '-'} | ${warnings(r).join(', ')}`);
     });
@@ -1064,8 +1078,7 @@ function buildReportCsv() {
         const str = String(v ?? '');
         return /[",\n\r]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
     };
-    const header = t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Matched | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`.split(' | ');
-    const lines = [header.map(cell).join(',')];
+    const lines = [reportHeader().split(' | ').map(cell).join(',')];
     buildSummary().rows.forEach((r, i) => {
         lines.push([i + 1, r.name, r.calls, r.totalMs, avgMs(r), r.maxMs, r.replMs, r.matched, r.changed, r.skipped, r.hits, r.streamSkipped, fmtNeedles(r) ?? '', r.needle?.minLen || '', warnings(r).join('; ')].map(cell).join(','));
     });
@@ -1134,6 +1147,13 @@ function measureChat(without = null) {
     return { messages: chat.length, off: first, on: second, slowest: times.sort((a, b) => b.ms - a.ms).slice(0, SLOWEST_MESSAGES) };
 }
 
+/** "Measure on this chat": the new result, kept as the last one (an empty chat leaves the previous result). */
+function measureNow() {
+    measured = measureChat() ?? measured;
+    renderPanel();
+    return measured;
+}
+
 function resetStats() {
     stats.clear();
     rowMeasures.clear();
@@ -1164,11 +1184,8 @@ const feature = (id, name, desc, { labelId = '', sub = false } = {}) => `
           <span class="rpk-feature-text"><span class="rpk-feature-name">${name}</span><span class="rpk-feature-desc">${desc}</span></span>
         </label>`;
 
-/** A number field for LIMITS[key]; bindUi() finds it as #rpk_<key>. */
-const limit = (key, name, title) => `<label${title ? ` title="${title}"` : ''}><span>${name}</span><input type="number" class="text_pole" id="rpk_${key}"></label>`;
-
-// Table cells carry a column class so the narrow layout can hide columns; headers explain themselves on hover.
-const th = (col, text, title) => `<th class="rpk-col-${col}${SORT_KEYS[col] ? ' rpk-sortable' : ''}${sortBy === col ? ' rpk-sorted' : ''}" data-col="${col}"${title ? ` title="${esc(title)}"` : ''}>${text}${sortBy === col ? (sortDesc ? ' ▾' : ' ▴') : ''}</th>`;
+/** A row of the Limits grid: a number field for LIMITS[key] or a checkbox for TOGGLES; bindUi() finds it as #rpk_<key>. */
+const limit = (key, name, title, type = 'number') => `<label${title ? ` title="${title}"` : ''}><span>${name}</span><input type="${type}"${type === 'number' ? ' class="text_pole"' : ''} id="rpk_${key}"></label>`;
 
 // Sorting and the name filter are per session (not saved). Clicking a header sorts by it, again flips the direction.
 const SORT_KEYS = {
@@ -1179,13 +1196,16 @@ let sortBy = null;
 let sortDesc = true;
 let nameFilter = '';
 
+// Table cells carry a column class so the narrow layout can hide columns; headers explain themselves on hover.
+const th = (col, text, title) => `<th class="rpk-col-${col}${SORT_KEYS[col] ? ' rpk-sortable' : ''}${sortBy === col ? ' rpk-sorted' : ''}" data-col="${col}"${title ? ` title="${esc(title)}"` : ''}>${text}${sortBy === col ? (sortDesc ? ' ▾' : ' ▴') : ''}</th>`;
+const td = (col, value, cls = '', title = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}"${title ? ` title="${esc(title)}"` : ''}>${value}</td>`;
+
 const headerHtml = () => `<tr>
             ${th('rank', '#')}${th('name', t`Script`)}
             ${th('runs', t`Runs`, t`Regex runs that really happened`)}${th('total', t`Total ms`)}${th('avg', t`Avg`, t`Time per run, averaged`)}${th('max', t`Max`, t`Slowest single run`)}
             ${th('repl', t`Replacer`, t`Time spent in the replacement (group filling, trim strings, macros), included in Total ms`)}${th('matched', t`Matched`, t`Runs where the pattern matched, even if the text came out the same`)}${th('changed', t`Changed`, t`Runs that changed the text`)}
             ${th('skips', t`Skips`, t`Runs skipped by ② (the fixed text was absent)`)}${th('hits', t`Hits`, t`Results reused by ③`)}${th('lit', t`Literal`, t`The fixed text ② looks for before running this script: every literal joined by & must be present, one of those joined by |. Hover a cell for the shortest possible match.`)}${th('act', '')}
           </tr>`;
-const td = (col, value, cls = '', title = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}"${title ? ` title="${esc(title)}"` : ''}>${value}</td>`;
 
 const settingsHtml = () => `
 <div id="regex_perf_kit" class="regex-perf-kit">
@@ -1220,9 +1240,9 @@ const settingsHtml = () => `
           ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved in the chat.`)}
           ${limit('persistMaxMB', t`⑤ Saved results per chat (MB)`, t`Beyond this, the oldest messages' results are dropped from the chat.`)}
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
-          <label title="${t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`}"><span>${t`③ Key the cache by a hash of the input`}</span><input type="checkbox" id="rpk_memoHashKeys"></label>
+          ${limit('memoHashKeys', t`③ Key the cache by a hash of the input`, t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`, 'checkbox')}
           ${limit('loadHintMs', t`Hint about "# Messages to Load" when opening a chat takes longer than (ms)`, t`Shown once per session as a toast.`)}
-          <label title="${t`Runs "Measure on this chat" once after a chat opens. The page freezes for a moment each time.`}"><span>${t`Measure automatically when a chat opens`}</span><input type="checkbox" id="rpk_autoMeasure"></label>
+          ${limit('autoMeasure', t`Measure automatically when a chat opens`, t`Runs "Measure on this chat" once after a chat opens. The page freezes for a moment each time.`, 'checkbox')}
         </div>
       </details>
 
@@ -1285,9 +1305,9 @@ function setContent(el, value, prop = 'innerHTML') {
     el[prop] = value;
 }
 
-/** The Literal cell's tooltip: why there is no literal, and the shortest possible match. */
-const litTitle = (r) => [
-    !fmtNeedles(r) && needleReason(r),
+/** The Literal cell's tooltip: why there is no literal (lit = fmtNeedles(r)), and the shortest possible match. */
+const litTitle = (r, lit) => [
+    !lit && needleReason(r),
     r.needle?.minLen && t`Shortest possible match: ${r.needle.minLen} characters. ② skips shorter messages.`,
 ].filter(Boolean).join('\n');
 /** A key figure in the summary; the tests read it by its key. */
@@ -1338,6 +1358,7 @@ function renderPanel() {
     ui.rows = rows.slice(0, 60);
     setContent(ui.tbody, ui.rows.map((r, i) => {
         const cls = (s.total > 0 && r.totalMs / s.total >= 0.5) ? 'rpk-hot' : (r.heavy ? 'rpk-heavy' : '');
+        const lit = fmtNeedles(r);
         const m = rowMeasures.get(r);
         const actions = (m ? `<span class="rpk-row-ms" title="${esc(t`Without this script the chat renders in ${fmtMs(m.without)} ms instead of ${fmtMs(m.with)} ms (③ and ⑤ off)`)}">${m.with >= m.without ? '−' : '+'}${fmtMs(Math.abs(m.with - m.without))} ms</span>` : '')
             + `<span class="rpk-measure-row fa-solid fa-stopwatch" title="${t`Measure this chat without this script`}"></span>`
@@ -1346,7 +1367,7 @@ function renderPanel() {
           ${td('rank', ranks.get(r))}${td('name', esc(r.name) + warnings(r, true).join(''))}
           ${td('runs', r.calls)}${td('total', fmtMs(r.totalMs))}${td('avg', fmtMs(avgMs(r)))}${td('max', fmtMs(r.maxMs))}
           ${td('repl', fmtMs(r.replMs))}${td('matched', r.matched)}${td('changed', r.changed)}
-          ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', fmtNeedles(r) ? esc(fmtNeedles(r)) : `<span class="rpk-dim">${t`none`}</span>`, 'rpk-lit', litTitle(r))}
+          ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', lit ? esc(lit) : `<span class="rpk-dim">${t`none`}</span>`, 'rpk-lit', litTitle(r, lit))}
           ${td('act', actions, 'rpk-act')}
         </tr>`;
     }).join('') || `<tr><td colspan="13" class="rpk-dim rpk-empty">${nameFilter && s.rows.length ? t`No script name contains "${nameFilter}".` : t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
@@ -1428,7 +1449,6 @@ function bindUi() {
         Object.assign(settings, defaultSettings); // settings.ui (open sections) is not a feature setting and stays
         syncControls();
         clearMemo();
-        trimMemo();
         ctx().saveSettingsDebounced();
         renderPanel();
         toastr.info(t`Settings restored to their defaults.`);
@@ -1459,11 +1479,9 @@ function bindUi() {
         toastr.info(t`Measuring...`);
         await new Promise(resolve => setTimeout(resolve, 20));
         fn();
-        renderPanel();
     };
     find('#rpk_measure').addEventListener('click', () => measuring(() => {
-        measured = measureChat() ?? measured;
-        if (measured) toastr.success(measureText(measured));
+        if (measureNow()) toastr.success(measureText(measured));
     }));
     ui.thead.addEventListener('click', (e) => {
         const col = e.target.closest('th')?.dataset.col;
@@ -1483,6 +1501,7 @@ function bindUi() {
             measuring(() => {
                 const m = measureChat(r);
                 if (m) rowMeasures.set(r, m);
+                renderPanel();
             });
         } else if (r.ids.length) {
             scriptAction(r, !!e.target.closest('.rpk-off'));
@@ -1512,9 +1531,7 @@ function registerSlash() {
             if (arg === 'off') return turnOffByName(rest);
             if (arg === 'measure') {
                 if (liveStream()) return t`Wait until the generation finishes.`;
-                measured = measureChat() ?? measured;
-                renderPanel();
-                return measured ? measureText(measured) : t`Nothing to measure: the chat is empty.`;
+                return measureNow() ? measureText(measured) : t`Nothing to measure: the chat is empty.`;
             }
             const text = buildReportText();
             if (arg !== 'text' && typeof callGenericPopup === 'function') {
@@ -1563,10 +1580,7 @@ eventSource.on(event_types.CHAT_CHANGED, () => {
     }
     if (settings.autoMeasure && !liveStream()) {
         setTimeout(() => { // once the page has settled
-            if (liveStream()) return;
-            measured = measureChat() ?? measured;
-            renderPanel();
-            if (measured) toastr.info(measureText(measured), 'Regex Perf Kit');
+            if (!liveStream() && measureNow()) toastr.info(measureText(measured), 'Regex Perf Kit');
         }, 500);
     }
 });

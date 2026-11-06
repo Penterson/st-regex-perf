@@ -7,7 +7,8 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ST_DIR } from './fetch-st.mjs';
+import puppeteer from 'puppeteer-core';
+import { fetchSt, ST_DIR } from './fetch-st.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
@@ -87,7 +88,7 @@ async function resolve(path) {
 }
 
 /** @returns {Promise<{url: string, close: () => Promise<void>}>} */
-export async function startServer() {
+async function startServer() {
     const server = createServer(async (req, res) => {
         const path = decodeURIComponent(new URL(req.url, 'http://x').pathname);
         try {
@@ -107,8 +108,23 @@ export async function startServer() {
     };
 }
 
+/** The pinned SillyTavern files, the harness server and a headless Chrome, for the test entry points. */
+export async function launch() {
+    await fetchSt();
+    const server = await startServer();
+    const browser = await puppeteer.launch({ executablePath: chromePath(), headless: true, args: ['--no-sandbox'] });
+    return {
+        server,
+        browser,
+        async close() {
+            await browser.close();
+            await server.close();
+        },
+    };
+}
+
 /** Chrome for puppeteer: $CHROME_PATH, else google-chrome / chromium on PATH. */
-export function chromePath() {
+function chromePath() {
     if (process.env.CHROME_PATH) return process.env.CHROME_PATH;
     for (const name of ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']) {
         try {

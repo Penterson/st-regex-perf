@@ -10,9 +10,8 @@
 // BENCH_REPS overrides the number of pages per variant (7 for a run, 11 for the gate).
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
-import puppeteer from 'puppeteer-core';
-import { fetchSt, ST_REF } from './fetch-st.mjs';
-import { chromePath, startServer } from './server.mjs';
+import { ST_REF } from './fetch-st.mjs';
+import { launch } from './server.mjs';
 
 const GATE_SLOWER = 0.2;
 const BASELINE_FILE = new URL('./bench-baseline.json', import.meta.url);
@@ -20,9 +19,7 @@ const gate = process.argv.includes('--gate');
 const update = process.argv.includes('--update');
 const reps = Number(process.env.BENCH_REPS ?? (gate || update ? 11 : 7));
 
-await fetchSt();
-const server = await startServer();
-const browser = await puppeteer.launch({ executablePath: chromePath(), headless: true, args: ['--no-sandbox'] });
+const { server, browser, close } = await launch();
 const median = (xs) => [...xs].sort((a, b) => a - b)[xs.length >> 1];
 
 /** Medians of every number the scenario returns, per variant: {"none warm": 12.3, ...}. */
@@ -79,6 +76,5 @@ if (update) {
     print('save, unique inputs', await run('benchSave', ['none', 'baseline', 'st-regex-perf']));
     print('display, long chat', await run('bench', ['none', 'baseline', 'st-regex-perf']));
 }
-await browser.close();
-await server.close();
+await close();
 process.exit(failed ? 1 : 0);

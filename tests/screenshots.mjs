@@ -2,14 +2,10 @@
 // with a SillyTavern-like theme (tests/harness/theme.css) after a realistic session (the screenshot scenario).
 // Usage: node tests/screenshots.mjs [locale]   (default ko-kr)
 import { mkdir } from 'node:fs/promises';
-import puppeteer from 'puppeteer-core';
-import { fetchSt } from './fetch-st.mjs';
-import { chromePath, startServer } from './server.mjs';
+import { launch } from './server.mjs';
 
 const locale = process.argv[2] ?? 'ko-kr';
-await fetchSt();
-const server = await startServer();
-const browser = await puppeteer.launch({ executablePath: chromePath(), headless: true, args: ['--no-sandbox'] });
+const { server, browser, close } = await launch();
 await mkdir(new URL('../docs/', import.meta.url), { recursive: true });
 for (const [name, width] of [['desktop', 1000], ['mobile', 390]]) {
     const page = await browser.newPage();
@@ -23,5 +19,4 @@ for (const [name, width] of [['desktop', 1000], ['mobile', 390]]) {
     console.log(`${path} (${width}px wide)`);
     await page.close();
 }
-await browser.close();
-await server.close();
+await close();
