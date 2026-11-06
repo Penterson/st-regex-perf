@@ -4,8 +4,10 @@
  * The engine compiles every script pattern through RegexProvider.instance.get(). That method is patched to
  * return a RegExp subclass whose [Symbol.replace] (where String.prototype.replace() dispatches) adds
  * ① profiler, ② literal prefilter, ③ memo cache, ④ streaming skip of display-only scripts, ⑥ replacer fast path,
- * ⑦ input-length fuse and ⑧ circuit breaker. ST's MessageFormatter hooks add ⑤ a persisted display cache and
- * ④'s compromise mode. No ST core file is modified.
+ * ⑦ input-length fuse and ⑧ circuit breaker. ST's MessageFormatter hooks add ⑤ a persisted display cache, ⑨ a cache
+ * of the formatted HTML (regex + markdown skipped together on a re-render), ④'s compromise mode with incremental
+ * formatting, and a timing of the whole display pipeline (regex / markdown / sanitize) so the panel can say what share
+ * of a render the regex stage is. No ST core file is modified.
  */
 
 // Namespace import: older engines lack getScriptsByType / SCRIPT_TYPES, and a missing named import fails to load.
@@ -32,6 +34,13 @@ const defaultSettings = {
     memoStatic: true, // ③ also for scripts whose only macros are {{user}} {{char}} {{persona}} {{group}}: keyed by their values
     memoPostHoc: true, // ③ also for inputs with macro syntax outside the matched text
     fastPath: true, // ⑥ macro-free replacements run as a native string template instead of SillyTavern's callback
+    fastPathStatic: true, // ⑥ also replacements whose only macros are {{user}} {{char}} {{persona}} {{group}}: a template per value set
+    htmlMemo: true, // ⑨ the formatted HTML of a message is reused on a re-render: regex and markdown are both skipped
+    htmlMemoMaxEntries: 2000,
+    htmlMemoMaxMB: deviceMemory && deviceMemory <= 2 ? 8 : deviceMemory && deviceMemory <= 4 ? 16 : 32,
+    streamingIncremental: true, // ④ compromise mode: scripts that cannot match across a line run on the new lines only
+    adaptive: true, // ① when the regex stage is a negligible share of the render, time 1 run in 64 (the panel says so)
+    frameStats: true, // ① count dropped frames while streaming and long tasks (what a user feels), when the browser can
     memoMaxEntries: 3000,
     memoMaxLen: 20000,
     memoMaxMB: deviceMemory && deviceMemory <= 2 ? 16 : deviceMemory && deviceMemory <= 4 ? 32 : 64,
@@ -662,6 +671,37 @@ export function analyzeRedos(source, flags) {
     walk(alts, false);
     return found ?? NO_REDOS;
 }
+/**
+ * Whether no match of the pattern can contain or depend on a newline, so that running it on the text after a line
+ * break gives the same replacements as running it on the whole text (④ incremental formatting). Conservative: every
+ * character atom (lookarounds included) must be unable to match "\n", ^ and $ need the m flag, the g flag is required
+ * and y refused; a pattern the parser does not understand is not line-local.
+ * @param {RegExp} re
+ * @returns {boolean}
+ */
+export function isLineLocal(re) {
+    const { flags } = re;
+    if (!flags.includes('g') || flags.includes('y')) return false;
+    let alts;
+    try {
+        alts = parseRegex(re.source, flags);
+    } catch (e) {
+        if (e !== BAIL) throw e;
+        return false;
+    }
+    // ^ and $ mean the text's ends without the m flag, and the new lines are not the text's start: checked on the
+    // source (classes removed), as parseRegex() keeps anchors without their kind. \b and \B are the same either way.
+    if (!flags.includes('m') && /(?:^|[^\\])(?:\\\\)*[$^]/.test(re.source.replace(/\[(?:\\.|[^\]])*\]/g, ''))) return false;
+    const ok = (seqs) => seqs.every(items => items.every(({ atom }) => {
+        if (atom.kind === 'back' || atom.kind === 'anchor') return true; // a backreference repeats a group, which cannot hold a newline either
+        if (atom.kind === 'char') return !charSet(atom.src, flags).has('\n');
+        return ok(atom.alts);
+    }));
+    return ok(alts);
+}
+const lineLocalCache = new Map();
+const isLineLocalCached = (re) => cached(lineLocalCache, keyOf(re), () => isLineLocal(re));
+
 const redosCache = new Map(); // "source\0flags" -> analyzeRedos()
 const redosOf = (re) => cached(redosCache, keyOf(re), () => analyzeRedos(re.source, re.flags));
 
@@ -704,6 +744,8 @@ function resolveDynamic(regexString, dynamic) {
 
 const VERIFY_RUNS = 3; // a script's first fast-path runs are compared with SillyTavern's own callback
 const fastPathOff = new Set(); // fast keys (pattern + replacement) that disagreed once: back to the callback for the session
+const INC_VERIFY_RUNS = 3; // ④ a script's first incremental runs are compared with a run on the whole text
+const incOff = new Set(); // pattern keys whose incremental run disagreed once: full runs for the session
 
 /**
  * SillyTavern's replacer (runRegexScript) as a native string template: {{match}} and $0 become $&, $n a two-digit $nn
@@ -890,6 +932,9 @@ function buildInfo(groups) {
             let rs = s.findRegex;
             const substitute = Number(s.substituteRegex);
             const isDynamic = (substitute === 1 || substitute === 2) && MACRO.test(rs);
+            // a find pattern whose macros are all static ({{user}} {{char}} {{persona}} {{group}}) compiles the same
+            // way for a whole render and its values are in the ⑨/⑤ key; any other macro makes the pattern itself volatile
+            const dynamicVolatile = isDynamic && MACRO.test(rs.replace(STATIC_MACRO, ''));
             if (substitute === 1 || substitute === 2) { // RAW / ESCAPED, as runRegexScript() compiles them
                 try { rs = substituteParamsExtended(rs, {}, substitute === 2 ? sanitizeRegexMacro : undefined); } catch { /* keep the raw pattern */ }
             }
@@ -923,6 +968,10 @@ function buildInfo(groups) {
                 markdownOnly: !!s.markdownOnly,
                 pure,
                 semiPure,
+                // the output can differ between two renders of the same text ({{random}}, {{getvar}}, a macro in the
+                // find pattern): a message such a script matched is not kept by ⑨ or ⑤
+                volatile: dynamicVolatile || !(pure || semiPure),
+                dynamicVolatile,
                 semiPureTrims: semiPure && strippedTrims.some((trim, k) => trim !== String(trims[k])), // a trim string holds a static macro
                 replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
                 needle,
@@ -938,6 +987,8 @@ function buildInfo(groups) {
                 info.pure &&= prev.pure && prev.replaceSig === info.replaceSig;
                 info.semiPure &&= prev.semiPure && prev.replaceSig === info.replaceSig;
                 info.semiPureTrims &&= info.semiPure;
+                info.volatile ||= prev.volatile;
+                info.dynamicVolatile ||= prev.dynamicVolatile;
                 info.statKey = prev.statKey;
                 info.raw = prev.raw;
                 for (const d of dynamic) if (d.info === prev) d.info = info;
@@ -964,6 +1015,14 @@ function buildInfo(groups) {
                     };
                 }
             }
+            // ⑥ for a script whose only macros are the static ones: the template is finished per value set, in a display pass
+            info.fastStatic = info.semiPure && tpl.template !== null ? {
+                key: fastKey, template: tpl.template, replaceString, trims, named: tpl.named, refs: tpl.refs,
+                level: info.semiPureTrims ? 2 : 1, byKey: new Map(),
+            } : null;
+            // ④ incremental formatting: a match of this pattern cannot cross a line, so new lines can be formatted alone
+            info.lineLocal = tpl.refs.every(r => r.ok) && needle.minLen > 0 && isLineLocalCached(re);
+            if (prev) info.lineLocal &&= prev.lineLocal; // one wrapper serves every script with this pattern
 
             // The same limits getRegexedString() applies; display scripts only, as those are what ⑤ stores.
             const min = !isNaN(s.minDepth) && s.minDepth !== null && s.minDepth >= -1 ? Number(s.minDepth) : -Infinity;
@@ -1032,6 +1091,7 @@ let prevOut = null;
 const conflicts = new Map(); // "earlierKey\0laterKey" -> {earlier, later, count, confirmed, sample}
 let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
 let displayPass = false; // set by the formatter hooks while a message is being formatted for display
+let passVolatile = false; // a volatile script ({{random}}, {{getvar}}, a macro in the find pattern) matched in this pass
 
 // ③ for static-macro scripts: what {{user}} {{char}} {{persona}} {{group}} resolve to in the display pass being
 // formatted (null outside one), as SillyTavern resolves them for a replacement and, with the message author as
@@ -1041,6 +1101,8 @@ let passStatic = null;
 let passStaticTrim = null;
 let staticFp = null;
 let staticVals = null;
+let staticChName = null; // the message author the trim-string values were resolved for
+const staticByFp = new Map(); // fingerprint -> values: authors alternate from message to message, so both stay resolved
 /** The key for a static-macro script in this pass (level 2: a trim string holds one), resolved on first use. */
 function staticKeyFor(level) {
     if (passStatic === null) setPassStatic(passChName);
@@ -1052,10 +1114,49 @@ function setPassStatic(chName) {
     const fp = [name1, name2, chName, groupId, group?.members?.join(), group?.disabled_members?.join(), powerUserSettings?.persona_description].join('\u0000');
     if (fp !== staticFp) {
         staticFp = fp;
-        const base = substituteParams('{{user}}\u0000{{char}}\u0000{{persona}}\u0000{{group}}');
-        staticVals = [fnv1a(base), fnv1a(base + '\u0000' + substituteParams('{{char}}', { name2Override: chName }))];
+        staticVals = staticByFp.get(fp);
+        if (!staticVals) {
+            const base = substituteParams('{{user}}\u0000{{char}}\u0000{{persona}}\u0000{{group}}');
+            staticVals = [fnv1a(base), fnv1a(base + '\u0000' + substituteParams('{{char}}', { name2Override: chName }))];
+            if (staticByFp.size >= 32) staticByFp.delete(staticByFp.keys().next().value);
+            staticByFp.set(fp, staticVals);
+        }
+        staticChName = chName;
     }
     [passStatic, passStaticTrim] = staticVals;
+}
+/**
+ * ⑥ for a static-macro script: the template with {{user}} {{char}} {{persona}} {{group}} replaced by their values
+ * for this pass (as substituteParams() gives them for a replacement; a trim string's {{char}} is the message author,
+ * as filterString() resolves it), built once per value set and verified against SillyTavern's callback like any
+ * fast path. null when there is no display pass to take the values from.
+ */
+function staticFastFor(meta) {
+    const fs = meta.fastStatic;
+    if (!fs || passChName === null || !cfg.fastPathStatic) return null;
+    const key = staticKeyFor(fs.level);
+    let f = fs.byKey.get(key);
+    if (f === undefined && fastPathOff.has(fs.key + '\u0001' + key)) f = null; // disagreed once this session
+    if (f === undefined) {
+        const { substituteParams } = ctx();
+        const value = (m) => String(substituteParams(m) ?? '');
+        const trimValue = (m) => String(substituteParams(m, { name2Override: staticChName }) ?? '');
+        // a $ in a value is text, never a group reference: doubled, as buildTemplate() does for the replacement's own
+        const template = fs.template.replace(STATIC_MACRO, m => value(m).replace(/\$/g, '$$$$'));
+        const replacement = fs.replaceString.replace(STATIC_MACRO, value);
+        const trims = fs.trims.map(trim => String(trim).replace(STATIC_MACRO, trimValue));
+        f = {
+            key: fs.key + '\u0001' + key,
+            staticKey: key,
+            template: trims.length ? null : template,
+            replacer: trims.length ? buildTrimReplacer(replacement, trims, fs.named) : null,
+            verify: VERIFY_RUNS,
+            identity: fs.refs.length > 0 || matchesWhole(meta.re, template.replace(/\$\$/g, '$')),
+        };
+        if (fs.byKey.size >= 8) fs.byKey.delete(fs.byKey.keys().next().value);
+        fs.byKey.set(key, f);
+    }
+    return f;
 }
 
 // ③ Memo: memoPrefix -> Map(key -> entry). The key is the input itself (no key is built per call; V8 caches string
@@ -1090,6 +1191,7 @@ function getStat(key, re) {
             src: '/' + re.source + '/' + re.flags,
             calls: 0, totalMs: 0, maxMs: 0, replMs: 0, matched: 0, changed: 0,
             skipped: 0, hits: 0, streamSkipped: 0, bypass: 0, fast: 0,
+            incremental: 0, // ④ runs on the new lines of a streamed message only
             seen: 0, // every run that executed, also the ones sampling left untimed
             spike: null, // {ms, len, head, messageId}: the newest run over SPIKE_MS
             spikes: [], // the SPIKE_KEEP newest such runs, newest first (feature list 2.2)
@@ -1138,12 +1240,27 @@ class PerfRegExp extends RegExp {
             stat.streamSkipped++;
             return unchanged(stat, str);
         }
+        const meta = this._meta;
+        if (displayPass && meta.dynamic) passVolatile = true; // ⑨ ⑤: another render may compile another pattern
+        // ④ incremental formatting (compromise mode): a line-local script that already formatted a prefix of this
+        // streamed message, up to a line break, runs on the lines after it only; the rest of the output is reused.
+        const incremental = streamApply && cfg.streamingIncremental && meta.lineLocal;
         // a displayed message comes back on every re-render: its literal answers are kept (save-time inputs do not)
         const keep = markdownOnly || displayPass;
         if (cfg.prefilter && test && !test(str, keep)) {
             stat.skipped++;
             if (prevOut === str && prevIn !== str && prevStat !== stat) noteConflict(prevStat, stat, prevIn, test, this._native, keep);
+            if (incremental) meta.inc = { msg: passMessageId, in: str, out: str };
             return unchanged(stat, str);
+        }
+        let inc = null; // the prefix already formatted, when the new text continues it after a line break
+        let incIn = str; // what the regex really runs on
+        if (incremental) {
+            const prev = meta.inc;
+            if (prev && prev.msg === passMessageId && str.length > prev.in.length && prev.in.endsWith('\n') && str.startsWith(prev.in)) {
+                inc = prev;
+                incIn = str.slice(prev.in.length);
+            }
         }
 
         let bucket;
@@ -1152,7 +1269,7 @@ class PerfRegExp extends RegExp {
         // Matched text with macros is substituted again after the groups are inserted, so it is not memoized. A script
         // with static macros is keyed by their values, which are known inside a display pass only.
         const staticKey = memoStatic === 0 ? '' : cfg.memoStatic && passChName !== null ? staticKeyFor(memoStatic) : null;
-        if (cfg.memo && memoPrefix && staticKey !== null && str.length <= cfg.memoMaxLen
+        if (!inc && cfg.memo && memoPrefix && staticKey !== null && str.length <= cfg.memoMaxLen
             && (!hasMacro(str) || (postHoc = cfg.memoPostHoc && typeof replacer === 'function'))) {
             bucket = memo.get(memoPrefix);
             if (!bucket) memo.set(memoPrefix, bucket = new Map());
@@ -1169,11 +1286,12 @@ class PerfRegExp extends RegExp {
 
         const native = this._native;
         native.lastIndex = 0;
-        // ① Past SAMPLE_AFTER runs of a script with sampling on, one run in SAMPLE_EVERY is timed and counted for all.
+        // ① Past SAMPLE_AFTER runs of a script with sampling on, one run in SAMPLE_EVERY is timed and counted for all;
+        // when the regex stage is a negligible share of the renders (adaptive), one run in LIGHT_EVERY.
         stat.seen++;
-        const sampled = cfg.profilerSampling && stat.seen > SAMPLE_AFTER;
-        const profile = cfg.profiler && (!sampled || stat.seen % SAMPLE_EVERY === 0);
-        const weight = sampled ? SAMPLE_EVERY : 1;
+        const every = cfg.adaptive && adaptiveLight ? LIGHT_EVERY : cfg.profilerSampling && stat.seen > SAMPLE_AFTER ? SAMPLE_EVERY : 0;
+        const profile = cfg.profiler && (!every || stat.seen % every === 0);
+        const weight = every || 1;
         const timeRepl = profile && cfg.timeReplacer;
         let replMs = 0;
         let matched = false; // the replacer ran, so the pattern matched (even if the text came out the same)
@@ -1184,9 +1302,11 @@ class PerfRegExp extends RegExp {
         const t0 = profile || cfg.breaker ? performance.now() : 0;
         // ⑥ With no macro syntax in the input, SillyTavern's per-match callback amounts to its template, which V8 applies
         // without a JS call per match. Should group text assemble macro syntax anyway, the callback is used instead.
-        const fast = cfg.fastPath && typeof replacer === 'function' && !hasMacro(str) ? this._meta.fast : null;
+        // A static-macro script gets a template per value set, finished in the display pass (staticFastFor).
+        const fast = cfg.fastPath && typeof replacer === 'function' && !hasMacro(str) ? meta.fast ?? staticFastFor(meta) : null;
+        let fastAlive = !!fast;
         if (fast && fast.verify <= 0) {
-            out = RegExp.prototype[Symbol.replace].call(native, str, fast.template ?? fast.replacer);
+            out = RegExp.prototype[Symbol.replace].call(native, incIn, fast.template ?? fast.replacer);
             if (MACRO.test(out)) {
                 out = undefined; // group text assembled macro syntax: SillyTavern would substitute it
                 native.lastIndex = 0;
@@ -1200,29 +1320,47 @@ class PerfRegExp extends RegExp {
             // result (self-verification): one difference turns ⑥ off for the script.
             let checked = false;
             if (typeof replacer === 'function' && (profile || fast || postHoc)) {
-                const meta = this._meta;
                 fn = function () {
                     matched = true;
                     const t1 = timeRepl ? performance.now() : 0;
                     const r = replacer.apply(this, arguments);
                     if (timeRepl) replMs += performance.now() - t1;
                     if (postHoc && !macroSeen && MACRO.test(arguments[0])) macroSeen = true;
-                    if (fast && meta.fast) {
+                    if (fastAlive) {
                         const mine = fast.template !== null ? expandTemplate(fast.template, arguments) : fast.replacer.apply(this, arguments);
                         if (MACRO.test(mine)) return r; // the fast path would have fallen back here: nothing to compare
                         checked = true;
                         if (mine !== r) {
+                            fastAlive = false;
                             fastPathOff.add(fast.key);
-                            meta.fast = null;
+                            if (fast.staticKey !== undefined) meta.fastStatic?.byKey.set(fast.staticKey, null);
+                            else meta.fast = null;
                             console.warn(`[RegexPerf] fast path disagreed with SillyTavern for "${stat.name}": back to the callback for this script`, { match: String(arguments[0]).slice(0, 200), expected: r.slice(0, 200), got: mine.slice(0, 200) });
                         }
                     }
                     return r;
                 };
             }
-            out = RegExp.prototype[Symbol.replace].call(native, str, fn);
-            if (checked && this._meta.fast) fast.verify--;
+            out = RegExp.prototype[Symbol.replace].call(native, incIn, fn);
+            if (checked && fastAlive) fast.verify--;
         }
+        if (inc) {
+            const tail = out;
+            out = inc.out + tail;
+            if (meta.incVerify > 0) { // a script's first incremental runs are checked against a run on the whole text
+                native.lastIndex = 0;
+                const whole = RegExp.prototype[Symbol.replace].call(native, str, fastRun ? fast.template ?? fast.replacer : replacer);
+                if (whole !== out) {
+                    incOff.add(keyOf(native));
+                    meta.lineLocal = false;
+                    console.warn(`[RegexPerf] incremental formatting disagreed with a full run for "${stat.name}": off for this script`, { pattern: stat.src, expected: whole.slice(-200), got: out.slice(-200) });
+                    out = whole;
+                } else {
+                    meta.incVerify--;
+                }
+            }
+        }
+        if (incremental) meta.inc = { msg: passMessageId, in: str, out };
         const dt = t0 ? performance.now() - t0 : 0;
         if (cfg.breaker && dt > cfg.breakerMs && ++stat.slowRuns >= cfg.breakerCount) trip(stat); // ⑧
         if (profile) {
@@ -1232,18 +1370,19 @@ class PerfRegExp extends RegExp {
             stat.totalMs += dt * weight;
             stat.replMs += replMs * weight;
             if (fastRun) stat.fast += weight;
+            if (inc) stat.incremental += weight;
             if (dt > stat.maxMs) stat.maxMs = dt;
             if (dt > SPIKE_MS) {
-                stat.spike = { ms: dt, len: str.length, head: str.slice(0, SPIKE_HEAD), messageId: passMessageId };
+                stat.spike = { ms: dt, len: incIn.length, head: incIn.slice(0, SPIKE_HEAD), messageId: passMessageId };
                 stat.spikes.unshift(stat.spike);
                 if (stat.spikes.length > SPIKE_KEEP) stat.spikes.length = SPIKE_KEEP;
             }
             if (out !== str) stat.changed += weight;
             if (!matched) {
                 // A template changed the text or not: unchanged means no match unless a match can be its own replacement.
-                if (fastRun) matched = out !== str || (fast.identity && native.test(str));
+                if (fastRun) matched = out !== str || (fast.identity && native.test(incIn));
                 // A string replacer (not SillyTavern's) tells nothing: test short inputs, assume a match on long ones.
-                else if (fn === replacer) matched = out !== str || str.length > 2000 || native.test(str);
+                else if (fn === replacer) matched = out !== str || incIn.length > 2000 || native.test(incIn);
             }
             if (matched) stat.matched += weight;
             // lint "missing g": a pattern without g that would have matched again further on (short inputs only)
@@ -1251,6 +1390,12 @@ class PerfRegExp extends RegExp {
                 const m = native.exec(str);
                 if (m && m.index + m[0].length < str.length && native.test(str.slice(m.index + m[0].length))) stat.moreMatches++;
             }
+        }
+        // ⑨ ⑤: a volatile script that matched makes this pass's result one of many; the hooks then store nothing
+        if (displayPass && meta.volatile && !passVolatile) {
+            native.lastIndex = 0;
+            if (out !== str || native.test(incIn)) passVolatile = true;
+            native.lastIndex = 0;
         }
         this.lastIndex = native.lastIndex; // leave this regex as a native replace would
 
@@ -1354,11 +1499,18 @@ function patchProvider() {
             stat.slowRuns = 0;
             w._meta = {
                 stat,
+                re: base,
                 markdownOnly: !!info?.markdownOnly,
                 test: stat.needle.test,
                 memoPrefix: info?.pure || info?.semiPure ? key + '\u0001' + info.replaceSig + (info.pure ? '\u0001' : '\u0002') : null,
                 memoStatic: info?.semiPure ? (info.semiPureTrims ? 2 : 1) : 0, // 1: static macros in the replacement, 2: in a trim string too
                 fast: info?.fast ?? null,
+                fastStatic: info?.fastStatic ?? null,
+                volatile: info ? info.volatile : true,
+                dynamic: !info || info.dynamicVolatile, // the find pattern itself can change between renders: volatile even without a match
+                lineLocal: !!info?.lineLocal && !incOff.has(key),
+                inc: null, // ④ incremental formatting: {msg, in, out} of the last streamed prefix this script saw
+                incVerify: w._meta?.incVerify ?? INC_VERIFY_RUNS, // incremental runs still to check against a full run
             };
             w._version = version;
         }
@@ -1385,9 +1537,198 @@ function checkWrapper() {
     if (patched && RegexProvider.instance?.get !== patchedGet) warnWrapper(t`Another extension replaced the regex engine's get() after Regex Perf Kit: the features may no longer apply. Check the extension load order.`);
 }
 
-// ---- MessageFormatter hooks: ⑤ persisted display cache, ④ compromise mode ----
+// ---- Display pipeline timing (regex / markdown / sanitize) and what a user feels ----
+
+// messageFormatting() runs, per message: BEFORE_REGEX hooks → regex scripts → AFTER_REGEX hooks → markdown fix-ups,
+// quotes, showdown → AFTER_MARKDOWN hooks → name strip → DOMPurify. Our hooks sit at the stage boundaries (last of
+// BEFORE_REGEX, first of AFTER_REGEX and AFTER_MARKDOWN) and DOMPurify.sanitize() is wrapped for the MESSAGE_SANITIZE
+// config messageFormatting() alone uses, so a display pass is timed in three parts. In a small setup the regex part
+// is a few percent of a render: the panel says so instead of promising savings that cannot be felt.
+const pipe = {
+    passes: 0, // display passes timed end to end
+    hookMs: 0, // our BEFORE_REGEX hook: the ⑨/⑤ key (a hash of the message) and lookups — the extension's own cost
+    regexMs: 0, // end of our hook → AFTER_REGEX: the regex scripts (and ③ ② ④ ⑥ around them)
+    markdownMs: 0, // AFTER_REGEX → AFTER_MARKDOWN: SillyTavern's markdown fix-ups, quotes and showdown
+    sanitizeMs: 0, // DOMPurify.sanitize()
+    htmlHits: 0, // ⑨ passes served from the HTML cache (regex and markdown skipped)
+    htmlHitMs: 0, // what those passes still cost (placeholder markdown + sanitize)
+    htmlStores: 0,
+    loadMs: 0, // the render burst that ended at the last CHAT_CHANGED: how long opening the chat took
+};
+let passT0 = null; // performance.now() at our BEFORE_REGEX hook (null outside a timed pass)
+let passTk = null; // at the end of our BEFORE_REGEX hook
+let passT1 = null; // at our AFTER_REGEX hook
+let passT2 = null; // at our AFTER_MARKDOWN hook
+let passHtmlHit = false; // this pass is a ⑨ hit
+const resetPipe = () => { Object.assign(pipe, { passes: 0, hookMs: 0, regexMs: 0, markdownMs: 0, sanitizeMs: 0, htmlHits: 0, htmlHitMs: 0, htmlStores: 0 }); };
+const pipeTotal = () => pipe.hookMs + pipe.regexMs + pipe.markdownMs + pipe.sanitizeMs;
+/** Regex time as a share of the timed display renders (0..1), null before anything was timed. */
+const regexShare = () => {
+    const total = pipeTotal();
+    return total > 0 ? pipe.regexMs / total : null;
+};
+/** Average cost of a full (uncached) display pass, for the ⑨ savings estimate. */
+const avgPassMs = () => {
+    const full = pipe.passes - pipe.htmlHits;
+    return full > 0 ? pipeTotal() / full : 0;
+};
+
+let sanitizeWrapped = false;
+/** Wraps DOMPurify.sanitize() to close the timing of a display pass; the output is untouched. */
+function wrapSanitize() {
+    const purify = globalThis.SillyTavern?.libs?.DOMPurify ?? globalThis.DOMPurify;
+    if (!purify || typeof purify.sanitize !== 'function' || sanitizeWrapped) return;
+    const orig = purify.sanitize;
+    purify.sanitize = function (dirty, config) {
+        if (passT2 === null || !config?.MESSAGE_SANITIZE) return orig.apply(this, arguments);
+        const t2 = passT2;
+        passT2 = null; // one sanitize per pass; a second call (another caller) is not ours
+        const t3 = performance.now();
+        try {
+            return orig.apply(this, arguments);
+        } finally {
+            const t4 = performance.now();
+            const tk = passTk ?? passT0;
+            const t1 = passT1 ?? t2;
+            pipe.passes++;
+            if (passHtmlHit) { // a ⑨ hit: the stage times are of a full pass only
+                pipe.htmlHits++;
+                pipe.htmlHitMs += t4 - passT0;
+            } else {
+                pipe.hookMs += tk - passT0;
+                pipe.regexMs += t1 - tk;
+                pipe.markdownMs += t2 - t1;
+                pipe.sanitizeMs += t4 - t3;
+                if ((pipe.passes - pipe.htmlHits) % ADAPTIVE_EVERY_PASSES === 0) adaptiveLight = regexShare() < ADAPTIVE_SHARE;
+            }
+            statsDirty = true;
+        }
+    };
+    sanitizeWrapped = true;
+}
+// ① adaptive profiling: once the regex stage is under ADAPTIVE_SHARE of the timed renders (checked every
+// ADAPTIVE_EVERY_PASSES full passes), 1 run in LIGHT_EVERY is timed; the panel says the regex stage is not the cost.
+const ADAPTIVE_SHARE = 0.02;
+const ADAPTIVE_EVERY_PASSES = 64;
+const LIGHT_EVERY = 64;
+let adaptiveLight = false;
+
+let showdownWrapped = false;
+/**
+ * Wraps showdown's makeHtml(): on a ⑨ hit the converter receives the placeholder, whose conversion is thrown away at
+ * AFTER_MARKDOWN anyway, so it is returned as it is. showdown's cost is largely per call (dozens of sub-parsers), not
+ * per character, so without this a hit would still pay most of the markdown stage. Anything else passes through.
+ */
+function wrapShowdown() {
+    const proto = globalThis.SillyTavern?.libs?.showdown?.Converter?.prototype;
+    if (!proto || typeof proto.makeHtml !== 'function' || showdownWrapped) return;
+    const orig = proto.makeHtml;
+    proto.makeHtml = function (text) {
+        if (htmlHit !== null && text === HTML_PLACEHOLDER) return text;
+        return orig.apply(this, arguments);
+    };
+    showdownWrapped = true;
+}
+
+// What a user feels: frames the page could not paint in time while a reply streams, and tasks long enough to
+// freeze the page (PerformanceObserver 'longtask', Chromium). Counted since the stats were reset; the frame sampler
+// runs only during a generation, so idle pages pay nothing.
+const FRAME_BUDGET_MS = 1000 / 60;
+const feel = { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0 };
+const resetFeel = () => { Object.assign(feel, { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0 }); };
+let frameRaf = 0;
+let frameLast = 0;
+function frameTick() {
+    if (!generating || !cfg.frameStats) {
+        frameRaf = 0;
+        return;
+    }
+    const now = performance.now(); // when this frame's callbacks ran, not the frame's scheduled start: what was felt
+    if (frameLast) {
+        const gap = now - frameLast;
+        feel.frames++;
+        if (gap > FRAME_BUDGET_MS * 2) feel.dropped++; // more than a frame late: a visible stutter
+        if (gap > 100) feel.frozen++; // a freeze a user notices
+    }
+    frameLast = now;
+    frameRaf = requestAnimationFrame(frameTick);
+}
+function startFrames() {
+    if (frameRaf || !cfg.frameStats || typeof requestAnimationFrame !== 'function') return;
+    frameLast = 0;
+    frameRaf = requestAnimationFrame(frameTick);
+}
+let longTaskObserver = null;
+function observeLongTasks() {
+    if (longTaskObserver || typeof PerformanceObserver !== 'function') return;
+    try {
+        if (!PerformanceObserver.supportedEntryTypes?.includes('longtask')) return;
+        longTaskObserver = new PerformanceObserver((list) => {
+            if (!cfg.frameStats) return;
+            for (const e of list.getEntries()) {
+                feel.longTasks++;
+                feel.longTaskMs += e.duration;
+                if (e.duration >= 100) feel.longTasks100++;
+                if (generating) feel.streamLongTasks++;
+            }
+            statsDirty = true;
+        });
+        longTaskObserver.observe({ entryTypes: ['longtask'] });
+    } catch { longTaskObserver = null; }
+}
+
+// ⑨ HTML cache: key (see keyFor) -> the formatted HTML at our AFTER_MARKDOWN hook. A hit returns a placeholder at
+// BEFORE_REGEX, so the regex scripts (bypassed), the markdown fix-ups and showdown run on a few characters, and the
+// stored HTML takes over at AFTER_MARKDOWN; DOMPurify still runs on it (there is no stage after it). Least recently
+// used entries go first, by count and by estimated size.
+const HTML_PLACEHOLDER = 'rpk';
+class Lru {
+    constructor() {
+        this.map = new Map();
+        this.bytes = 0;
+    }
+    get(key) {
+        const e = this.map.get(key);
+        if (e) { // re-insert: a Map iterates in insertion order, so the first entry is the least recently used
+            this.map.delete(key);
+            this.map.set(key, e);
+        }
+        return e;
+    }
+    set(key, value, size) {
+        const old = this.map.get(key);
+        if (old) {
+            this.map.delete(key);
+            this.bytes -= old.size;
+        }
+        this.map.set(key, { value, size });
+        this.bytes += size;
+    }
+    trim(maxEntries, maxBytes) {
+        for (const [key, e] of this.map) {
+            if (this.map.size <= maxEntries && this.bytes <= maxBytes) break;
+            this.map.delete(key);
+            this.bytes -= e.size;
+        }
+    }
+    clear() {
+        this.map.clear();
+        this.bytes = 0;
+    }
+}
+const htmlMemo = new Lru();
+let htmlHit = null; // the HTML to return at AFTER_MARKDOWN for this pass (null: none)
+/** The power_user settings that change the markdown stage: part of the ⑨ key, so a toggle in User Settings misses. */
+function pipeVersion() {
+    const pu = ctx().powerUserSettings;
+    if (!pu) return '';
+    return fnv1a([pu.auto_fix_generated_markdown, pu.encode_tags, pu.reasoning?.prefix, pu.reasoning?.suffix, pu.markdown_escape_strings, pu.allow_name2_display].map(String).join('\u0000'));
+}
+
+// ---- MessageFormatter hooks: ⑤ persisted display cache, ⑨ HTML cache, ④ compromise mode ----
 
 let persistAvailable = false; // the hooks exist (recent SillyTavern)
+let htmlStageAvailable = false; // the AFTER_MARKDOWN stage exists too (⑨ and the pipeline timing need it)
 let pending = null; // {msg, key, input}: message awaiting its after-regex result
 const streamViews = new Map(); // ④ compromise: "<messageId><m|r>" -> {at, prefix, out} of the streamed message
 let streamView = null; // the view this pass formats
@@ -1410,10 +1751,16 @@ function depthAt(chat, i) {
     return depthTable.d[i];
 }
 
-/** Clears the state the two hooks share for one formatting pass. */
+/** Clears the state the hooks share for one formatting pass (the timing too; see resetPassKeepTiming). */
 function resetPass() {
-    bypass = streamApply = displayPass = false;
-    pending = streamView = streamTail = passChName = passStatic = passStaticTrim = passMessageId = null;
+    resetPassKeepTiming();
+    passT0 = passTk = passT1 = passT2 = null;
+    passHtmlHit = false;
+}
+/** What the regex stage used, cleared at AFTER_MARKDOWN; the pass timing stays for the sanitize wrapper. */
+function resetPassKeepTiming() {
+    bypass = streamApply = displayPass = passVolatile = false;
+    pending = streamView = streamTail = passChName = passStatic = passStaticTrim = passMessageId = htmlHit = null;
 }
 
 /**
@@ -1437,65 +1784,151 @@ function streamPass(mes, c) {
     return streamView.prefix;
 }
 
+/** The ⑤/⑨ key of a message as this pass sees it: its text, the display scripts, the names, the depth rules, the markdown settings. */
+function keyFor(mes, c, chat, msg) {
+    const { name1, name2 } = ctx();
+    // {{user}}/{{char}} in replacements and trim strings resolve to these names (ch_name: the message author).
+    const names = fnv1a([c.ch_name ?? c.characterName, name1, name2].join('\u0000'));
+    const { displayVersion, depthRules } = ensureInfo();
+    let depths = '';
+    if (depthRules.length) { // which depth-limited scripts apply at this message's depth, as messageFormatting() counts it
+        const depth = depthAt(chat, c.messageId);
+        depths = msg.is_system ? ':*' : ':' + depthRules.map(([min, max]) => (depth < min || depth > max ? 0 : 1)).join('');
+    }
+    // 64 bits of the text: a 32-bit hash alone collides once in a few tens of thousands of same-length messages.
+    // Entries keyed the old way simply miss and are recomputed.
+    // the static macro values ({{user}} {{char}} {{persona}} {{group}}) that find patterns, replacements and trim strings can hold
+    const statics = staticKeyFor(2);
+    return hash64(mes) + ':' + mes.length + ':' + displayVersion + ':' + names + depths + ':' + statics + (c.isReasoning ? ':r' : '') + ':' + pipeVersion();
+}
+
+/** A ⑨ hit: the regex stage is bypassed and the stored HTML takes over at AFTER_MARKDOWN. */
+function serveHtml(html) {
+    bypass = true;
+    htmlHit = html;
+    passHtmlHit = true;
+    return HTML_PLACEHOLDER;
+}
+
 function installPersistHooks() {
     const mf = ctx().messageFormatter;
     if (!mf || typeof mf.addHook !== 'function' || !mf.stage) return;
     persistAvailable = true;
+    htmlStageAvailable = !!mf.stage.AFTER_MARKDOWN;
 
-    // Before regex: ④ compromise mode for the streamed message; otherwise, on a ⑤ key match, substitute the
-    // stored result and bypass every script for this message.
+    // Before regex: ④ compromise mode for the streamed message; otherwise, on a ⑨ or ⑤ key match, serve the stored
+    // result and bypass every script for this message.
     mf.addHook((mes, c) => {
         resetPass();
         displayPass = true;
+        // messageFormatting() is synchronous: should it throw between the hooks, the next task starts clean
+        queueMicrotask(resetPass);
         if (c.messageId < 0 || c.isSystem) return mes;
-        passChName = c.ch_name ?? c.characterName ?? ''; // static-macro scripts resolve their key on first use
-        passMessageId = c.messageId;
-        const sp = cfg.persist || cfg.streamingThrottle ? liveStream() : null;
-        if (sp) return cfg.streamingSkip && cfg.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;
-        if (!cfg.persist || c.isReasoning) return mes;
-        const { chat, name1, name2 } = ctx();
-        const msg = chat?.[c.messageId];
-        if (!msg) return mes;
-        // {{user}}/{{char}} in replacements and trim strings resolve to these names (ch_name: the message author).
-        const names = fnv1a([c.ch_name ?? c.characterName, name1, name2].join('\u0000'));
-        const { displayVersion, depthRules } = ensureInfo();
-        let depths = '';
-        if (depthRules.length) { // which depth-limited scripts apply at this message's depth, as messageFormatting() counts it
-            const depth = depthAt(chat, c.messageId);
-            depths = msg.is_system ? ':*' : ':' + depthRules.map(([min, max]) => (depth < min || depth > max ? 0 : 1)).join('');
-        }
-        // 64 bits of the text: a 32-bit hash alone collides once in a few tens of thousands of same-length messages.
-        // Entries keyed the old way simply miss and are recomputed.
-        const key = hash64(mes) + ':' + mes.length + ':' + displayVersion + ':' + names + depths;
-        const e = msg.extra?.[EXTRA_KEY];
-        if (e && e.k === key) {
-            bypass = true;
-            // messageFormatting() is synchronous: should it throw before the after-regex hook, the next task starts clean
-            queueMicrotask(resetPass);
-            persistStats.hits++;
-            return e.same ? mes : String(e.v ?? mes);
-        }
-        pending = { msg, key, input: mes };
-        return mes;
+        if (htmlStageAvailable) passT0 = performance.now();
+        const out = beforeRegex(mes, c);
+        if (passT0 !== null) passTk = performance.now(); // the hook's own work (the ⑨/⑤ key) is counted apart from the scripts
+        return out;
     }, { stage: mf.stage.BEFORE_REGEX, order: mf.order?.LATEST ?? 100 });
 
-    // After regex: append ④'s raw tail, or store the freshly computed result for ⑤.
+    /** The BEFORE_REGEX hook's work for a message: ④ compromise mode, ⑨ and ⑤ lookups. */
+    function beforeRegex(mes, c) {
+        passChName = c.ch_name ?? c.characterName ?? ''; // static-macro scripts resolve their key on first use
+        passMessageId = c.messageId;
+        const wantHtml = cfg.htmlMemo && htmlStageAvailable;
+        const wantPersist = cfg.persist && !c.isReasoning;
+        const sp = wantPersist || wantHtml || cfg.streamingThrottle ? liveStream() : null;
+        if (sp) return cfg.streamingSkip && cfg.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;
+        if (!wantHtml && !wantPersist) return mes;
+        const chat = ctx().chat;
+        const msg = chat?.[c.messageId];
+        if (!msg) return mes;
+        const key = keyFor(mes, c, chat, msg);
+        if (wantHtml) {
+            const hit = htmlMemo.get(key);
+            if (hit) {
+                if (wantPersist && msg.extra?.[EXTRA_KEY]?.k !== key && hit.value.length <= cfg.persistMaxLen) { // ⑤ learns it too
+                    storePersisted(chat, msg, { k: key, h: hit.value });
+                    persistStats.stores++;
+                    trimPersisted(chat);
+                }
+                return serveHtml(hit.value);
+            }
+        }
+        if (wantPersist) {
+            const e = msg.extra?.[EXTRA_KEY];
+            if (e && e.k === key) {
+                if (e.h != null) { // a stored HTML result needs ⑨'s stage to take over; without it, recompute
+                    if (wantHtml) {
+                        persistStats.hits++;
+                        return serveHtml(String(e.h));
+                    }
+                } else {
+                    bypass = true;
+                    persistStats.hits++;
+                    return e.same ? mes : String(e.v ?? mes);
+                }
+            }
+        }
+        pending = { msg: wantPersist ? msg : null, key, input: mes, html: wantHtml };
+        return mes;
+    }
+
+    // After regex: append ④'s raw tail, or store the freshly computed text for ⑤ (the HTML is stored a stage later).
     mf.addHook((mes) => {
+        if (passT0 !== null) passT1 = performance.now();
         const tail = streamTail;
         const view = streamView;
-        const p = pending; // null after a ⑤ hit (bypass)
-        resetPass();
+        const p = pending; // null after a hit (bypass)
+        if (htmlHit !== null) return mes; // the placeholder passes through to AFTER_MARKDOWN
         if (tail !== null) {
             if (view) view.out = mes;
+            if (!htmlStageAvailable) resetPass();
             return mes + tail;
         }
-        if (!p || mes.length > cfg.persistMaxLen) return mes;
-        const chat = ctx().chat;
-        storePersisted(chat, p.msg, mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes });
-        persistStats.stores++;
-        trimPersisted(chat);
+        if (p && !p.html) {
+            pending = null;
+            if (p.msg && !passVolatile && mes.length <= cfg.persistMaxLen) {
+                const chat = ctx().chat;
+                storePersisted(chat, p.msg, mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes });
+                persistStats.stores++;
+                trimPersisted(chat);
+            }
+        }
+        if (!htmlStageAvailable) resetPass();
         return mes;
     }, { stage: mf.stage.AFTER_REGEX, order: mf.order?.EARLIEST ?? 0 });
+
+    if (!htmlStageAvailable) return;
+    // After markdown: serve the ⑨ hit, or store the HTML just made in memory (⑨) and in the chat (⑤).
+    mf.addHook((mes) => {
+        const now = performance.now();
+        const hit = htmlHit;
+        const p = pending;
+        const volatile = passVolatile;
+        resetPassKeepTiming();
+        if (passT0 !== null) passT2 = now; // closed by the sanitize wrapper
+        if (hit !== null) return hit;
+        if (p?.html && !volatile) {
+            if (cfg.htmlMemo) {
+                const size = (p.key.length + mes.length) * 2;
+                const maxBytes = cfg.htmlMemoMaxMB * 1048576;
+                if (size <= maxBytes) {
+                    htmlMemo.set(p.key, mes, size);
+                    htmlMemo.trim(cfg.htmlMemoMaxEntries, maxBytes);
+                    pipe.htmlStores++;
+                }
+            }
+            if (p.msg && cfg.persist && mes.length <= cfg.persistMaxLen) {
+                const chat = ctx().chat;
+                storePersisted(chat, p.msg, { k: p.key, h: mes });
+                persistStats.stores++;
+                trimPersisted(chat);
+            }
+        }
+        return mes;
+    }, { stage: mf.stage.AFTER_MARKDOWN, order: mf.order?.EARLIEST ?? 0 });
+    wrapSanitize();
+    wrapShowdown();
 }
 
 async function clearPersistedCache() {
@@ -1586,13 +2019,46 @@ function buildSummary() {
         top,
         topShare: top && total > 0 ? top.totalMs / total * 100 : 0,
         usage: t`③ memory cache: ${memoLru.size} entries, ${(memoBytes / 1048576).toFixed(1)} of ${settings.memoMaxMB} MB`
+            + (htmlStageAvailable ? '. ' + t`⑨ HTML cache: ${htmlMemo.map.size} messages, ${(htmlMemo.bytes / 1048576).toFixed(1)} of ${settings.htmlMemoMaxMB} MB` : '')
             + (persist ? '. ' + t`⑤ saved in this chat: ${persist.entries} messages, ≈${Math.round(persist.chars / 1024)} KB of ${settings.persistMaxMB} MB` : ''),
         persist: persist && { entries: persist.entries, chars: persist.chars },
+        pipe: pipelineSummary(),
+        feel: { ...feel },
     };
 }
 
+/** The display pipeline since the stats were reset: stage times and shares, ⑨ hits and what they saved. */
+function pipelineSummary() {
+    const full = pipe.passes - pipe.htmlHits;
+    const total = pipeTotal();
+    const pct = (ms) => (total > 0 ? Math.round(ms / total * 100) : 0);
+    return {
+        available: htmlStageAvailable,
+        passes: pipe.passes,
+        full,
+        hookMs: pipe.hookMs, regexMs: pipe.regexMs, markdownMs: pipe.markdownMs, sanitizeMs: pipe.sanitizeMs, totalMs: total,
+        hookPct: pct(pipe.hookMs), regexPct: pct(pipe.regexMs), markdownPct: pct(pipe.markdownMs), sanitizePct: pct(pipe.sanitizeMs),
+        htmlHits: pipe.htmlHits,
+        htmlStores: pipe.htmlStores,
+        htmlSavedMs: Math.max(0, pipe.htmlHits * avgPassMs() - pipe.htmlHitMs), // a hit still pays the placeholder markdown and the sanitizing
+        avgPassMs: avgPassMs(),
+        loadMs: pipe.loadMs,
+        light: adaptiveLight && settings.adaptive,
+    };
+}
+/** "regex 12% · markdown 61% · sanitize 27% of N renders (X ms)". */
+const pipeText = (p) => t`Display renders timed: ${p.full}, ${fmtMs(p.totalMs)} ms: regex ${p.regexPct}%, markdown ${p.markdownPct}%, sanitizing ${p.sanitizePct}%, this extension's own lookups ${p.hookPct}%`;
+const htmlText = (p) => t`⑨ HTML cache: ${p.htmlHits} renders reused, about ${fmtMs(p.htmlSavedMs)} ms saved`;
+/** What a user feels, in words: dropped frames while streaming, long tasks, the time a chat took to open. */
+function feelText(f) {
+    const parts = [];
+    if (f.frames) parts.push(t`frames late while streaming: ${f.dropped} of ${f.frames} (${f.frozen} freezes over 100 ms)`);
+    if (f.longTasks) parts.push(t`tasks over 50 ms: ${f.longTasks} (${f.longTasks100} over 100 ms, ${fmtMs(f.longTaskMs)} ms blocked, ${f.streamLongTasks} while streaming)`);
+    return parts.join('; ');
+}
+
 /** Size of a ⑤ entry, in characters (about its bytes in the chat file). */
-const persistSize = (e) => String(e.k).length + (e.v?.length ?? 0);
+const persistSize = (e) => String(e.k).length + (e.v?.length ?? 0) + (e.h?.length ?? 0);
 
 // ⑤ usage is a running total per chat (feature list 1.3): a full scan only for another chat or after a change the
 // hooks cannot see (CHAT_CHANGED, a deleted message).
@@ -1674,7 +2140,15 @@ function buildReportText() {
         s.usage,
     ];
     if (s.fast) lines.push(fastText(s.fast));
-    if (measured) lines.push(measureText(measured), slowestText(measured));
+    if (s.pipe.available && s.pipe.full) {
+        lines.push(pipeText(s.pipe));
+        if (s.pipe.htmlHits) lines.push(htmlText(s.pipe));
+        if (s.pipe.light) lines.push(t`The regex stage is under 2% of the renders: the profiler times 1 run in 64 (adaptive).`);
+    }
+    const felt = feelText(s.feel);
+    if (felt) lines.push(t`Felt: ${felt}`);
+    if (s.pipe.loadMs) lines.push(t`Opening this chat rendered for ${fmtMs(s.pipe.loadMs)} ms`);
+    if (measured) lines.push(measureText(measured), slowestText(measured), ...measureVerdict(measured));
     if (s.top) lines.push(t`#1 "${s.top.name}" takes ${s.topShare.toFixed(0)}% of the total time`);
     if (s.ineffective.length) lines.push(t`Candidates to disable (ran ${INEFFECTIVE_RUNS}+ times, never matched): ${s.ineffective.join(', ')}`);
     lines.push('', reportHeader());
@@ -1722,7 +2196,9 @@ function buildReportData() {
         chatMessages: s.chatLen,
         scripts: { ...s.counts, infoBuilds },
         totals: { calls: s.calls, totalMs: s.total, skipped: s.skipped, hits: s.hits, streamSkipped: s.streamSkipped, bypass: s.bypass, fastRuns: s.fast, persistHits: persistStats.hits, persistStores: persistStats.stores, savedMs: s.calls ? s.saved : null },
-        memo: { entries: memoLru.size, bytes: memoBytes, maxMB: settings.memoMaxMB, persist: s.persist },
+        memo: { entries: memoLru.size, bytes: memoBytes, maxMB: settings.memoMaxMB, persist: s.persist, html: { entries: htmlMemo.map.size, bytes: htmlMemo.bytes, maxMB: settings.htmlMemoMaxMB } },
+        pipeline: s.pipe,
+        felt: s.feel,
         measured,
         candidatesToDisable: s.ineffective,
         orderConflicts: [...conflicts.values()].map(c => ({ earlier: c.earlier.name, later: c.later.name, count: c.count, confirmed: c.confirmed, sample: c.sample })),
@@ -1730,8 +2206,8 @@ function buildReportData() {
         lint: lintRows().map(row => ({ script: row.info.name, ids: row.info.ids, rule: row.rule, text: row.text, fixable: !!row.fix })),
         rows: s.rows.map((r, i) => ({
             rank: i + 1, name: r.name, pattern: r.src, runs: r.calls, totalMs: r.totalMs, avgMs: avgMs(r), maxMs: r.maxMs, replacerMs: r.replMs,
-            matched: r.matched, changed: r.changed, skips: r.skipped, hits: r.hits, streamSkips: r.streamSkipped, fastRuns: r.fast,
-            sampled: !!settings.profilerSampling && r.seen > SAMPLE_AFTER, // runs, totals, matched and changed are scaled from 1 run in 8
+            matched: r.matched, changed: r.changed, skips: r.skipped, hits: r.hits, streamSkips: r.streamSkipped, fastRuns: r.fast, incrementalRuns: r.incremental,
+            sampled: (!!settings.profilerSampling && r.seen > SAMPLE_AFTER) || s.pipe.light, // runs, totals, matched and changed are scaled from 1 run in 8 (64 when adaptive)
             redos: r.redos, fused: r.fused, broken: r.broken, tripped: r.tripped,
             literal: r.needle?.terms ?? [], literalReason: r.needle?.reason ?? null, minLength: r.needle?.minLen ?? 0, warnings: warnings(r), spike: r.spike, spikes: r.spikes,
         })),
@@ -1874,10 +2350,10 @@ function updateListBadges() {
     }
 }
 
-const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'seen', 'fused', 'broken', 'slowRuns', 'moreMatches', 'spike', 'spikes'];
-const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false, breaker: false }; // what a measurement turns off
+const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'incremental', 'seen', 'fused', 'broken', 'slowRuns', 'moreMatches', 'spike', 'spikes'];
+const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, htmlMemo: false, persist: false, fastPath: false, breaker: false, adaptive: false }; // what a measurement turns off
 
-const CACHES_OFF = { profiler: false, memo: false, persist: false, breaker: false }; // a per-row measurement keeps the prefilter as set
+const CACHES_OFF = { profiler: false, memo: false, htmlMemo: false, persist: false, breaker: false, adaptive: false }; // a per-row measurement keeps the prefilter as set
 
 const MEASURE_CHUNK = 10; // messages formatted between two yields to the page
 let measureBusy = false; // a measurement is running (it yields, so other code runs in between)
@@ -1897,8 +2373,11 @@ async function measureChat(without = null) {
     measureBusy = true;
     const pause = () => globalThis.scheduler?.yield?.() ?? new Promise(resolve => setTimeout(resolve, 0));
     const over = (changes) => Object.assign(Object.create(settings), changes);
+    const stageSnap = () => [pipe.regexMs, pipe.markdownMs, pipe.sanitizeMs, pipe.htmlHitMs, pipe.htmlHits, pipe.hookMs];
     const render = async (times, skip, config) => { // times: per-message {i, len, ms} are pushed when given
         let total = 0;
+        const before = stageSnap();
+        let over16 = 0; // messages that took more than a frame on their own
         for (let i = 0; i < chat.length; i++) {
             const m = chat[i];
             cfg = config;
@@ -1913,28 +2392,66 @@ async function measureChat(without = null) {
             }
             const ms = performance.now() - t1;
             total += ms;
+            if (ms > FRAME_BUDGET_MS) over16++;
             if (times) times.push({ i, len: (m?.mes?.length ?? 0) + (m?.extra?.reasoning?.length ?? 0), ms });
             if (i % MEASURE_CHUNK === MEASURE_CHUNK - 1) await pause();
         }
-        return total;
+        const after = stageSnap();
+        const [regex, markdown, sanitize, hitMs, hits, hook] = after.map((v, k) => v - before[k]);
+        return { total, over16, stages: htmlStageAvailable ? { regex, markdown, sanitize, hitMs, hits, hook } : null };
     };
     const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => (Array.isArray(st[c]) ? [...st[c]] : st[c]))]));
     const savedPersist = { ...persistStats };
+    const savedPipe = { ...pipe };
     const savedConflicts = new Map([...conflicts].map(([k, c]) => [k, { ...c }]));
+    const savedLight = adaptiveLight;
     const times = [];
     let first, second;
     try {
         first = await render(without ? null : times, null, over(without ? CACHES_OFF : FEATURES_OFF)); // the raw cost of each message
-        second = await render(null, without, over(without ? CACHES_OFF : { profiler: false }));
+        second = await render(null, without, over(without ? CACHES_OFF : { profiler: false, adaptive: false }));
     } finally {
         measureBusy = false;
         for (const [k, st] of stats) COUNTERS.forEach((c, i) => { st[c] = saved.get(k)?.[i] ?? 0; });
         Object.assign(persistStats, savedPersist);
+        Object.assign(pipe, savedPipe);
+        adaptiveLight = savedLight;
         conflicts.clear();
         for (const [k, c] of savedConflicts) conflicts.set(k, c);
     }
-    if (without) return { with: first, without: second };
-    return { messages: chat.length, off: first, on: second, slowest: times.sort((a, b) => b.ms - a.ms).slice(0, SLOWEST_MESSAGES) };
+    if (without) return { with: first.total, without: second.total };
+    return {
+        messages: chat.length, off: first.total, on: second.total, slowest: times.sort((a, b) => b.ms - a.ms).slice(0, SLOWEST_MESSAGES),
+        over16: { off: first.over16, on: second.over16 }, // messages over a frame budget each: what shows as a hitch
+        stages: first.stages && second.stages ? { off: first.stages, on: second.stages } : null,
+    };
+}
+
+/**
+ * The verdict of a measurement, in words a user can act on: whether the saving can be felt (a render under a frame,
+ * fewer messages over a frame), what the regex stage is as a share of the render, and what to change when it is not
+ * the cost (SillyTavern's own settings).
+ */
+function measureVerdict(m) {
+    const savedMs = m.off - m.on;
+    const share = m.off > 0 ? savedMs / m.off : 0;
+    const perMsg = m.messages ? m.on / m.messages : 0;
+    const lines = [];
+    if (m.stages) {
+        const s = m.stages.off;
+        const total = s.regex + s.markdown + s.sanitize + s.hook;
+        if (total > 0) lines.push(t`Of the render with the features off, the regex stage was ${Math.round(s.regex / total * 100)}%, markdown ${Math.round(s.markdown / total * 100)}%, sanitizing ${Math.round(s.sanitize / total * 100)}%.`);
+    }
+    if (m.over16) lines.push(t`Messages over a frame (${Math.round(FRAME_BUDGET_MS)} ms) on their own: ${m.over16.off} → ${m.over16.on}.`);
+    if (savedMs < FRAME_BUDGET_MS && m.over16?.on === m.over16?.off) {
+        lines.push(t`The saving is under one frame for the whole chat: nothing a user can feel here. The extension costs nothing either; the profiler is what remains useful.`);
+    } else if (share < 0.1 && perMsg > FRAME_BUDGET_MS) {
+        lines.push(t`The regex stage is not the cost in this chat: each message still takes over a frame to render with every feature on.`);
+    }
+    if (perMsg > FRAME_BUDGET_MS || share < 0.1) {
+        lines.push(t`What helps more: User Settings → "# Messages to Load" at 50–100 (fewer renders when a chat opens) and "Streaming FPS" at 10–15 (fewer renders while streaming).`);
+    }
+    return lines;
 }
 
 /** "Measure on this chat": the new result, kept as the last one (an empty chat leaves the previous result). */
@@ -1950,6 +2467,9 @@ function resetStats() {
     conflicts.clear();
     statsSince = Date.now();
     persistStats.hits = persistStats.stores = 0;
+    resetPipe();
+    resetFeel();
+    adaptiveLight = false;
     statById.clear();
     wrapped.clear(); // wrappers hold their stat object; new ones link to fresh stats
 }
@@ -2007,6 +2527,7 @@ const settingsHtml = () => `
     </div>
     <div class="inline-drawer-content">
       <div class="rpk-summary" id="rpk_summary">${t`Measuring...`}</div>
+      <div class="rpk-pipe" id="rpk_pipe" title="${t`Where the time of a display render goes: the regex scripts (what this extension can save), SillyTavern's markdown conversion, and the HTML sanitizer. Timed since the stats were reset.`}"></div>
 
       <h4 class="rpk-section">${t`Features`}</h4>
       <div class="rpk-features">
@@ -2014,6 +2535,8 @@ const settingsHtml = () => `
         ${feature('rpk_profiler', t`① Measure run time (profiler)`, t`Counts how often each script runs and how long it takes, for the table below. Costs almost nothing.`)}
         ${feature('rpk_profilerSampling', t`Sample: past 1000 runs of a script, time 1 run in 8`, t`Timing is two clock reads per run; with sampling, the totals of a busy script are scaled from every eighth run. On by default on devices reporting 4 GB or less (only Chromium-based browsers report it).`, { sub: true })}
         ${feature('rpk_timeReplacer', t`Time the replacement separately (the Replacer column)`, t`Two more clock reads per match. Off, that column stays 0.`, { sub: true })}
+        ${feature('rpk_adaptive', t`Adaptive: time 1 run in 64 once regex is under 2% of the renders`, t`The whole display pipeline is timed (regex, markdown, sanitizing). When the regex stage is a negligible share, the profiler steps back and the summary says so instead of promising savings.`, { sub: true })}
+        ${feature('rpk_frameStats', t`Count what a user feels: late frames while streaming, long tasks`, t`A frame sampler runs only during a generation; long tasks (over 50 ms) come from the browser's PerformanceObserver where it offers them (Chromium). Idle pages pay nothing.`, { sub: true })}
         </div>
         ${feature('rpk_prefilter', t`② Skip runs that cannot match (literal prefilter)`, t`If the message does not even contain the fixed text a script looks for (such as &lt;/status&gt;), the regex is not run. The result is exactly the same.`)}
         <div class="rpk-feature-group">
@@ -2024,9 +2547,14 @@ const settingsHtml = () => `
         <div class="rpk-feature-group">
         ${feature('rpk_streaming', t`④ Rest display scripts while streaming`, t`While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. This removes most streaming lag.`)}
         ${feature('rpk_stream_throttle', t`Compromise: keep formatting the finished lines`, t`With ④ on, display scripts still format the lines that are already complete, at most once per interval (0.5 s by default, under Limits). The line being written stays raw; the finished reply gets every script.`, { sub: true })}
+        ${feature('rpk_streamingIncremental', t`Incremental: run line-local scripts on the new lines only`, t`In compromise mode, a script whose matches cannot cross a line break (no \\n, \\s, [^…] or dotAll) formats only the lines added since its last run and reuses the rest. The first runs are compared with a full run; on any difference the script goes back to full runs.`, { sub: true })}
         </div>
-        ${feature('rpk_persist', t`⑤ Save results in the chat file (persistent cache)`, t`Stores the display result with the message, so reopening the chat skips the work. The chat file grows; results are recomputed automatically when a script changes.`, { labelId: 'rpk_persist_label' })}
+        ${feature('rpk_persist', t`⑤ Save results in the chat file (persistent cache)`, t`Stores the display result with the message, so reopening the chat skips the work. The chat file grows; results are recomputed automatically when a script changes. With ⑨ on, the finished HTML is stored, so markdown is skipped too.`, { labelId: 'rpk_persist_label' })}
+        <div class="rpk-feature-group">
         ${feature('rpk_fastPath', t`⑥ Replace without SillyTavern's callback (fast path)`, t`When a script's replacement has no macros, the browser's own template replacement is used instead of SillyTavern's per-match callback, where most of the replacer time goes. The first runs of every script are compared with SillyTavern's result; on any difference the script goes back to the callback.`)}
+        ${feature('rpk_fastPathStatic', t`Also for replacements with {{user}}, {{char}}, {{persona}} or {{group}}`, t`Their values hold for a whole message render, so the template is finished per name set and verified the same way (display renders only).`, { sub: true })}
+        </div>
+        ${feature('rpk_htmlMemo', t`⑨ Reuse the formatted HTML (HTML cache)`, t`When a message is rendered again unchanged (swipes, re-renders, scrolling back), the HTML made last time is reused: regex scripts and markdown are both skipped, only the sanitizer runs. Memory-only, limited under Limits; stored in the chat too when ⑤ is on. A message whose text, scripts, names or markdown settings changed is formatted again.`, { labelId: 'rpk_htmlMemo_label' })}
         ${feature('rpk_fuse', t`⑦ Fuse: skip very long inputs for risky patterns`, t`A pattern the analyzer flags for catastrophic backtracking is not run on inputs longer than the limit under Limits (20,000 characters by default): that text is shown as it is. Off by default, as it changes the result.`)}
         ${feature('rpk_breaker', t`⑧ Circuit breaker: turn off a script that keeps running long`, t`After the set number of runs over the set time (3 runs over 500 ms by default), the script is skipped for the rest of the session, with an Undo in the toast and in the table. The script itself is never changed. Off by default.`)}
       </div>
@@ -2039,6 +2567,8 @@ const settingsHtml = () => `
           ${limit('memoMaxEntries', t`③ Cache entries`, t`Oldest results are dropped beyond this many.`)}
           ${limit('memoMaxLen', t`③ Longest input to cache (characters)`, t`Longer inputs are not cached.`)}
           ${limit('memoMaxMB', t`③ Cache memory (MB)`, t`Oldest results are dropped beyond this estimated size (2 bytes per character of input and output).`)}
+          ${limit('htmlMemoMaxEntries', t`⑨ HTML cache entries`, t`Oldest formatted messages are dropped beyond this many.`)}
+          ${limit('htmlMemoMaxMB', t`⑨ HTML cache memory (MB)`, t`Oldest formatted messages are dropped beyond this estimated size.`)}
           ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved in the chat.`)}
           ${limit('persistMaxMB', t`⑤ Saved results per chat (MB)`, t`Beyond this, the oldest messages' results are dropped from the chat.`)}
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
@@ -2102,9 +2632,9 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure', rpk_lint: 'lint', rpk_listBadges: 'listBadges' };
+const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_adaptive: 'adaptive', rpk_frameStats: 'frameStats', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_fastPathStatic: 'fastPathStatic', rpk_htmlMemo: 'htmlMemo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_streamingIncremental: 'streamingIncremental', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure', rpk_lint: 'lint', rpk_listBadges: 'listBadges' };
 // editable limits: setting -> [min, max]
-const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], fuseLen: [1000, 1e7], breakerMs: [50, 60000], breakerCount: [1, 100], loadHintMs: [100, 600000] };
+const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], htmlMemoMaxEntries: [0, 1e6], htmlMemoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], fuseLen: [1000, 1e7], breakerMs: [50, 60000], breakerCount: [1, 100], loadHintMs: [100, 600000] };
 
 const RENDER_MIN_MS = 500; // the panel is re-rendered at most this often while stats keep changing
 let ui = null; // panel elements, cached by bindUi()
@@ -2124,6 +2654,14 @@ const litTitle = (r, lit) => [
 ].filter(Boolean).join('\n');
 /** A key figure in the summary; the tests read it by its key. */
 const fig = (key, value) => `<b data-k="${key}">${value}</b>`;
+
+/** The display pipeline as a stacked bar: regex | markdown | sanitize, with their shares; empty until something was timed. */
+function pipeBarHtml(p) {
+    if (!p.available || !p.full || p.totalMs <= 0) return '';
+    const seg = (cls, pct, ms, label) => `<span class="rpk-pipe-seg rpk-pipe-${cls}" style="width:${pct}%" title="${esc(`${label}: ${fmtMs(ms)} ms (${pct}%)`)}" data-k="pipe-${cls}" data-pct="${pct}">${pct >= 12 ? `${esc(label)} ${pct}%` : ''}</span>`;
+    return `<div class="rpk-pipe-bar">${seg('regex', p.regexPct, p.regexMs, t`regex`)}${seg('markdown', p.markdownPct, p.markdownMs, t`markdown`)}${seg('sanitize', p.sanitizePct, p.sanitizeMs, t`sanitize`)}${seg('hook', p.hookPct, p.hookMs, t`cache lookups`)}</div>`
+        + `<div class="rpk-pipe-legend rpk-dim">${esc(t`One display render: ${fmtMs(p.avgPassMs)} ms on average; the regex stage (what ②③④⑥ can save) is ${p.regexPct}% of it.`)}</div>`;
+}
 
 function renderPanel() {
     if (!ui) return;
@@ -2145,6 +2683,14 @@ function renderPanel() {
             : t`${fig('skipped', skips + s.bypass)} runs were skipped (${breakdown}). The time saved is known once some runs have been measured.`);
         if (s.fast) lines.push(`<span class="rpk-dim">${fastText(s.fast)}</span>`);
     }
+    if (s.pipe.available && s.pipe.full) {
+        lines.push(`<span class="rpk-dim">${esc(pipeText(s.pipe))}.</span>` + (s.pipe.htmlHits ? ` ${esc(htmlText(s.pipe))}.` : ''));
+        if (s.pipe.light) lines.push(`<span class="rpk-dim">${t`The regex stage is under 2% of the renders here: ②③④ have little to save, so the profiler times 1 run in 64. What helps more is under "What SillyTavern's own settings can do".`}</span>`);
+    }
+    const felt = feelText(s.feel);
+    if (felt || s.pipe.loadMs) {
+        lines.push(`<span class="rpk-dim">${esc([felt, s.pipe.loadMs ? t`opening this chat rendered for ${fmtMs(s.pipe.loadMs)} ms` : ''].filter(Boolean).join('; '))}.</span>`);
+    }
     if (s.top && s.calls > 0) {
         lines.push(t`Slowest: <b>${esc(s.top.name)}</b>, ${s.topShare.toFixed(0)}% of the time.` + (s.topShare >= 50 ? ' ' + t`Turning it off or fixing it helps the most.` : ''));
     }
@@ -2163,6 +2709,7 @@ function renderPanel() {
     lines.push(`<span class="rpk-dim rpk-since">${t`Since ${new Date(statsSince).toLocaleTimeString()}`}</span>`);
     const summary = lines.map(l => `<p>${l}</p>`).join('');
     setContent(ui.summary, summary);
+    setContent(ui.pipe, pipeBarHtml(s.pipe));
 
     setContent(ui.thead, headerHtml());
     const ranks = new Map(s.rows.map((r, i) => [r, i + 1])); // by total time, whatever the sort
@@ -2193,7 +2740,7 @@ function renderPanel() {
         ? t`⑤, the compromise mode and ③'s name-macro option need a newer SillyTavern (staging with MessageFormatter hooks).`
         : settings.persist ? t`⑤ is on: display results are being saved in this chat. Changing a script invalidates them automatically.` : '', 'textContent');
     setContent(ui.usage, s.usage, 'textContent');
-    setContent(ui.measure, measured ? `<p>${esc(measureText(measured))}</p><p class="rpk-dim">${esc(slowestText(measured))}</p>` : '');
+    setContent(ui.measure, measured ? `<p>${esc(measureText(measured))}</p><p class="rpk-dim">${esc(slowestText(measured))}</p>` + measureVerdict(measured).map(l => `<p class="rpk-verdict">${esc(l)}</p>`).join('') : '');
 
     const lint = lintRows();
     ui.lint = lint;
@@ -2228,7 +2775,7 @@ async function scriptAction(r, off) {
 function bindUi() {
     const root = document.getElementById('regex_perf_kit');
     const find = (sel) => root.querySelector(sel);
-    ui = { summary: find('#rpk_summary'), thead: find('#rpk_table thead'), tbody: find('#rpk_table tbody'), note: find('#rpk_persist_note'), usage: find('#rpk_usage'), measure: find('#rpk_measure_result'), lintList: find('#rpk_lint_list'), lintCount: find('#rpk_lint_count'), rows: [], lint: [] };
+    ui = { summary: find('#rpk_summary'), pipe: find('#rpk_pipe'), thead: find('#rpk_table thead'), tbody: find('#rpk_table tbody'), note: find('#rpk_persist_note'), usage: find('#rpk_usage'), measure: find('#rpk_measure_result'), lintList: find('#rpk_lint_list'), lintCount: find('#rpk_lint_count'), rows: [], lint: [] };
 
     /** Shows the current settings in the toggles and limit fields (at start and after a reset). */
     const syncControls = () => {
@@ -2241,10 +2788,12 @@ function bindUi() {
             settings[key] = el.checked;
             ctx().saveSettingsDebounced();
             if ((key === 'memo' && !el.checked) || key === 'memoHashKeys') clearMemo(); // entries keyed the other way are useless
+            if (key === 'htmlMemo' && !el.checked) htmlMemo.clear();
             renderPanel();
         });
     }
-    if (!persistAvailable) find('#rpk_persist').disabled = find('#rpk_stream_throttle').disabled = find('#rpk_memoStatic').disabled = true;
+    if (!persistAvailable) find('#rpk_persist').disabled = find('#rpk_stream_throttle').disabled = find('#rpk_memoStatic').disabled = find('#rpk_streamingIncremental').disabled = find('#rpk_fastPathStatic').disabled = true;
+    if (!htmlStageAvailable) find('#rpk_htmlMemo').disabled = find('#rpk_adaptive').disabled = true;
 
     for (const [key, [min, max]] of Object.entries(LIMITS)) {
         const el = find('#rpk_' + key);
@@ -2255,6 +2804,7 @@ function bindUi() {
             el.value = settings[key];
             ctx().saveSettingsDebounced();
             trimMemo();
+            htmlMemo.trim(settings.htmlMemoMaxEntries, settings.htmlMemoMaxMB * 1048576);
             renderPanel();
         });
     }
@@ -2277,6 +2827,7 @@ function bindUi() {
         Object.assign(settings, defaultSettings); // settings.ui (open sections) is not a feature setting and stays
         syncControls();
         clearMemo();
+        htmlMemo.clear();
         ctx().saveSettingsDebounced();
         renderPanel();
         toastr.info(t`Settings restored to their defaults.`);
@@ -2420,13 +2971,16 @@ eventSource.on(event_types.GENERATION_STARTED, (_type, _params, dryRun) => {
     checkWrapper();
     generating = true;
     streamViews.clear();
+    startFrames();
 });
 for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPED]) {
     eventSource.on(event, () => {
         generating = false;
         streamViews.clear();
+        for (const w of wrapped.values()) if (w._meta) w._meta.inc = null; // ④ incremental state holds the streamed text
     });
 }
+observeLongTasks();
 let loadHintShown = false; // once per session
 for (const event of [event_types.CHARACTER_MESSAGE_RENDERED, event_types.USER_MESSAGE_RENDERED]) {
     if (event) eventSource.on(event, () => { chatLen++; });
@@ -2438,6 +2992,7 @@ eventSource.on(event_types.CHAT_CHANGED, () => {
     chatLen = ctx().chat?.length ?? 0;
     const now = performance.now();
     const loadMs = now - lastCall < BURST_GAP_MS ? lastCall - burstStart : 0; // the render burst that just ended
+    pipe.loadMs = loadMs;
     if (!loadHintShown && loadMs > settings.loadHintMs) {
         loadHintShown = true;
         toastr.info(t`Rendering this chat took ${(loadMs / 1000).toFixed(1)} s. A lower "# Messages to Load" (User Settings) opens chats faster.`, 'Regex Perf Kit', { timeOut: 15000 });

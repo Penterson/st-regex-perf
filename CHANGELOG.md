@@ -1,12 +1,43 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-11-07
+
+Why this release: in a small setup (few scripts, short messages) the regex stage is a few percent of a render, so shaving it cannot be felt. This release measures the whole render, says so when that is the case, and skips what lies beyond regex when it can.
+
+### Measurements
+
+- The whole display pipeline is timed per render — this extension's cache lookups / the regex scripts / markdown (SillyTavern's fix-ups, quotes, showdown) / DOMPurify — from hooks at the stage boundaries and a wrapper around `DOMPurify.sanitize()` for the `MESSAGE_SANITIZE` config. The summary and the text/JSON reports give the shares; a stacked bar under the summary draws them (`#rpk_pipe`, segments with `data-k="pipe-*"`).
+- What a user feels: frames late (over two frame budgets) and freezes (over 100 ms) while a reply streams, from a frame sampler that runs only during a generation; long tasks (over 50 ms, over 100 ms, total blocked, while streaming) from `PerformanceObserver` where the browser offers it; how long opening the chat rendered. In the summary, the reports and the JSON (`felt`).
+- "Measure on this chat" gives a verdict: the stage shares with the features off, how many messages took more than a frame on their own before and after, and, when the whole chat saves less than one frame, that nothing can be felt — with the two SillyTavern settings that help more. The JSON `measured` gains `over16` and `stages`.
+- ① adaptive (sub-option, on): once regex is under 2% of the renders (checked every 64 full renders), 1 run in 64 is timed and the summary says the regex stage is not the cost here.
+
+### Speed
+
+- ⑨ HTML cache (on): an unchanged message rendered again is served the HTML made last time; regex scripts and markdown are skipped, DOMPurify still runs. Keyed by a 64-bit hash of the text, the display scripts' version, the name/persona/group values, the depth rules and the markdown-related settings; a message a volatile script (`{{random}}`, `{{getvar}}`, a non-static macro in the find pattern) matched is not stored. Memory only, LRU by count and size (Limits); with ⑤ on the HTML is stored in the chat too (`extra.regex_perf_cache.h`). A wrapper around `showdown.Converter.prototype.makeHtml` passes the hit's placeholder through, since showdown's cost is mostly per call.
+- ⑤ stores the finished HTML when ⑨ is on (older `v`/`same` entries are still served when ⑨ is off), and no longer stores a message a volatile script matched, so `{{random}}` display scripts re-roll as in plain SillyTavern.
+- ④ incremental (sub-option of the compromise mode, on): a script whose matches cannot cross a line break — no `\n`, `\s`, `[^…]`, dotAll, no `^$` without `m`, `g` required, no group reference the pattern cannot fill, no empty match (`isLineLocal`) — runs on the lines added since its last run and reuses the rest; its first three incremental runs are checked against a full run.
+- ⑥ for static macros (sub-option, on): replacements and trim strings whose only macros are `{{user}}` `{{char}}` `{{persona}}` `{{group}}` get a template per name set in display renders, verified against the callback like any fast path; a `$` in a value stays text.
+- The static-macro values (③'s keys, ⑥'s templates, ⑨'s key) are kept per fingerprint, so alternating authors do not resolve them again on every message.
+
+### Not done, and why
+
+- A single multi-pattern scan for ②'s literals (Aho-Corasick or one alternation) was benchmarked and dropped: on an 8 KB message with 50 literals, `includes` × 50 took 65 µs, one alternation 59 µs, Aho-Corasick 137 µs, and the answers are already cached per input.
+- Pre-filtering the script list per message kind is SillyTavern's loop (`getRegexedString`), not reachable from the provider.
+- Skipping DOMPurify on a ⑨ hit was designed and rejected: its output depends on state (external media allowances) as well as settings, so a stale result could change what it means for safety.
+
+### Also
 
 - The settings panel lists the features in order, ① to ⑧ (⑥ sat between ③ and ④).
 - Narrow panels (phones) no longer hide the Avg, Replacer, Max, Matched and Changed columns: the table scrolls sideways and the Script column sticks to the left.
 - ③'s name-macro option says that it needs the MessageFormatter hooks (its key is only resolved in a display render), and its checkbox is disabled with ⑤'s where they are missing.
 - Wording: the ∅ mark and the "never matched" line say 20 runs or more (the code counts `>=`); the ⑧ count limit no longer reads as runs that are tolerated; the Skips tooltip mentions the minimum-length skip; the sampling default says "devices reporting 4 GB or less"; the browser-support lint names the version per feature (lookbehind 16.4, v flag and duplicate group names 17, d flag 15, on Safari and iOS); the READMEs say "the browser's" template replace instead of V8's; Korean particles after script names are 이(가) and are attached.
 - `npm run screenshots` works on Windows (the output path is built with `fileURLToPath`).
+
+### Tests and tooling
+
+- The harness runs SillyTavern's whole `messageFormatting()` (stand-ins for the converter — identity, or showdown-like per-call cost with `setConverter('para')` — and DOMPurify, counted), serves cross-origin isolation headers for 5 µs timers, exposes `SillyTavern.libs` and `powerUserSettings`, and `window.__h` for ad-hoc debugging.
+- New cases: ⑨ (hits, volatile misses, setting misses, reasoning, ⑤ `h` entries serving a fresh page, limits), `isLineLocal` table, incremental streaming equivalence and run counts, the static fast path (names with `$`, `{{char}}` trim strings), adaptive mode, felt figures. 80 cases.
+- The bench warms the JIT for four passes and uses the showdown-like converter. The gate now allows 5% over the stored ratio and never more than 2% slower than no extension, re-measured up to twice. Stored baseline: warm ratio 0.668.
 
 ## 0.3.0 — 2026-11-06
 

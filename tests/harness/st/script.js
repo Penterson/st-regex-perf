@@ -1,6 +1,7 @@
 // Stand-in for SillyTavern's public/script.js with only what the regex engine, the message formatter and
-// Regex Perf Kit touch. The body of messageFormatting() up to its regex stage is SillyTavern's own code,
-// spliced in at the marker below by tests/server.mjs from the pinned script.js.
+// Regex Perf Kit touch. The whole body of messageFormatting() is SillyTavern's own code, spliced in at the marker
+// below by tests/server.mjs from the pinned script.js; the markdown converter and DOMPurify it calls are stand-ins
+// here (see converter / DOMPurify), counted so a test can tell whether the markdown stage ran.
 /* eslint-disable no-unused-vars -- the names below are used by the spliced code */
 import { getRegexedString, regex_placement } from './scripts/extensions/regex/engine.js';
 import { MessageFormatter } from './scripts/message-formatter.js';
@@ -11,10 +12,57 @@ export let this_chid;
 export let name1 = 'User';
 export let name2 = 'Char';
 export let streamingProcessor = null;
-export const power_user = { user_prompt_bias: '', show_user_prompt_bias: true };
+export const power_user = {
+    user_prompt_bias: '', show_user_prompt_bias: true,
+    auto_fix_generated_markdown: false, encode_tags: false, allow_name2_display: true,
+    reasoning: { prefix: '', suffix: '' },
+    markdown_escape_strings: '',
+};
 const COMMENT_NAME_DEFAULT = 'Note';
 const systemUserName = 'SillyTavern System';
-let mesForShowdownParse; // written by the spliced code
+export let mesForShowdownParse; // written by the spliced code
+
+// ---- The rest of the display pipeline, as stand-ins ----
+export const counters = { saveSettings: 0, saveChat: 0, makeHtml: 0, sanitize: 0, converterChars: 0 };
+/**
+ * The markdown converter: the identity by default (so tests can assert on the text), or, with setConverter('para'),
+ * a small paragraph/bold converter whose cost grows with the input, for the benchmarks.
+ */
+let converterMode = 'identity';
+const PARA_PASSES = [
+    [/\*\*(.+?)\*\*/g, '<b>$1</b>'], [/(^|\W)\*(?!\s)(.+?)\*(?=\W|$)/g, '$1<i>$2</i>'], [/`([^`]+)`/g, '<code>$1</code>'],
+    [/^#{1,6} (.*)$/gm, '<h4>$1</h4>'], [/^> (.*)$/gm, '<blockquote>$1</blockquote>'], [/^[-*] (.*)$/gm, '<li>$1</li>'],
+    [/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>'], [/~~(.+?)~~/g, '<s>$1</s>'], [/__(.+?)__/g, '<u>$1</u>'],
+    [/(https?:\/\/\S+)/g, '<a href="$1">$1</a>'], [/:\w+:/g, '☺'], [/\s+$/gm, ''],
+];
+export function setConverter(mode) { converterMode = mode; }
+/** The shape of showdown: a Converter class whose prototype carries makeHtml(), reachable as SillyTavern.libs.showdown. */
+export class Converter {
+    makeHtml(s) {
+        counters.makeHtml++;
+        counters.converterChars += s.length;
+        if (converterMode === 'identity') return s;
+        // a handful of passes over the text, as a markdown converter makes (showdown runs dozens)
+        let out = s;
+        for (let k = 0; k < 64; k++) for (const [re, rep] of PARA_PASSES) out = out.replace(re, rep);
+        return out.split(/\n{2,}/).map(p => '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('\n');
+    }
+}
+export const showdown = { Converter };
+const converter = new Converter();
+/** DOMPurify stand-in: the same object SillyTavern.libs.DOMPurify points at, so the extension can wrap sanitize(). */
+export const DOMPurify = {
+    sanitize(s, config) {
+        counters.sanitize++;
+        return String(s).replace(/<script[\s\S]*?<\/script>/gi, '');
+    },
+};
+const fixMarkdown = (s) => s;
+const canUseNegativeLookbehind = () => true;
+const escapeHtml = (s) => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' })[c]);
+const escapeRegex = (s) => s.replace(/[/\-\\^$*+?.()|[\]{}]/g, '\\$&');
+const encodeStyleTags = (s) => s;
+const decodeStyleTags = (s) => s;
 
 /** Replaces module state; the bindings above are live for every importer. */
 export function setState(patch) {
@@ -26,7 +74,6 @@ export function setState(patch) {
     if ('streamingProcessor' in patch) streamingProcessor = patch.streamingProcessor;
 }
 
-export const counters = { saveSettings: 0, saveChat: 0 };
 export function saveSettingsDebounced() { counters.saveSettings++; }
 export async function saveChatConditional() { counters.saveChat++; }
 

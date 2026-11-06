@@ -41,14 +41,6 @@ const DIRS = {
 };
 const TYPES = { '.js': 'text/javascript', '.json': 'application/json', '.html': 'text/html', '.css': 'text/css' };
 
-/** SillyTavern's messageFormatting() from its start through the regex stage (hooks + getRegexedString). */
-function messageFormattingHead(src) {
-    const start = src.indexOf('export function messageFormatting(');
-    const end = src.indexOf('    if (power_user.auto_fix_generated_markdown) {', start);
-    if (start < 0 || end < 0) throw new Error('messageFormatting() not found in the pinned script.js');
-    return src.slice(start, end) + '    return mes;\n}\n';
-}
-
 function exportedFunction(src, name) {
     const start = src.indexOf(`export function ${name}(`);
     const end = src.indexOf('\n}\n', start);
@@ -58,8 +50,9 @@ function exportedFunction(src, name) {
 
 const splice = async (file, marker, code) => (await readFile(file, 'utf8')).replace(marker, () => code);
 const GENERATED = {
+    // the whole messageFormatting(): hooks, regex, markdown (a stand-in converter), DOMPurify (a stand-in)
     '/script.js': async () => splice(mock('script.js'), '/* @messageFormatting */',
-        messageFormattingHead(await readFile(real('script.js'), 'utf8'))),
+        exportedFunction(await readFile(real('script.js'), 'utf8'), 'messageFormatting')),
     '/scripts/utils.js': async () => splice(mock('utils.js'), '/* @regexFromString */',
         exportedFunction(await readFile(real('scripts/utils.js'), 'utf8'), 'regexFromString')),
 };
@@ -94,7 +87,8 @@ async function startServer() {
         try {
             const body = await resolve(path);
             if (body === null) throw Object.assign(new Error('not found'), { code: 'ENOENT' });
-            res.writeHead(200, { 'Content-Type': TYPES[extname(path)] ?? 'text/html', 'Cache-Control': 'no-store' });
+            // cross-origin isolated, so performance.now() has microsecond resolution and the pipeline stage times mean something
+            res.writeHead(200, { 'Content-Type': TYPES[extname(path)] ?? 'text/html', 'Cache-Control': 'no-store', 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Embedder-Policy': 'require-corp' });
             res.end(body);
         } catch (e) {
             res.writeHead(e.code === 'ENOENT' ? 404 : 500);

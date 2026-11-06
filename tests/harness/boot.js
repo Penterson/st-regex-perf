@@ -29,6 +29,7 @@ const calls = { getContext: 0 };
 const hooks = params.get('hooks') !== '0';
 
 globalThis.SillyTavern = {
+    libs: { DOMPurify: st.DOMPurify, showdown: st.showdown },
     getContext() {
         calls.getContext++;
         return {
@@ -48,6 +49,7 @@ globalThis.SillyTavern = {
             substituteParamsExtended: st.substituteParamsExtended,
             messageFormatting: st.messageFormatting,
             messageFormatter: hooks ? MessageFormatter : undefined,
+            powerUserSettings: st.power_user,
             SlashCommandParser: { addCommandObject: (cmd) => { commands[cmd.name] = cmd; } },
             SlashCommand: { fromProps: (props) => props },
             SlashCommandArgument: { fromProps: (props) => props },
@@ -78,5 +80,6 @@ if (variant !== 'none') await import(`/scripts/extensions/third-party/${variant}
 await eventSource.emit(event_types.APP_READY);
 
 const h = { variant, st, engine, extension_settings, preset, eventSource, event_types, MessageFormatter, i18n, toasts, commands, popups, calls, warnings };
+window.__h = h; // for ad-hoc debugging from the test runner
 window.__run = async (name, arg) => (await import('/harness/scenarios.js'))[name](h, arg);
 window.__ready = true;

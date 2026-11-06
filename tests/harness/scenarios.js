@@ -848,7 +848,7 @@ export async function persistBudget(h) {
     h.st.setState({ chat: Array.from({ length: 26 }, (_, i) => msg(`${i} ${body}`)) });
     h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
     const stored = h.st.chat.map(m => !!m.extra.regex_perf_cache);
-    const chars = h.st.chat.reduce((a, m) => a + (m.extra.regex_perf_cache ? m.extra.regex_perf_cache.k.length + (m.extra.regex_perf_cache.v?.length ?? 0) : 0), 0);
+    const chars = h.st.chat.reduce((a, m) => a + (m.extra.regex_perf_cache ? m.extra.regex_perf_cache.k.length + (m.extra.regex_perf_cache.v?.length ?? 0) + (m.extra.regex_perf_cache.h?.length ?? 0) : 0), 0);
     const root = panel(true);
     const usage = root.querySelector('#rpk_usage')?.textContent ?? ''; // the baseline has no usage line
     const hasLimit = setControl(root, 'rpk_persistMaxMB', 2);
@@ -1108,6 +1108,7 @@ export async function fastPathAssembled(h) {
  * is never memoized.
  */
 export async function memoStatic(h) {
+    applyProfile(h, { htmlMemo: false }); // ⑨ would serve the re-renders before ③ gets to run
     h.st.setState({ name1: 'Ann', name2: 'Cat', chat: [msg('me', { name: 'Cat' }), msg('me', { name: 'Kit' }), msg('roll [d]', { name: 'Cat' })] });
     await useScripts(h, [
         script({ scriptName: 'Who', findRegex: '/\\bme\\b/g', replaceString: '{{char}}', markdownOnly: true }),
@@ -1210,7 +1211,7 @@ export async function persistAccounting(h) {
             const e = m.extra?.regex_perf_cache;
             if (!e) continue;
             entries++;
-            chars += String(e.k).length + (e.v?.length ?? 0);
+            chars += String(e.k).length + (e.v?.length ?? 0) + (e.h?.length ?? 0);
         }
         return { entries, chars };
     };
@@ -1395,10 +1396,15 @@ export async function listBadges(h) {
 /** tests/screenshots.mjs: a realistic session in the panel (the corpus chat, a measurement, a per-row stopwatch). */
 export async function screenshot(h) {
     const corpus = await import('./corpus.js');
+    h.st.setConverter('para'); // a markdown stage that costs what a real one does, so the pipeline bar looks as it would in SillyTavern
     applyProfile(h, { persist: true });
     h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: Array.from({ length: 8 }, () => corpus.CHAT()).flat() });
     await useScripts(h, [...corpus.SCRIPTS(), script({ scriptName: 'Digits', findRegex: '/\\d{4,}/g', replaceString: '####', markdownOnly: true })]);
-    for (let k = 0; k < 3; k++) h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, m.is_system, m.is_user, i));
+    const renderAll = () => h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, m.is_system, m.is_user, i));
+    for (let k = 0; k < 6; k++) renderAll(); // warm code: the first passes through a cold JIT would show as cache-lookup time
+    await h.commands.regexperf.callback({}, 'reset');
+    h.st.chat.forEach((m, i) => { if (i % 2) m.mes += ' .'; }); // half the messages changed: full renders and ⑨ hits alike
+    for (let k = 0; k < 3; k++) renderAll();
     h.st.chat.forEach((m) => h.engine.getRegexedString(m.mes, P.AI));
     const root = panel();
     root.querySelector('#rpk_measure').click();
@@ -1413,6 +1419,7 @@ export async function screenshot(h) {
 /** tests/bench.mjs: cold and warm display renders of a long chat, and the save path on it. */
 export async function bench(h) {
     const corpus = await import('./corpus.js');
+    h.st.setConverter('para'); // a converter that costs what a real one does, so the regex share is realistic
     h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: Array.from({ length: 40 }, () => corpus.CHAT()).flat() });
     await useScripts(h, corpus.SCRIPTS());
     const pass = () => {
@@ -1425,7 +1432,7 @@ export async function bench(h) {
         h.st.chat.forEach((m, i) => h.engine.getRegexedString(m.mes + i, P.AI));
         return performance.now() - t0;
     };
-    pass(); // JIT warm-up with different inputs below
+    for (let k = 0; k < 4; k++) pass(); // JIT warm-up (the extension's paths tier up after a few passes); different inputs below
     h.st.chat.forEach(m => { m.mes += ' .'; });
     return { cold: pass(), warm: pass(), save: save() };
 }
@@ -1441,4 +1448,179 @@ export async function benchSave(h, settings) {
     const t0 = performance.now();
     for (let r = 0; r < 5; r++) msgs.forEach(m => h.engine.getRegexedString(m + r, P.AI));
     return performance.now() - t0;
+}
+
+// ---- 0.4.0: ⑨ HTML cache, pipeline timing, incremental formatting, static fast path, adaptive profiling ----
+
+/** The extension module itself, for its exported analyzers. */
+const extension = () => import('/scripts/extensions/third-party/st-regex-perf/index.js');
+const json = async (h) => (h.commands.regexperf ? JSON.parse(await h.commands.regexperf.callback({}, 'json')) : null);
+
+/**
+ * ⑨. A re-render of an unchanged message is served from the HTML cache: the converter sees the placeholder only, the
+ * output is SillyTavern's own; a message a {{random}} script matched is never cached; a markdown setting change
+ * (encode_tags) misses; with ⑤ on the HTML is stored in the chat and serves a fresh page (the memory cache cleared).
+ */
+export async function htmlMemo(h, { persist = false } = {}) {
+    applyProfile(h, { persist });
+    h.st.setConverter('para');
+    await useScripts(h, [
+        script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true }),
+        script({ scriptName: 'Dice', findRegex: '/\\[d\\]/g', replaceString: '{{random::1::2::3::4::5::6}}', markdownOnly: true }),
+        script({ scriptName: 'Reason', findRegex: '/Step (\\d+)/g', replaceString: 'S$1', placement: [P.REASONING], markdownOnly: true }),
+    ]);
+    h.st.setState({ chat: [msg('a **b**\n\nc "quoted" d'), msg('roll [d] here'), msg('x', { extra: { reasoning: 'Step 1 then Step 2' } })] });
+    const c = h.st.counters;
+    const render = (i) => h.st.messageFormatting(h.st.chat[i].mes, h.st.chat[i].name, false, false, i);
+    const reasoning = (i) => h.st.messageFormatting(h.st.chat[i].extra.reasoning, '', false, false, i, {}, true);
+    const chars = (fn) => { const before = c.converterChars; const calls = c.makeHtml; const out = fn(); return [out, c.converterChars - before, c.makeHtml - calls]; };
+    const r = {};
+    r.first = chars(() => render(0));
+    r.second = chars(() => render(0)); // ⑨ hit: the converter sees the placeholder
+    r.dice = [chars(() => render(1)), chars(() => render(1))]; // volatile: both full
+    r.reasoning = [chars(() => reasoning(2)), chars(() => reasoning(2))]; // reasoning is cached in memory too
+    h.st.power_user.encode_tags = true;
+    r.encoded = chars(() => render(0)); // another markdown setting: a miss, formatted again (the stand-in ignores the flag)
+    h.st.power_user.encode_tags = false;
+    r.third = chars(() => render(0)); // back to the first key: a hit
+    const j = await json(h);
+    r.pipeline = j && { full: j.pipeline.full, hits: j.pipeline.htmlHits, stores: j.pipeline.htmlStores, pct: j.pipeline.regexPct + j.pipeline.markdownPct + j.pipeline.sanitizePct + j.pipeline.hookPct };
+    r.stored = h.st.chat.map(m => (m.extra.regex_perf_cache ? Object.keys(m.extra.regex_perf_cache).sort().join() : null));
+    if (persist) { // a fresh page would find the chat entries only: clear the memory cache through its toggle
+        const root = panel();
+        setControl(root, 'rpk_htmlMemo', false);
+        setControl(root, 'rpk_htmlMemo', true);
+        r.fromChat = chars(() => render(0));
+        r.persistHits = (await json(h)).totals.persistHits;
+    }
+    r.usage = panel(true)?.querySelector('#rpk_usage').textContent ?? '';
+    r.bar = [...panel()?.querySelectorAll('.rpk-pipe-seg') ?? []].map(e => [e.dataset.k, Number(e.dataset.pct)]);
+    return r;
+}
+
+/** ⑨ limits: beyond the memory cap the oldest formatted messages are dropped; a message over the cap is not kept. */
+export async function htmlMemoBudget(h) {
+    applyProfile(h, { htmlMemoMaxMB: 1, htmlMemoMaxEntries: 1000 });
+    await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
+    const body = 'x'.repeat(50000); // ≈100 KB per entry (key + HTML, 2 bytes a character): 1 MB holds about 10
+    h.st.setState({ chat: Array.from({ length: 16 }, (_, i) => msg(`${i} ${body}`)) });
+    const c = h.st.counters;
+    const render = (i) => h.st.messageFormatting(h.st.chat[i].mes, h.st.chat[i].name, false, false, i);
+    for (let i = 0; i < 16; i++) render(i);
+    const hit = (i) => { const before = c.converterChars; render(i); return c.converterChars - before < 100; };
+    const out = { oldest: hit(0), newest: hit(15), usage: panel(true).querySelector('#rpk_usage').textContent };
+    const j = await json(h);
+    out.bytes = j.memo.html.bytes;
+    out.entries = j.memo.html.entries;
+    return out;
+}
+
+/** The pattern analysis behind ④ incremental formatting: which patterns cannot match across a line. */
+export async function lineLocal(h, patterns) {
+    const { isLineLocal } = await extension();
+    return Object.fromEntries(patterns.map(p => {
+        const m = /^\/(.*)\/([a-z]*)$/s.exec(p);
+        return [p, isLineLocal(new RegExp(m[1], m[2]))];
+    }));
+}
+
+/**
+ * ④ incremental formatting in compromise mode: a line-local script runs on the new lines only once its first runs
+ * were checked against a full run; a multi-line script keeps running on the whole prefix; every live render and the
+ * final one equal plain SillyTavern's output with the same scripts applied to the same prefix.
+ */
+export async function streamIncremental(h, { incremental }) {
+    applyProfile(h, { streamingThrottle: true, streamingThrottleMs: 0, streamingIncremental: incremental, htmlMemo: false, memo: false });
+    const bold = script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true });
+    const who = script({ scriptName: 'Who', findRegex: '/\\bme\\b/g', replaceString: '{{char}}', markdownOnly: true }); // static macro: line-local too
+    const block = script({ scriptName: 'Block', findRegex: '/<s>([\\s\\S]*?)<\\/s>/g', replaceString: '[$1]', markdownOnly: true }); // crosses lines
+    await useScripts(h, [bold, who, block]);
+    h.st.setState({ name2: 'Cat', chat: [msg('')] });
+    const lines = Array.from({ length: 12 }, (_, i) => `line ${i} **b${i}** me <s>o${i}\nn${i}</s> tail`);
+    const sources = Object.fromEntries([['Bold', bold], ['Who', who], ['Block', block]].map(([k, s]) => [k, h.engine.RegexProvider.instance.get(s.findRegex).source]));
+    const outs = [];
+    const runs = [];
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    const sp = { messageId: 0, isFinished: false, isStopped: false };
+    h.st.setState({ streamingProcessor: sp });
+    for (let n = 1; n <= lines.length; n++) {
+        const text = lines.slice(0, n).join('\n') + '\n' + 'partial **p';
+        h.st.chat[0].mes = text;
+        const by = executionsBySource(() => outs.push(h.st.messageFormatting(text, 'Cat', false, false, 0)));
+        runs.push(Object.fromEntries(Object.entries(sources).map(([k, src]) => [k, by[src] ?? 0])));
+    }
+    sp.isFinished = true;
+    const final = lines.join('\n') + '\nend **e** me';
+    h.st.chat[0].mes = final;
+    const finalOut = h.st.messageFormatting(final, 'Cat', false, false, 0);
+    h.st.setState({ streamingProcessor: null });
+    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    const j = await json(h);
+    return { outs, runs, finalOut, incrementalRuns: Object.fromEntries(j?.rows.map(r => [r.name, r.incrementalRuns]) ?? []), warnings: h.warnings.filter(w => w.includes('incremental')) };
+}
+
+/**
+ * ⑥ for static-macro replacements: {{char}} / {{user}} templates are finished per name set, verified, and give
+ * SillyTavern's own output, also with a $ in a name and with a trim string holding {{char}}.
+ */
+export async function fastPathStatic(h, { on }) {
+    applyProfile(h, { fastPathStatic: on, memo: false, htmlMemo: false });
+    await useScripts(h, [
+        script({ scriptName: 'Who', findRegex: '/\\bme\\b/g', replaceString: '{{char}}!', markdownOnly: true }),
+        script({ scriptName: 'Both', findRegex: '/(\\w+) greets/g', replaceString: '{{user}} greets $1 and {{char}}', markdownOnly: true }),
+        script({ scriptName: 'Trim', findRegex: '/\\[(.+?)\\]/g', replaceString: '($1)', trimStrings: ['{{char}} '], markdownOnly: true }), // the trim's {{char}} is the message author
+    ]);
+    const chat = [msg('me and me', { name: 'Cat' }), msg('Bob greets [Cat is here]', { name: 'Cat' })];
+    h.st.setState({ name1: 'Ann', name2: 'Cat', chat });
+    const render = (i) => h.st.messageFormatting(chat[i].mes, chat[i].name, false, false, i);
+    const outs = [];
+    for (let k = 0; k < 5; k++) outs.push(render(0), render(1));
+    h.st.setState({ name2: 'Do$g $1' }); // a $ in a value is text
+    outs.push(render(0), render(1));
+    h.st.setState({ name1: 'A$&B' });
+    outs.push(render(1));
+    const j = await json(h);
+    return { outs, fast: Object.fromEntries(j?.rows.map(r => [r.name, r.fastRuns]) ?? []), warnings: h.warnings.filter(w => w.includes('fast path')) };
+}
+
+/**
+ * ① adaptive profiling: with nothing for the regex stage to do (no scripts match), its share of the renders drops
+ * under 2% after 64 passes and the profiler times 1 run in 64; the summary says so; a measurement gives its verdict.
+ */
+export async function adaptive(h) {
+    h.st.setConverter('para');
+    await useScripts(h, [script({ scriptName: 'Never', findRegex: '/zzz-never/g', replaceString: 'y', markdownOnly: true })]);
+    applyProfile(h, { prefilter: false, htmlMemo: false, memo: false }); // every pass runs the regex for real
+    const body = ('**bold** and more text, "quoted" too.\n\n').repeat(120); // ≈4.5 KB: the converter's cost grows with it, the regex stage's fixed part does not
+    h.st.setState({ chat: Array.from({ length: 70 }, (_, i) => msg(`${i} ${body}`)) });
+    const render = () => h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
+    render(); // warms the JIT up: the first calls through the extension's replace path cost many times a warm one
+    await h.commands.regexperf.callback({}, 'reset');
+    render();
+    const j = await json(h);
+    const root = panel(true);
+    root.querySelector('#rpk_measure').click();
+    await sleep(120);
+    return {
+        light: j.pipeline.light, regexPct: j.pipeline.regexPct, sampled: j.rows[0]?.sampled, runs: j.rows[0]?.runs, pipeline: j.pipeline,
+        summary: root.querySelector('#rpk_summary').textContent,
+        verdict: [...root.querySelectorAll('#rpk_measure_result .rpk-verdict')].map(e => e.textContent),
+        legend: root.querySelector('.rpk-pipe-legend')?.textContent ?? '',
+    };
+}
+
+/** ① what a user feels: the frame sampler runs during a generation only; long tasks are counted where supported. */
+export async function frameStats(h) {
+    await useScripts(h, [script({ findRegex: '/a/g', replaceString: 'b', markdownOnly: true })]);
+    const before = (await json(h)).felt;
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await new Promise(r => setTimeout(r, 120)); // a few frames
+    const busyEnd = performance.now() + 120; // one long task while streaming: a frame late and a freeze
+    while (performance.now() < busyEnd) { /* busy */ }
+    await new Promise(r => setTimeout(r, 60));
+    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    const during = (await json(h)).felt;
+    await new Promise(r => setTimeout(r, 100));
+    const after = (await json(h)).felt;
+    return { before, during, after, text: await report(h) };
 }

@@ -40,6 +40,60 @@
     font-variant-numeric: tabular-nums;
 }
 
+/* ---- the display pipeline: one stacked bar, regex | markdown | sanitize ---- */
+
+.regex-perf-kit .rpk-pipe:empty {
+    display: none;
+}
+
+.regex-perf-kit .rpk-pipe {
+    margin: 2px 0 6px 15px;
+}
+
+.regex-perf-kit .rpk-pipe-bar {
+    display: flex;
+    height: 18px;
+    overflow: hidden;
+    font-size: 0.8em;
+    line-height: 18px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 10%, transparent);
+}
+
+.regex-perf-kit .rpk-pipe-seg {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: clip;
+    padding: 0 4px;
+    box-sizing: border-box;
+    min-width: 0;
+}
+
+.regex-perf-kit .rpk-pipe-regex {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #c9a26d) 70%, transparent);
+    color: var(--SmartThemeBodyColor, #fff);
+}
+
+.regex-perf-kit .rpk-pipe-markdown {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 28%, transparent);
+}
+
+.regex-perf-kit .rpk-pipe-sanitize {
+    background: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 16%, transparent);
+}
+
+.regex-perf-kit .rpk-pipe-hook {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #c9a26d) 30%, transparent);
+}
+
+.regex-perf-kit .rpk-pipe-legend {
+    margin-top: 2px;
+    font-size: 0.9em;
+}
+
+.regex-perf-kit .rpk-measured .rpk-verdict {
+    opacity: 0.85;
+}
+
 .regex-perf-kit .rpk-since {
     font-size: 0.85em;
 }

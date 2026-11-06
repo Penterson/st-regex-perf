@@ -3,9 +3,10 @@
 // 240-message chat, first render (cold), re-render (warm), and the save path on it.
 //   node tests/bench.mjs            prints both benchmarks (not a pass/fail test)
 //   node tests/bench.mjs --gate     fails if the warm display render, relative to no extension, is more than
-//                                   GATE_SLOWER slower than tests/bench-baseline.json (re-measured once when it is,
-//                                   since a shared CI runner is noisy); the ratio is used because absolute ms
-//                                   differ per machine
+//                                   GATE_SLOWER slower than tests/bench-baseline.json, or slower than no extension
+//                                   at all by more than GATE_OVERHEAD (the claim "installing it costs nothing");
+//                                   re-measured up to twice when it is, since a shared CI runner is noisy; the ratio
+//                                   is used because absolute ms differ per machine
 //   node tests/bench.mjs --update   stores the current ratio as the baseline
 // BENCH_REPS overrides the number of pages per variant (7 for a run, 11 for the gate).
 import { readFile, writeFile } from 'node:fs/promises';
@@ -13,7 +14,8 @@ import { execFileSync } from 'node:child_process';
 import { ST_REF } from './fetch-st.mjs';
 import { launch } from './server.mjs';
 
-const GATE_SLOWER = 0.2;
+const GATE_SLOWER = 0.05; // vs the stored baseline ratio
+const GATE_OVERHEAD = 0.02; // vs no extension: the warm render may not be more than 2% slower
 const BASELINE_FILE = new URL('./bench-baseline.json', import.meta.url);
 const gate = process.argv.includes('--gate');
 const update = process.argv.includes('--update');
@@ -59,15 +61,15 @@ if (update) {
     console.log(`baseline written: warm ratio ${baseline.warmRatio}`);
 } else if (gate) {
     const baseline = JSON.parse(await readFile(BASELINE_FILE, 'utf8'));
-    const limit = baseline.warmRatio * (1 + GATE_SLOWER);
+    const limit = Math.min(baseline.warmRatio * (1 + GATE_SLOWER), 1 + GATE_OVERHEAD);
     let r = await warmRatio();
-    if (r.ratio > limit) {
+    for (let again = 0; r.ratio > limit && again < 2; again++) {
         console.log(`warm ratio ${r.ratio.toFixed(3)} is over ${limit.toFixed(3)}: measuring again`);
         r = await warmRatio();
     }
     console.log(`warm display render: ${r.ratio.toFixed(3)} of no extension (baseline ${baseline.warmRatio}, limit ${limit.toFixed(3)})`);
     if (r.ratio > limit) {
-        console.log(`FAIL  more than ${GATE_SLOWER * 100}% slower than the stored baseline`);
+        console.log(`FAIL  more than ${GATE_SLOWER * 100}% slower than the stored baseline, or more than ${GATE_OVERHEAD * 100}% slower than no extension`);
         failed = true;
     } else {
         console.log('  ok  benchmark gate');

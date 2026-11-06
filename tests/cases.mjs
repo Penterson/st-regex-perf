@@ -193,7 +193,7 @@ test('extra: ⑤ persisted display output refreshes when the message depth or a 
 
 // Words the Korean UI keeps in English: product and SillyTavern setting names, slash command verbs, data formats,
 // units, the test's script names.
-const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|staging|regexperf|reset|text|json|csv|measure|\boff\b|JSON|CSV|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b|{{(?:user|char|persona|group)}}|\bfuse\b/g;
+const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|staging|regexperf|reset|text|json|csv|measure|\boff\b|JSON|CSV|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b|{{(?:user|char|persona|group)}}|\bfuse\b|\bHTML\b|PerformanceObserver|dotAll|Chromium|regex|markdown|sanitize/g;
 
 /** What the Korean panel must say (the plain-language wording of the panel redesign), as shown on screen. */
 const KO_PANEL = [
@@ -435,7 +435,7 @@ test('reset settings restores the defaults; open sections are remembered across 
     assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
+    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, fastPathStatic: true, htmlMemo: true, htmlMemoMaxEntries: 2000, htmlMemoMaxMB: 32, streamingIncremental: true, adaptive: true, frameStats: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
     assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistMaxMB: '8' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
@@ -539,7 +539,8 @@ test('item 16: streaming compromise mode formats completed lines at most every N
     assert.deepEqual(on.current, [
         'A <b>one</b>\nB **t', 1,
         'A <b>one</b>\nB **two**\nC **th', 0,
-        'A <b>one</b>\nB <b>two</b>\nC <b>three</b>\nD **f', 1,
+        // 2: the incremental run on the new lines plus its check against a full run (the script's first incremental runs)
+        'A <b>one</b>\nB <b>two</b>\nC <b>three</b>\nD **f', 2,
         'A <b>one</b>\nB <b>two</b>\nC <b>three</b>\nD **fou', 0,
         final,
     ]);
@@ -564,7 +565,7 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges', 'fastPathStatic', 'htmlMemo', 'htmlMemoMaxEntries', 'htmlMemoMaxMB', 'streamingIncremental', 'adaptive', 'frameStats'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
@@ -572,7 +573,9 @@ test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ cle
         assert.deepEqual(r.current.checked, r.baseline.checked);
         // ⑥ verifies a script's first fast-path runs against SillyTavern's callback, so those runs execute the regex twice
         assert.deepEqual({ ...r.current.toggled, rerun: Math.min(r.current.toggled.rerun, 1) }, r.baseline.toggled);
-        assert.deepEqual(r.current.stored, r.baseline.stored);
+        // ⑤ now stores the formatted HTML (h) instead of the after-regex text (v / same)
+        assert.deepEqual(r.current.stored, ['h', 'k']);
+        assert.deepEqual(r.baseline.stored, ['k', 'same']);
         const verbs = ['reset | text | json | csv | measure | off <script name>']; // the argument help grew with the new verbs
         assert.deepEqual(r.current.slash.args, verbs);
         if (locale === 'ko-kr') { // the baseline's UI is Korean in every locale
@@ -811,4 +814,111 @@ test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with
     assert.equal(r.current.checked.rpk_persist.disabled, true);
     assert.match(r.current.note, /MessageFormatter/);
     assert.deepEqual(r.current.stored, r.baseline.stored, 'nothing is stored without hooks');
+});
+
+// ---- 0.4.0 ----
+
+test('⑨ HTML cache: a re-render reuses the formatted HTML (the converter sees a placeholder), volatile scripts and setting changes miss', async ({ each }) => {
+    const r = await each('htmlMemo', { persist: false }, { variants: ['none', 'current'] });
+    const n = r.none;
+    const c = r.current;
+    // the same output every time, with and without the extension
+    assert.equal(c.first[0], n.first[0]);
+    assert.equal(c.second[0], n.second[0]);
+    assert.equal(c.third[0], c.first[0]);
+    assert.equal(c.encoded[0], n.encoded[0]);
+    assert.ok(c.first[1] > 20, `the first render converted the message (${c.first[1]} chars)`);
+    assert.ok(c.second[1] < 10, `the second render converted the placeholder only (${c.second[1]} chars)`);
+    assert.equal(c.second[2], 0, 'the converter was not even called for the placeholder (showdown wrapper)');
+    assert.equal(c.first[2], 1);
+    assert.ok(c.third[1] < 10, 'back to the old markdown settings: the old key hits');
+    assert.ok(c.encoded[1] > 20, 'a markdown setting changed: formatted again');
+    assert.ok(c.dice[0][1] > 10 && c.dice[1][1] > 10, 'a message a {{random}} script matched is formatted every time');
+    assert.deepEqual(c.dice.map(x => x[0]), n.dice.map(x => x[0]).map((_, i) => c.dice[i][0]), 'rolls are not compared, only re-rendered');
+    assert.ok(c.reasoning[0][1] >= 10 && c.reasoning[1][1] < 10, 'reasoning is cached in memory too');
+    assert.equal(c.reasoning[1][0], n.reasoning[1][0]);
+    assert.deepEqual(c.stored, [null, null, null], '⑤ off: nothing in the chat');
+    assert.equal(c.pipeline.hits, 3, `hits: ${JSON.stringify(c.pipeline)}`);
+    assert.ok(c.pipeline.full >= 5 && c.pipeline.stores >= 3, JSON.stringify(c.pipeline));
+    assert.ok(Math.abs(c.pipeline.pct - 100) <= 2, `shares add up: ${c.pipeline.pct}`);
+    assert.match(c.usage, /⑨ HTML cache: \d+ messages, [\d.]+ of 32 MB/);
+    assert.deepEqual(c.bar.map(b => b[0]), ['pipe-regex', 'pipe-markdown', 'pipe-sanitize', 'pipe-hook']);
+});
+
+test('⑨ with ⑤: the finished HTML is stored in the chat (h) and serves a fresh page', async ({ each }) => {
+    const r = (await each('htmlMemo', { persist: true }, { variants: ['current'] })).current;
+    assert.deepEqual(r.stored, ['h,k', null, null], 'the volatile message is not stored');
+    assert.ok(r.fromChat[1] < 10, `served from the chat entry (${r.fromChat[1]} chars converted)`);
+    assert.equal(r.fromChat[0], r.first[0]);
+    assert.ok(r.persistHits >= 1);
+});
+
+test('⑨ limits: the memory cap drops the oldest formatted messages first; usage is shown', async ({ each }) => {
+    const r = (await each('htmlMemoBudget', null, { variants: ['current'] })).current;
+    assert.equal(r.oldest, false, 'the oldest entry was dropped');
+    assert.equal(r.newest, true, 'the newest is still there');
+    assert.ok(r.bytes <= 1048576 && r.entries >= 5 && r.entries <= 12, JSON.stringify(r));
+    assert.match(r.usage, /⑨ HTML cache: \d+ messages, [\d.]+ of 1 MB/);
+});
+
+test('④ incremental: the line-local analysis refuses anything that can match or look across a line', async ({ each }) => {
+    const patterns = {
+        '/\\*\\*(.+?)\\*\\*/g': true, '/\\bme\\b/g': true, '/^Step (\\d+):/gm': true, '/[a-z]+$/gm': true, '/(?<=x)y/g': true, '/x(?!y)/g': true,
+        '/a|b/g': true, '/[^\\n]+/g': true, '/\\d{2,}/gu': true, '/(a)\\1/g': true,
+        '/<s>([\\s\\S]*?)<\\/s>/g': false, '/a\\sb/g': false, '/[^a]/g': false, '/a.b/gs': false, '/\\n/g': false, '/\\W/g': false,
+        '/^x/g': false, '/x$/g': false, '/x/': false, '/x/gy': false, '/a\\Db/g': false, '/[\\s\\S]/g': false,
+    };
+    const r = (await each('lineLocal', Object.keys(patterns), { variants: ['current'] })).current;
+    assert.deepEqual(r, patterns);
+});
+
+test('④ incremental: in compromise mode line-local scripts format the new lines only, with SillyTavern\'s own output', async ({ each }) => {
+    const on = await each('streamIncremental', { incremental: true }, { variants: ['none', 'current'] });
+    const off = (await each('streamIncremental', { incremental: false }, { variants: ['current'] })).current;
+    assert.deepEqual(on.current.outs, on.none.outs, 'every live render equals plain SillyTavern on the same text');
+    assert.deepEqual(off.outs, on.none.outs);
+    assert.equal(on.current.finalOut, on.none.finalOut);
+    assert.deepEqual(on.current.warnings, [], 'no incremental run disagreed with a full run');
+    const inc = on.current.incrementalRuns;
+    assert.ok(inc.Bold >= 8 && inc.Who >= 8, `incremental runs: ${JSON.stringify(inc)}`);
+    assert.equal(inc.Block, 0, 'a multi-line pattern always runs on the whole prefix');
+    assert.deepEqual(Object.values(off.incrementalRuns), [0, 0, 0]);
+    // after the checked runs, one execution per tick for the line-local scripts (the check doubles the first three)
+    const tail = on.current.runs.slice(5);
+    assert.ok(tail.every(t => t.Bold === 1 && t.Who === 1 && t.Block === 1), JSON.stringify(on.current.runs));
+    assert.ok(on.current.runs.slice(1, 4).every(t => t.Bold === 2), 'the first incremental runs are checked against a full run');
+});
+
+test('⑥ static-macro fast path: {{char}}/{{user}} templates per name set give SillyTavern\'s output, also with $ in a name and a {{char}} trim string', async ({ each }) => {
+    const on = await each('fastPathStatic', { on: true }, { variants: ['none', 'current'] });
+    const off = (await each('fastPathStatic', { on: false }, { variants: ['current'] })).current;
+    assert.deepEqual(on.none.outs.slice(0, 2), ['Cat! and Cat!', 'Ann greets Bob and Cat (is here)']);
+    assert.deepEqual(on.none.outs.slice(-3), ['Do$g $1! and Do$g $1!', 'Ann greets Bob and Do$g $1 (is here)', 'A$&B greets Bob and Do$g $1 (is here)']);
+    assert.deepEqual(on.current.outs, on.none.outs);
+    assert.deepEqual(off.outs, on.none.outs);
+    assert.deepEqual(on.current.warnings, [], 'no template disagreed with the callback');
+    assert.ok(on.current.fast.Who >= 2 && on.current.fast.Both >= 2 && on.current.fast.Trim >= 2, `fast runs after the checked ones: ${JSON.stringify(on.current.fast)}`);
+    assert.deepEqual(off.fast, { Who: 0, Both: 0, Trim: 0 });
+});
+
+test('① adaptive: when regex is a negligible share of the renders, the profiler samples 1 in 64 and the panel says so; the measurement gives a verdict', async ({ each }) => {
+    const r = (await each('adaptive', null, { variants: ['current'] })).current;
+    assert.equal(r.light, true, `light mode after 70 passes with regex at ${r.regexPct}%`);
+    assert.ok(r.regexPct <= 2, `regex share ${r.regexPct}% (rounded)`);
+    assert.equal(r.sampled, true);
+    assert.match(r.summary, /under 2% of the renders here/);
+    assert.match(r.legend, /One display render: [\d.]+ ms on average; the regex stage .* is \d+% of it\./);
+    assert.ok(r.verdict.some(v => /regex stage was \d+%, markdown \d+%, sanitizing \d+%/.test(v)), JSON.stringify(r.verdict));
+    assert.ok(r.verdict.some(v => /Messages over a frame/.test(v)), JSON.stringify(r.verdict));
+    assert.ok(r.verdict.some(v => /What helps more: User Settings/.test(v)), JSON.stringify(r.verdict));
+});
+
+test('① felt: the frame sampler counts frames during a generation only; long tasks where the browser reports them', async ({ each }) => {
+    const r = (await each('frameStats', null, { variants: ['current'] })).current;
+    assert.equal(r.before.frames, 0);
+    assert.ok(r.during.frames >= 3, `frames while streaming: ${r.during.frames}`);
+    assert.ok(r.during.dropped >= 1 && r.during.frozen >= 1, JSON.stringify(r.during));
+    assert.equal(r.after.frames, r.during.frames, 'the sampler stopped with the generation');
+    if (r.after.longTasks) assert.ok(r.after.streamLongTasks >= 1, JSON.stringify(r.after));
+    assert.match(r.text, /^Felt: frames late while streaming: \d+ of \d+/m);
 });
