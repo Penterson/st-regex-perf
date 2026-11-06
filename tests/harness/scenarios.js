@@ -1365,6 +1365,27 @@ export async function lintRules(h) {
     outs.push(h.engine.getRegexedString('xy dup', P.AI));
     const root = panel(true);
     const rows = [...root.querySelectorAll('#rpk_lint_list li[data-rule]')].map(li => ({ rule: li.dataset.rule, script: li.dataset.script, fix: li.querySelector('.rpk-fix')?.textContent ?? null }));
+    // SillyTavern's own .menu_button rule (public/style.css): width: min-content wraps a label with a space ("Add g",
+    // "Unescape" in Korean) into two lines unless the panel's stylesheet overrides it. The test page loads neither, so both
+    // are added here for the measurement and removed after it.
+    const stButton = document.createElement('style');
+    stButton.textContent = '.menu_button { padding: 3px 5px; width: min-content; margin: 5px 0; display: flex; align-items: center; justify-content: center; text-align: center; border: 1px solid #888; }';
+    const sheet = document.createElement('link');
+    sheet.rel = 'stylesheet';
+    sheet.href = `/scripts/extensions/third-party/${h.variant}/style.css`;
+    const loaded = new Promise(resolve => { sheet.onload = resolve; sheet.onerror = resolve; });
+    document.head.append(stButton, sheet);
+    await loaded;
+    root.querySelector('.rpk-lint').open = true;
+    const fixBoxes = [...root.querySelectorAll('#rpk_lint_list li[data-rule] .rpk-fix')].map(btn => {
+        const li = btn.closest('li');
+        const lineHeight = parseFloat(getComputedStyle(li).lineHeight) || parseFloat(getComputedStyle(li).fontSize) * 1.5;
+        const b = btn.getBoundingClientRect(), row = li.getBoundingClientRect();
+        const lines = x => Math.round(x / lineHeight * 10) / 10;
+        return { label: btn.textContent, lines: lines(b.height), rowLines: lines(row.height), inside: b.top >= row.top && b.bottom <= row.bottom };
+    });
+    stButton.remove();
+    sheet.remove();
     const json = JSON.parse(await h.commands.regexperf.callback({}, 'json'));
     const saves = h.st.counters.saveSettings;
     root.querySelector('#rpk_lint_list li[data-rule="missing-g"] .rpk-fix')?.click(); // the confirm popup resolves at once in the harness
@@ -1373,7 +1394,7 @@ export async function lintRules(h) {
     rowOf(root, 'Ref').querySelector('.rpk-off').click(); // no Regex drawer in the page: the engine's save is used
     await sleep(30);
     const off = h.extension_settings.regex.find(s => s.scriptName === 'Ref').disabled;
-    return { outs, rows, lint: json.lint, fixed, off, saves: h.st.counters.saveSettings - saves, popups: h.popups.length, toasts: h.toasts.map(([, m]) => m) };
+    return { outs, rows, fixBoxes, lint: json.lint, fixed, off, saves: h.st.counters.saveSettings - saves, popups: h.popups.length, toasts: h.toasts.map(([, m]) => m) };
 }
 
 /** Feature list 2.1. Cost chips in the Regex extension's own list, kept up to date when SillyTavern re-renders it. */

@@ -445,11 +445,16 @@
     margin: 0.2em 0;
 }
 
+/* SillyTavern's .menu_button is width: min-content with a 5px vertical margin: a label with a space ("Add g") would
+   wrap into two lines and the box would sit off the row's line. */
 .regex-perf-kit .rpk-lint .rpk-fix {
     display: inline-block;
+    width: auto;
+    white-space: nowrap;
+    vertical-align: baseline;
     padding: 0 0.5em;
     font-size: 0.85em;
-    margin-left: 0.4em;
+    margin: 0 0 0 0.4em;
 }
 
 .regex-perf-kit .rpk-lint .rpk-edit {

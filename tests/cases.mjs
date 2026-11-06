@@ -795,6 +795,9 @@ test('feature list 2.3: lint rows (missing g, group references, double escapes, 
     assert.deepEqual([rules['browser-compat'].script, rules['browser-compat'].fix], ['Look', null]);
     assert.deepEqual([rules.duplicate.script, rules.duplicate.fix], ['Dup1, Dup2', null]);
     assert.ok(r.lint.some(x => x.rule === 'missing-g' && x.fixable && x.ids.length === 1), JSON.stringify(r.lint));
+    assert.equal(r.fixBoxes.length, 2, JSON.stringify(r.fixBoxes));
+    for (const box of r.fixBoxes) assert.ok(box.lines <= 1.3 && box.inside, `the ${box.label} button is one line high, inside its row, under SillyTavern's min-content .menu_button: ${JSON.stringify(box)}`);
+    assert.ok(r.fixBoxes[0].rowLines <= 1.3, `the button does not make its one-line row taller (SillyTavern's 5px button margin): ${JSON.stringify(r.fixBoxes[0])}`);
     assert.equal(r.fixed, '/foo/g', 'the fix was saved through saveScriptsByType');
     assert.equal(r.off, true, 'turned off through saveScriptsByType, no Regex drawer in the page');
     assert.ok(r.saves >= 2, `saveSettingsDebounced ran for both saves (${r.saves})`);
