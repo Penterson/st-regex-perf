@@ -128,11 +128,45 @@ export const NESTED = [
     ['[\\s\\S]*', '', false],
 ];
 
+/**
+ * [replaceString, pattern, flags, expected native template (null: the fast path does not apply)], feature list 1.1:
+ * {{match}}/$0 → $&, $n → two-digit $nn when the group exists (else no template: SillyTavern reads the offset or the
+ * input there), $<name> kept only with named groups, every other $ escaped.
+ */
+export const TEMPLATES = [
+    ['$1', '(a)', '', '$01'],
+    ['$12', '(a)(b)', '', null], // SillyTavern reads group 12, not group 1 and "2"
+    ['$3', '(a)(b)', '', null],
+    ['{{match}}', 'a', '', '$&'],
+    ['{{MATCH}}x', 'a', 'g', '$&x'],
+    ['$0', 'a', '', '$&'],
+    ['$00', 'a', '', '$&'],
+    ['$007', '(a)(b)(c)(d)(e)(f)(g)', '', '$07'],
+    ['$$', 'a', '', '$$$$'],
+    ['$&', 'a', '', '$$&'],
+    ['$', 'a', '', '$$'],
+    ['$<', '(a)', '', '$$<'],
+    ['a$b', 'a', '', 'a$$b'],
+    ['$<n>', '(?<n>a)', '', '$<n>'],
+    ['$<zz>', '(?<n>a)', '', '$<zz>'],
+    ['$<n>', '(a)', '', ''],
+    ['$10', '(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)', '', '$10'],
+    ['$10', '(a)', '', null],
+    ['$1$2', '(a)(b)?', '', '$01$02'],
+    ['<b>$1</b> ${x}', '(\\w+)', 'g', '<b>$01</b> $${x}'],
+];
+
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 /** Checks the cases; patterns this engine cannot compile (e.g. (?i:) before V8 12.5) are returned, not run. */
-export function runCases(extractNeedle) {
+export function runCases(extractNeedle, buildTemplate) {
     const unsupported = [];
+    if (buildTemplate) {
+        for (const [replaceString, source, flags, want] of TEMPLATES) {
+            const got = buildTemplate(replaceString, new RegExp(source, flags)).template;
+            if (got !== want) throw new Error(`buildTemplate(${JSON.stringify(replaceString)}, /${source}/${flags}).template = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+        }
+    }
     for (const [source, flags, want] of CASES) {
         try {
             new RegExp(source, flags);
@@ -167,7 +201,7 @@ export function runCases(extractNeedle) {
         }
         if (want > 0 && re.test('x'.repeat(want - 1))) throw new Error(`/${source}/${flags} matches a string shorter than ${want}`);
     }
-    return { checked: CASES.length + NESTED.length + TERMS.length + REASONS.length + MINLEN.length - unsupported.length, unsupported };
+    return { checked: CASES.length + NESTED.length + TERMS.length + REASONS.length + MINLEN.length + (buildTemplate ? TEMPLATES.length : 0) - unsupported.length, unsupported };
 }
 
 // Characters whose case folding differs between toLowerCase() and the regex engine, astral characters, syntax

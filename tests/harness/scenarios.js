@@ -267,9 +267,9 @@ export async function escapedSubst(h) {
 
 /** Item 8. The hand-checked cases and the fuzzer, in Chrome, against the loaded extension's extractNeedle(). */
 export async function needleFuzz(h, { seed, patterns }) {
-    const { extractNeedle } = await import(`/scripts/extensions/third-party/${h.variant}/index.js`);
+    const { extractNeedle, buildTemplate } = await import(`/scripts/extensions/third-party/${h.variant}/index.js`);
     const f = await import('/harness/needle-fuzz.js');
-    return { cases: f.runCases(extractNeedle), fuzz: f.fuzz(extractNeedle, { seed, patterns }) };
+    return { cases: f.runCases(extractNeedle, buildTemplate), fuzz: f.fuzz(extractNeedle, { seed, patterns }) };
 }
 
 /** Item 8. Literals inside groups and alternations prefilter; an optional astral character under u is not a needle. */
@@ -1001,6 +1001,105 @@ export async function dynamicFind(h) {
     await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
     const json = h.commands.regexperf ? JSON.parse(await h.commands.regexperf.callback({}, 'json')) : null;
     return { outs, live, report: await report(h), rows: json?.rows.map(r => ({ name: r.name, runs: r.runs, hits: r.hits, streamSkips: r.streamSkips })) ?? [] };
+}
+
+/** A small seeded generator (mulberry32) for the differential fuzz below. */
+function rng(seed) {
+    let s = seed >>> 0;
+    return () => {
+        s = (s + 0x6D2B79F5) >>> 0;
+        let t = s;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+/**
+ * Feature list 1.1. The fast path must give SillyTavern's own output for every replacement template: random patterns
+ * (numbered, named, optional and empty groups), replacements built from every token the template translation handles,
+ * trim strings, and inputs with and without macro syntax. Compares the extension with the fast path off and on (③ off,
+ * so nothing is served from the memo), on SillyTavern's real engine.
+ */
+export async function fastPathEquivalence(h, { seed, scripts = 80 }) {
+    const rpk = applyProfile(h, { memo: false, prefilter: false });
+    const rand = rng(seed);
+    const pick = (xs) => xs[Math.floor(rand() * xs.length)];
+    const PATTERNS = [
+        '/(\\w+) (\\w+)/g', '/(?<a>x)(y)?/g', '/\\[(.*?)\\]/g', '/(a)|(b)/g', '/x/g', '/x/', '/(\\d)(\\d)(\\d)(\\d)(\\d)(\\d)(\\d)(\\d)(\\d)(\\d)(\\d)/g',
+        '/(?<n>\\d+)-(?<m>\\d+)/g', '/()/g', '/(a*)/g', '/^/gm', '/(A)/gi', '/(.)(.)/gs', '/(😀)/gu', '/(?<q>")(.*?)(?<r>")/g', '/b(?=x)/g', '/(x)(?!y)/g',
+    ];
+    const TOKENS = ['$0', '$1', '$2', '$3', '$10', '$11', '$12', '$<n>', '$<a>', '$<zz>', '{{match}}', '{{MATCH}}', '$$', '$', '$&', '$`', '$\'', 'a', 'b', '-', '$01', '$1x', '$<', '>', '{', '}', '$00', '$007', ' ', '\n', '"'];
+    const TRIMS = [[], [], ['"'], ['a'], [''], ['x', '-'], ['\n']];
+    const ALPHA = 'abx yz[]"-\n123AB{}$<>😀';
+    const input = () => Array.from({ length: Math.floor(rand() * 30) }, () => ALPHA[Math.floor(rand() * ALPHA.length)]).join('');
+    let compared = 0;
+    let mismatch = null;
+    for (let k = 0; k < scripts && !mismatch; k++) {
+        const findRegex = pick(PATTERNS);
+        const replaceString = Array.from({ length: 1 + Math.floor(rand() * 4) }, () => pick(TOKENS)).join('');
+        const trimStrings = pick(TRIMS);
+        await useScripts(h, [script({ scriptName: 'fuzz', findRegex, replaceString, trimStrings })]);
+        // A $n beyond the group count makes SillyTavern's own callback throw on a trim string (filterString gets the
+        // match offset, a number): the extension must then throw the same way.
+        const run = (str) => {
+            try {
+                return h.engine.getRegexedString(str, P.AI);
+            } catch (e) {
+                return 'THROW ' + e.message;
+            }
+        };
+        for (let j = 0; j < 8; j++) {
+            const str = j === 7 ? input() + '{{user}}' : input();
+            if (rpk) rpk.fastPath = false;
+            const off = run(str);
+            if (rpk) rpk.fastPath = true;
+            const on = run(str);
+            compared++;
+            if (on !== off) mismatch = { findRegex, replaceString, trimStrings, str, off, on };
+        }
+    }
+    const json = rpk ? JSON.parse(await h.commands.regexperf.callback({}, 'json')) : null;
+    return { compared, mismatch, fastRuns: json?.totals.fastRuns ?? 0, fallbacks: h.warnings.filter(w => w.includes('fast path')) };
+}
+
+/** Feature list 1.1. A display script on a long message: with the fast path the replacer time disappears. */
+export async function fastPathStats(h) {
+    const rpk = applyProfile(h, { memo: false });
+    await useScripts(h, [script({ scriptName: 'Waves', findRegex: '/(\\w+) waves/g', replaceString: '<b>$1</b>', markdownOnly: true })]);
+    const mes = Array.from({ length: 200 }, (_, i) => `Bob${i} waves at Ann`).join('\n');
+    const row = async () => JSON.parse(await h.commands.regexperf.callback({}, 'json')).rows.find(r => r.name === 'Waves');
+    const pickRow = (r) => ({ replacerMs: r.replacerMs, fastRuns: r.fastRuns, matched: r.matched, changed: r.changed });
+    rpk.fastPath = false;
+    const offOut = h.engine.getRegexedString(mes, P.AI, { isMarkdown: true });
+    const off = pickRow(await row());
+    rpk.fastPath = true;
+    for (let i = 0; i < 3; i++) h.engine.getRegexedString(mes, P.AI, { isMarkdown: true }); // the self-verifying first runs
+    await h.commands.regexperf.callback({}, 'reset');
+    const onOut = h.engine.getRegexedString(mes, P.AI, { isMarkdown: true });
+    const on = pickRow(await row());
+    return { same: offOut === onOut, off, on };
+}
+
+/**
+ * Feature list 1.1. A replacer that is not SillyTavern's (another caller of String.replace with our RegExp) must be
+ * caught by the self-verification: the fast path is turned off for that script with a warning, and the caller gets its
+ * own callback's result.
+ */
+export async function fastPathFallback(h) {
+    applyProfile(h, { memo: false });
+    await useScripts(h, [script({ findRegex: '/a/g', replaceString: 'b' })]);
+    const re = h.engine.RegexProvider.instance.get('/a/g');
+    const out = 'aa'.replace(re, () => 'Z');
+    const warned = h.warnings.some(w => w.includes('fast path'));
+    return [out, warned, h.engine.getRegexedString('a', P.AI)];
+}
+
+/** Feature list 1.1. Group text that assembles a macro with the replacement ({ + {user}}) must still be substituted. */
+export async function fastPathAssembled(h) {
+    h.st.setState({ name1: 'Ann', name2: 'Cat' });
+    await useScripts(h, [script({ findRegex: '/(\\{)x(\\{user\\}\\})/g', replaceString: '$1$2' })]);
+    return [h.engine.getRegexedString('{x{user}}', P.AI), h.engine.getRegexedString('{x{user}} and {x{user}}', P.AI)];
 }
 
 /** tests/screenshots.mjs: a realistic session in the panel (the corpus chat, a measurement, a per-row stopwatch). */

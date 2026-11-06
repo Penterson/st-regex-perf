@@ -24,6 +24,7 @@ const defaultSettings = {
     profiler: true,
     prefilter: true,
     memo: true,
+    fastPath: true, // ⑥ macro-free replacements run as a native string template instead of SillyTavern's callback
     memoMaxEntries: 3000,
     memoMaxLen: 20000,
     memoMaxMB: 64,
@@ -460,6 +461,107 @@ function resolveDynamic(regexString, dynamic) {
     return dynamic.find(d => d.shape.test(regexString))?.info;
 }
 
+// ---- ⑥ Fast path (feature list 1.1) ----
+
+const VERIFY_RUNS = 3; // a script's first fast-path runs are compared with SillyTavern's own callback
+const fastPathOff = new Set(); // fast keys (pattern + replacement) that disagreed once: back to the callback for the session
+
+/**
+ * SillyTavern's replacer (runRegexScript) as a native string template: {{match}} and $0 become $&, $n a two-digit $nn
+ * (so a digit after it cannot join it) when the pattern has that many groups, $<name> stays when the pattern has named
+ * groups and is '' otherwise (the callback finds no groups object then), every other $ is escaped. A $n beyond the
+ * group count gives null: the callback then reads the match offset or the input from its arguments, which no template
+ * can express (the lint reports such references). refs lists every reference for the lint.
+ * @param {string} replaceString
+ * @param {RegExp} re
+ * @returns {{template: string | null, groupCount: number, named: boolean, refs: {ref: string, ok: boolean}[]}}
+ */
+export function buildTemplate(replaceString, re) {
+    const probe = new RegExp(re.source + '|', re.flags).exec('');
+    const groupCount = probe.length - 1;
+    const named = !!probe.groups;
+    const refs = [];
+    let ok = true;
+    const template = replaceString.replace(/{{match}}/gi, '$0').replace(/\$(\d+)|\$<([^>]+)>|\$/g, (m, num, name) => {
+        if (num) {
+            const n = Number(num);
+            if (n === 0) return '$&';
+            const fits = n <= groupCount && n <= 99;
+            refs.push({ ref: m, ok: fits });
+            ok &&= fits;
+            return fits ? '$' + String(n).padStart(2, '0') : m;
+        }
+        if (name !== undefined) {
+            refs.push({ ref: m, ok: named });
+            return named ? m : '';
+        }
+        return '$$';
+    });
+    return { template: ok ? template : null, groupCount, named, refs };
+}
+
+/**
+ * What a native replace makes of a buildTemplate() template for one match (its callback arguments): $$, $&, two-digit
+ * $nn and $<name> as GetSubstitution reads them. Used to verify the template against SillyTavern's callback per match.
+ */
+function expandTemplate(template, args) {
+    const last = args[args.length - 1];
+    const groups = typeof last === 'object' ? last : undefined;
+    let out = '';
+    for (let i = 0; i < template.length; i++) {
+        const c = template[i];
+        if (c !== '$') {
+            out += c;
+            continue;
+        }
+        const n = template[i + 1];
+        if (n === '$') {
+            out += '$';
+            i++;
+        } else if (n === '&') {
+            out += args[0];
+            i++;
+        } else if (n === '<') {
+            const e = template.indexOf('>', i);
+            out += groups?.[template.slice(i + 2, e)] ?? '';
+            i = e;
+        } else if (n >= '0' && n <= '9') {
+            const d = template[i + 2];
+            const two = d >= '0' && d <= '9';
+            out += args[Number(two ? n + d : n)] ?? '';
+            i += two ? 2 : 1;
+        } else {
+            out += '$';
+        }
+    }
+    return out;
+}
+
+/** Whether text, as a whole, is a match of re (true when unsure). */
+function matchesWhole(re, text) {
+    try {
+        if (text.includes('\n') && re.flags.includes('m')) return true;
+        return new RegExp('^(?:' + re.source + ')$', re.flags.replace(/[gy]/g, '')).test(text);
+    } catch {
+        return true;
+    }
+}
+
+/** The second tier: groups filled and trim strings removed as runRegexScript() does it, without substituteParams(). */
+function buildTrimReplacer(replaceString, trims, named) {
+    const normalized = replaceString.replace(/{{match}}/gi, '$0');
+    return function () {
+        const args = arguments;
+        const groups = named ? args[args.length - 1] : null;
+        return normalized.replaceAll(/\$(\d+)|\$<([^>]+)>/g, (_, num, name) => {
+            let v = num ? args[Number(num)] : groups && groups[name];
+            if (!v) return '';
+            for (const trim of trims) v = v.replaceAll(trim, '');
+            return v;
+        });
+    };
+}
+
 /** @type {{map: Map<string, object>, dynamic: object[], counts: object, depthRules: number[][], version: string, displayVersion: string, builtAt: number} | null} */
 let infoCache = null; // null = rebuild on next use
 const markDirty = () => { infoCache = null; };
@@ -542,6 +644,22 @@ function buildInfo() {
             }
             map.set(key, info);
             if (isDynamic) dynamic.push({ raw: s.findRegex, substitute, shape: shapeOf(s.findRegex), info });
+            // ⑥: a pure replacement as a template (no trim strings) or a lean callback (trim strings), until a run disagrees
+            const fastKey = key + '\u0001' + info.replaceSig;
+            info.fast = null;
+            if (info.pure && !fastPathOff.has(fastKey)) {
+                const tpl = buildTemplate(replaceString, re);
+                if (tpl.template !== null) {
+                    info.fast = {
+                        key: fastKey,
+                        template: trims.length ? null : tpl.template,
+                        replacer: trims.length ? buildTrimReplacer(replaceString, trims, tpl.named) : null,
+                        verify: VERIFY_RUNS,
+                        // can a match be replaced by itself? If not, an unchanged output means the pattern did not match
+                        identity: tpl.refs.length > 0 || matchesWhole(re, tpl.template.replace(/\$\$/g, '$')),
+                    };
+                }
+            }
 
             // The same limits getRegexedString() applies; display scripts only, as those are what ⑤ stores.
             const min = !isNaN(s.minDepth) && s.minDepth !== null && s.minDepth >= -1 ? Number(s.minDepth) : -Infinity;
@@ -612,7 +730,7 @@ function getStat(key, re) {
             name: t`(unknown)`,
             src: '/' + re.source + '/' + re.flags,
             calls: 0, totalMs: 0, maxMs: 0, replMs: 0, matched: 0, changed: 0,
-            skipped: 0, hits: 0, streamSkipped: 0, bypass: 0,
+            skipped: 0, hits: 0, streamSkipped: 0, bypass: 0, fast: 0,
             spike: null, // {ms, len, head}: the newest run over SPIKE_MS
             heavy: HEAVY_HINT.test(re.source),
             needle: null, // the needle the wrapper uses (and its nested flag), set with its meta
@@ -670,21 +788,53 @@ class PerfRegExp extends RegExp {
 
         const native = this._native;
         native.lastIndex = 0;
-        // SillyTavern's replacer (groups, trim strings, macros) is timed apart from the matching itself.
         const profile = settings.profiler;
         let replMs = 0;
         let matched = false; // the replacer ran, so the pattern matched (even if the text came out the same)
-        const fn = profile && typeof replacer === 'function'
-            ? function () {
-                matched = true;
-                const t1 = performance.now();
-                const r = replacer.apply(this, arguments);
-                replMs += performance.now() - t1;
-                return r;
-            }
-            : replacer;
+        let fn = replacer;
+        let out;
+        let fastRun = false;
         const t0 = profile ? performance.now() : 0;
-        const out = RegExp.prototype[Symbol.replace].call(native, str, fn);
+        // ⑥ With no macro syntax in the input, SillyTavern's per-match callback amounts to its template, which V8 applies
+        // without a JS call per match. Should group text assemble macro syntax anyway, the callback is used instead.
+        const fast = settings.fastPath && typeof replacer === 'function' && !hasMacro(str) ? this._meta.fast : null;
+        if (fast && fast.verify <= 0) {
+            out = RegExp.prototype[Symbol.replace].call(native, str, fast.template ?? fast.replacer);
+            if (MACRO.test(out)) {
+                out = undefined; // group text assembled macro syntax: SillyTavern would substitute it
+                native.lastIndex = 0;
+            } else {
+                fastRun = true;
+            }
+        }
+        if (!fastRun) {
+            // SillyTavern's replacer (groups, trim strings, macros) is timed apart from the matching itself. On a
+            // fast-path script's first runs, what the template gives for each match is compared with the callback's
+            // result (self-verification): one difference turns ⑥ off for the script.
+            let checked = false;
+            if (typeof replacer === 'function' && (profile || fast)) {
+                const meta = this._meta;
+                fn = function () {
+                    matched = true;
+                    const t1 = profile ? performance.now() : 0;
+                    const r = replacer.apply(this, arguments);
+                    if (profile) replMs += performance.now() - t1;
+                    if (fast && meta.fast) {
+                        const mine = fast.template !== null ? expandTemplate(fast.template, arguments) : fast.replacer.apply(this, arguments);
+                        if (MACRO.test(mine)) return r; // the fast path would have fallen back here: nothing to compare
+                        checked = true;
+                        if (mine !== r) {
+                            fastPathOff.add(fast.key);
+                            meta.fast = null;
+                            console.warn(`[RegexPerf] fast path disagreed with SillyTavern for "${stat.name}": back to the callback for this script`, { match: String(arguments[0]).slice(0, 200), expected: r.slice(0, 200), got: mine.slice(0, 200) });
+                        }
+                    }
+                    return r;
+                };
+            }
+            out = RegExp.prototype[Symbol.replace].call(native, str, fn);
+            if (checked && this._meta.fast) fast.verify--;
+        }
         if (profile) {
             const dt = performance.now() - t0;
             if (t0 - lastCall > BURST_GAP_MS) burstStart = t0;
@@ -692,11 +842,17 @@ class PerfRegExp extends RegExp {
             stat.calls++;
             stat.totalMs += dt;
             stat.replMs += replMs;
+            if (fastRun) stat.fast++;
             if (dt > stat.maxMs) stat.maxMs = dt;
             if (dt > SPIKE_MS) stat.spike = { ms: dt, len: str.length, head: str.slice(0, SPIKE_HEAD) };
             if (out !== str) stat.changed++;
-            // A string replacer (not SillyTavern's) tells nothing: test short inputs, assume a match on long ones.
-            if (matched || (fn === replacer && (out !== str || str.length > 2000 || native.test(str)))) stat.matched++;
+            if (!matched) {
+                // A template changed the text or not: unchanged means no match unless a match can be its own replacement.
+                if (fastRun) matched = out !== str || (fast.identity && native.test(str));
+                // A string replacer (not SillyTavern's) tells nothing: test short inputs, assume a match on long ones.
+                else if (fn === replacer) matched = out !== str || str.length > 2000 || native.test(str);
+            }
+            if (matched) stat.matched++;
         }
         this.lastIndex = native.lastIndex; // leave this regex as a native replace would
 
@@ -796,6 +952,7 @@ function patchProvider() {
                 markdownOnly: !!info?.markdownOnly,
                 test: stat.needle.test,
                 memoPrefix: info?.pure ? key + '\u0001' + info.replaceSig + '\u0001' : null,
+                fast: info?.fast ?? null,
             };
             w._version = version;
         }
@@ -957,6 +1114,8 @@ const conflictText = (c) => (c.confirmed
     : t`"${c.earlier.name}" runs first and removes the literal "${c.later.name}" looks for: ${c.count} times (match not verified on long inputs)`);
 /** The sample kept from a run over SPIKE_MS: how long the input was and how it started. */
 const spikeText = (sp) => t`Last spike: ${fmtMs(sp.ms)} ms on ${sp.len} characters, starting ${JSON.stringify(sp.head)}`;
+/** How many runs ⑥ replaced without SillyTavern's callback. */
+const fastText = (n) => t`⑥ fast path: ${n} runs without SillyTavern's callback`;
 /** A pattern the extension has seen do anything: rows that never ran nor were skipped are left out of the table. */
 const active = (r) => r.calls + avoided(r) + r.bypass > 0;
 const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">${text}</span>`;
@@ -988,6 +1147,7 @@ function buildSummary() {
         hits: sum('hits'),
         streamSkipped: sum('streamSkipped'),
         bypass: sum('bypass'),
+        fast: sum('fast'),
         saved: rows.reduce((acc, r) => acc + savedMs(r), 0),
         ineffective: rows.filter(ineffective).map(r => r.name),
         chatLen: chat?.length ?? 0,
@@ -1063,6 +1223,7 @@ function buildReportText() {
             : t`Estimated time saved: not available yet (no measured runs)`,
         s.usage,
     ];
+    if (s.fast) lines.push(fastText(s.fast));
     if (measured) lines.push(measureText(measured), slowestText(measured));
     if (s.top) lines.push(t`#1 "${s.top.name}" takes ${s.topShare.toFixed(0)}% of the total time`);
     if (s.ineffective.length) lines.push(t`Candidates to disable (ran ${INEFFECTIVE_RUNS}+ times, never matched): ${s.ineffective.join(', ')}`);
@@ -1090,14 +1251,14 @@ function buildReportData() {
         since: new Date(statsSince).toISOString(),
         chatMessages: s.chatLen,
         scripts: s.counts,
-        totals: { calls: s.calls, totalMs: s.total, skipped: s.skipped, hits: s.hits, streamSkipped: s.streamSkipped, bypass: s.bypass, persistHits: persistStats.hits, persistStores: persistStats.stores, savedMs: s.calls ? s.saved : null },
+        totals: { calls: s.calls, totalMs: s.total, skipped: s.skipped, hits: s.hits, streamSkipped: s.streamSkipped, bypass: s.bypass, fastRuns: s.fast, persistHits: persistStats.hits, persistStores: persistStats.stores, savedMs: s.calls ? s.saved : null },
         memo: { entries: memoLru.size, bytes: memoBytes, maxMB: settings.memoMaxMB },
         measured,
         candidatesToDisable: s.ineffective,
         orderConflicts: [...conflicts.values()].map(c => ({ earlier: c.earlier.name, later: c.later.name, count: c.count, confirmed: c.confirmed, sample: c.sample })),
         rows: s.rows.map((r, i) => ({
             rank: i + 1, name: r.name, pattern: r.src, runs: r.calls, totalMs: r.totalMs, avgMs: avgMs(r), maxMs: r.maxMs, replacerMs: r.replMs,
-            matched: r.matched, changed: r.changed, skips: r.skipped, hits: r.hits, streamSkips: r.streamSkipped,
+            matched: r.matched, changed: r.changed, skips: r.skipped, hits: r.hits, streamSkips: r.streamSkipped, fastRuns: r.fast,
             literal: r.needle?.terms ?? [], literalReason: r.needle?.reason ?? null, minLength: r.needle?.minLen ?? 0, warnings: warnings(r), spike: r.spike,
         })),
     };
@@ -1129,7 +1290,7 @@ function turnOffByName(name) {
     return t`Turned off: ${hits[0].name}`;
 }
 
-const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'spike'];
+const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'spike'];
 const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false }; // what a measurement turns off
 
 const CACHES_OFF = { profiler: false, memo: false, persist: false }; // a per-row measurement keeps the prefilter as set
@@ -1253,6 +1414,7 @@ const settingsHtml = () => `
         ${feature('rpk_profiler', t`① Measure run time (profiler)`, t`Counts how often each script runs and how long it takes, for the table below. Costs almost nothing.`)}
         ${feature('rpk_prefilter', t`② Skip runs that cannot match (literal prefilter)`, t`If the message does not even contain the fixed text a script looks for (such as &lt;/status&gt;), the regex is not run. The result is exactly the same.`)}
         ${feature('rpk_memo', t`③ Reuse results (memory cache)`, t`When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with {{macros}} are left out automatically.`)}
+        ${feature('rpk_fastPath', t`⑥ Replace without SillyTavern's callback (fast path)`, t`When a script's replacement has no macros, the browser's own template replacement is used instead of SillyTavern's per-match callback, where most of the replacer time goes. The first runs of every script are compared with SillyTavern's result; on any difference the script goes back to the callback.`)}
         <div class="rpk-feature-group">
         ${feature('rpk_streaming', t`④ Rest display scripts while streaming`, t`While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. This removes most streaming lag.`)}
         ${feature('rpk_stream_throttle', t`Compromise: keep formatting the finished lines`, t`With ④ on, display scripts still format the lines that are already complete, at most once per interval (0.5 s by default, under Limits). The line being written stays raw; the finished reply gets every script.`, { sub: true })}
@@ -1322,7 +1484,7 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
+const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
 // editable limits: setting -> [min, max]
 const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], loadHintMs: [100, 600000] };
 
@@ -1362,6 +1524,7 @@ function renderPanel() {
         lines.push(s.calls
             ? t`${fig('skipped', skips + s.bypass)} runs were skipped (${breakdown}), saving about ${fig('saved', fmtMs(s.saved) + ' ms')}.`
             : t`${fig('skipped', skips + s.bypass)} runs were skipped (${breakdown}). The time saved is known once some runs have been measured.`);
+        if (s.fast) lines.push(`<span class="rpk-dim">${fastText(s.fast)}</span>`);
     }
     if (s.top && s.calls > 0) {
         lines.push(t`Slowest: <b>${esc(s.top.name)}</b>, ${s.topShare.toFixed(0)}% of the time.` + (s.topShare >= 50 ? ' ' + t`Turning it off or fixing it helps the most.` : ''));

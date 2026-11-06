@@ -434,7 +434,7 @@ test('reset settings restores the defaults; open sections are remembered across 
     assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, prefilter: true, memo: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000 }, 'defaultSettings');
+    assert.deepEqual(features, { profiler: true, prefilter: true, memo: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000 }, 'defaultSettings');
     assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistMaxMB: '8' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
@@ -562,13 +562,14 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
         for (const id of r.baseline.ids) assert.ok(r.current.ids.includes(id), `#${id}`);
         assert.deepEqual(r.current.checked, r.baseline.checked);
-        assert.deepEqual(r.current.toggled, r.baseline.toggled);
+        // ⑥ verifies a script's first fast-path runs against SillyTavern's callback, so those runs execute the regex twice
+        assert.deepEqual({ ...r.current.toggled, rerun: Math.min(r.current.toggled.rerun, 1) }, r.baseline.toggled);
         assert.deepEqual(r.current.stored, r.baseline.stored);
         const verbs = ['reset | text | json | csv | measure | off <script name>']; // the argument help grew with the new verbs
         assert.deepEqual(r.current.slash.args, verbs);
@@ -619,6 +620,35 @@ test('feature list 3 row 2: a find pattern with a dynamic macro keeps its script
     assert.equal(dyn.runs + dyn.hits, 6, JSON.stringify(dyn));
     assert.ok(dyn.hits >= 1, 'the same compiled pattern came back and hit ③');
     assert.equal(dyn.streamSkips, 1);
+});
+
+test('feature list 1.1: the fast path gives SillyTavern\'s own output for every template (differential fuzz, off vs on)', async ({ each }) => {
+    const seed = Math.floor(Math.random() * 2 ** 31);
+    const r = await each('fastPathEquivalence', { seed, scripts: 80 }, { variants: ['current'] });
+    assert.equal(r.current.mismatch, null, `seed ${seed}: ${JSON.stringify(r.current.mismatch)}`);
+    assert.deepEqual(r.current.fallbacks, [], `seed ${seed}: the self-verification disagreed`);
+    assert.equal(r.current.compared, 640);
+    assert.ok(r.current.fastRuns >= 20, `seed ${seed}: only ${r.current.fastRuns} fast runs`);
+});
+
+test('feature list 1.1: the fast path removes the replacer time; matched, changed and the output are unchanged', async ({ each }) => {
+    const r = await each('fastPathStats', null, { variants: ['current'] });
+    assert.equal(r.current.same, true);
+    assert.equal(r.current.off.fastRuns, 0);
+    assert.equal(r.current.on.fastRuns, 1);
+    assert.equal(r.current.on.replacerMs, 0);
+    assert.deepEqual([r.current.on.matched, r.current.on.changed], [r.current.off.matched, r.current.off.changed]);
+});
+
+test('feature list 1.1: self-verification turns the fast path off for a script whose replacer disagrees, with a warning', async ({ each }) => {
+    const r = await each('fastPathFallback', null, { variants: ['current'] });
+    assert.deepEqual(r.current, ['ZZ', true, 'b']);
+});
+
+test('feature list 1.1: matched text that assembles a macro with the replacement is still substituted', async ({ each }) => {
+    const r = await each('fastPathAssembled', null, { variants: ['none', 'current'] });
+    assert.deepEqual(r.none, ['Ann', 'Ann and Ann']);
+    assert.deepEqual(r.current, r.none);
 });
 
 test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with a note', async ({ each }) => {
