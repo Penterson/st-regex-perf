@@ -2556,9 +2556,9 @@ const settingsHtml = () => `
         ${feature('rpk_fastPath', t`⑥ Replace without SillyTavern's callback (fast path)`, t`When a script's replacement has no macros, the browser's own template replacement is used instead of SillyTavern's per-match callback, where most of the replacer time goes. The first runs of every script are compared with SillyTavern's result; on any difference the script goes back to the callback.`)}
         ${feature('rpk_fastPathStatic', t`Also for replacements with {{user}}, {{char}}, {{persona}} or {{group}}`, t`Their values hold for a whole message render, so the template is finished per name set and verified the same way (display renders only).`, { sub: true })}
         </div>
-        ${feature('rpk_htmlMemo', t`⑨ Reuse the formatted HTML (HTML cache)`, t`When a message is rendered again unchanged (swipes, re-renders, scrolling back), the HTML made last time is reused: regex scripts and markdown are both skipped, only the sanitizer runs. Memory-only, limited under Limits; stored in the chat too when ⑤ is on. A message whose text, scripts, names or markdown settings changed is formatted again.`, { labelId: 'rpk_htmlMemo_label' })}
         ${feature('rpk_fuse', t`⑦ Fuse: skip very long inputs for risky patterns`, t`A pattern the analyzer flags for catastrophic backtracking is not run on inputs longer than the limit under Limits (20,000 characters by default): that text is shown as it is. Off by default, as it changes the result.`)}
         ${feature('rpk_breaker', t`⑧ Circuit breaker: turn off a script that keeps running long`, t`After the set number of runs over the set time (3 runs over 500 ms by default), the script is skipped for the rest of the session, with an Undo in the toast and in the table. The script itself is never changed. Off by default.`)}
+        ${feature('rpk_htmlMemo', t`⑨ Reuse the formatted HTML (HTML cache)`, t`When a message is rendered again unchanged (swipes, re-renders, scrolling back), the HTML made last time is reused: regex scripts and markdown are both skipped, only the sanitizer runs. Memory-only, limited under Limits; stored in the chat too when ⑤ is on. A message whose text, scripts, names or markdown settings changed is formatted again.`, { labelId: 'rpk_htmlMemo_label' })}
       </div>
       <div class="rpk-note" id="rpk_persist_note"></div>
       <div class="rpk-note" id="rpk_usage"></div>
@@ -2569,14 +2569,14 @@ const settingsHtml = () => `
           ${limit('memoMaxEntries', t`③ Cache entries`, t`Oldest results are dropped beyond this many.`)}
           ${limit('memoMaxLen', t`③ Longest input to cache (characters)`, t`Longer inputs are not cached.`)}
           ${limit('memoMaxMB', t`③ Cache memory (MB)`, t`Oldest results are dropped beyond this estimated size (2 bytes per character of input and output).`)}
-          ${limit('htmlMemoMaxEntries', t`⑨ HTML cache entries`, t`Oldest formatted messages are dropped beyond this many.`)}
-          ${limit('htmlMemoMaxMB', t`⑨ HTML cache memory (MB)`, t`Oldest formatted messages are dropped beyond this estimated size.`)}
           ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved in the chat.`)}
           ${limit('persistMaxMB', t`⑤ Saved results per chat (MB)`, t`Beyond this, the oldest messages' results are dropped from the chat.`)}
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
           ${limit('fuseLen', t`⑦ Fuse: longest input a risky pattern runs on (characters)`)}
           ${limit('breakerMs', t`⑧ Breaker: a run counts as long over (ms)`)}
           ${limit('breakerCount', t`⑧ Breaker: long runs that turn the script off`)}
+          ${limit('htmlMemoMaxEntries', t`⑨ HTML cache entries`, t`Oldest formatted messages are dropped beyond this many.`)}
+          ${limit('htmlMemoMaxMB', t`⑨ HTML cache memory (MB)`, t`Oldest formatted messages are dropped beyond this estimated size.`)}
           ${limit('memoHashKeys', t`③ Key the cache by a hash of the input`, t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`, 'checkbox')}
           ${limit('loadHintMs', t`Hint about "# Messages to Load" when opening a chat takes longer than (ms)`, t`Shown once per session as a toast.`)}
           ${limit('autoMeasure', t`Measure automatically when a chat opens`, t`Runs "Measure on this chat" once after a chat opens.`, 'checkbox')}
