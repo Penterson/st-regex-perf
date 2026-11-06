@@ -156,11 +156,35 @@ export const TEMPLATES = [
     ['<b>$1</b> ${x}', '(\\w+)', 'g', '<b>$01</b> $${x}'],
 ];
 
+/**
+ * [pattern, flags, expected analyzeRedos().severity], feature list 1.5: nested unbounded quantifiers and unbounded
+ * alternations with overlapping branches are exponential, adjacent overlapping unbounded atoms polynomial; shapes the
+ * old .* heuristic flagged are not risks by themselves.
+ */
+export const REDOS = [
+    ['(x+)+', '', 'exp'], ['(a|a)+', '', 'exp'], ['(\\w|\\d)+', '', 'exp'], ['(\\s*\\n){3,}', 'g', 'exp'], ['^(\\s*\\w+)*$', '', 'exp'],
+    ['(a*)*', '', 'exp'], ['(?:ab|a)+b', '', 'exp'], ['(\\d+)+$', '', 'exp'], ['([a-z]+)*', '', 'exp'], ['(.+)+x', '', 'exp'],
+    ['(?:\\s|\\t)+', '', 'exp'], ['(?:\\w+\\s?)+!', '', 'exp'], ['(a|ab)+', '', 'exp'], ['x(\\s*\\s*)*y', '', 'exp'], ['(?:a+){2,}', '', 'exp'],
+    ['<(.*)*>', '', 'exp'], ['(x+x+)+y', '', 'exp'],
+    ['\\s*\\s*', '', 'poly'], ['.*.*', '', 'poly'], ['[\\s\\S]*?[\\s\\S]*', '', 'poly'], ['\\w*\\w*', '', 'poly'], ['a+a+', '', 'poly'], ['[ab]*b*c', '', 'poly'],
+    ['abc', '', null], ['<status>([\\s\\S]*?)<\\/status>', 'g', null], ['\\*\\*(.+?)\\*\\*', 'g', null], ['^#+ (.*)$', 'gm', null], ['[^<]*', '', null],
+    ['(a|b)+', '', null], ['\\d+\\s+\\w+', '', null], ['(?:foo|bar)x', '', null], ['a+b+', '', null], ['[ \\t]+$', 'gm', null], ['(.|\\n)*', '', null],
+    ['\\bOOC:\\s*(.*)$', 'gim', null], ['(?<who>\\w+) waves', 'g', null], ['<br\\s*\\/?>', 'gi', null], ['\\p{L}+-\\d+', 'u', null],
+    ['x[\\s\\S]*?\\d{3}', 'g', null], ['(a+){1,5}', '', null], ['(?:ab)+', '', null], ['[\\s\\S]*', '', null], ['.*', '', null], ['(.+?)\\n', '', null],
+    ['("|\')(.*?)\\1', '', null], ['\\[(.*?)\\]', 'g', null], ['(?:<summary>)([\\s\\S]*?)(?:<\\/summary>)', 'g', null], ['(?=a+)+b', '', null],
+];
+
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 /** Checks the cases; patterns this engine cannot compile (e.g. (?i:) before V8 12.5) are returned, not run. */
-export function runCases(extractNeedle, buildTemplate) {
+export function runCases(extractNeedle, buildTemplate, analyzeRedos) {
     const unsupported = [];
+    if (analyzeRedos) {
+        for (const [source, flags, want] of REDOS) {
+            const got = analyzeRedos(source, flags).severity;
+            if (got !== want) throw new Error(`analyzeRedos(/${source}/${flags}).severity = ${JSON.stringify(got)}, want ${JSON.stringify(want)}`);
+        }
+    }
     if (buildTemplate) {
         for (const [replaceString, source, flags, want] of TEMPLATES) {
             const got = buildTemplate(replaceString, new RegExp(source, flags)).template;
@@ -201,7 +225,7 @@ export function runCases(extractNeedle, buildTemplate) {
         }
         if (want > 0 && re.test('x'.repeat(want - 1))) throw new Error(`/${source}/${flags} matches a string shorter than ${want}`);
     }
-    return { checked: CASES.length + NESTED.length + TERMS.length + REASONS.length + MINLEN.length + (buildTemplate ? TEMPLATES.length : 0) - unsupported.length, unsupported };
+    return { checked: CASES.length + NESTED.length + TERMS.length + REASONS.length + MINLEN.length + (buildTemplate ? TEMPLATES.length : 0) + (analyzeRedos ? REDOS.length : 0) - unsupported.length, unsupported };
 }
 
 // Characters whose case folding differs between toLowerCase() and the regex engine, astral characters, syntax

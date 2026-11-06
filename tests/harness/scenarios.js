@@ -267,9 +267,9 @@ export async function escapedSubst(h) {
 
 /** Item 8. The hand-checked cases and the fuzzer, in Chrome, against the loaded extension's extractNeedle(). */
 export async function needleFuzz(h, { seed, patterns }) {
-    const { extractNeedle, buildTemplate } = await import(`/scripts/extensions/third-party/${h.variant}/index.js`);
+    const { extractNeedle, buildTemplate, analyzeRedos } = await import(`/scripts/extensions/third-party/${h.variant}/index.js`);
     const f = await import('/harness/needle-fuzz.js');
-    return { cases: f.runCases(extractNeedle, buildTemplate), fuzz: f.fuzz(extractNeedle, { seed, patterns }) };
+    return { cases: f.runCases(extractNeedle, buildTemplate, analyzeRedos), fuzz: f.fuzz(extractNeedle, { seed, patterns }) };
 }
 
 /** Item 8. Literals inside groups and alternations prefilter; an optional astral character under u is not a needle. */
@@ -1249,6 +1249,62 @@ export async function autoRefresh(h) {
     const immediately = runs();
     await sleep(1300);
     return { before, immediately, later: runs() };
+}
+
+/**
+ * Feature list 1.5. With the fuse and the breaker off (the defaults) a risky script runs as it always did; the fuse
+ * skips inputs over fuseLen for risky scripts; the breaker turns a script off for the session after breakerCount runs
+ * over breakerMs, with an Undo in the toast. ② and ③ are off, so the slow runs really happen.
+ */
+export async function breakerFuse(h, { mode }) {
+    const rpk = applyProfile(h, { prefilter: false, memo: false, ...(mode === 'fuse' ? { fuse: true, fuseLen: 1000 } : mode === 'breaker' ? { breaker: true, breakerMs: 20, breakerCount: 2 } : {}) });
+    await useScripts(h, [
+        script({ scriptName: 'Risky', findRegex: '/(x+x+)+y/g', replaceString: 'Y' }), // exponential on a run of x without a y
+        script({ scriptName: 'Plain', findRegex: '/q/g', replaceString: 'Q' }),
+    ]);
+    const slow = 'x'.repeat(22); // tens of milliseconds in V8
+    const long = 'xxy' + 'a'.repeat(1500); // over fuseLen, matches at once
+    const row = async (name) => {
+        const r = JSON.parse(await h.commands.regexperf.callback({}, 'json')).rows.find(x => x.name === name);
+        return r ? { fused: r.fused, broken: r.broken, tripped: r.tripped, redos: r.redos?.severity ?? null } : null;
+    };
+    const outs = [
+        h.engine.getRegexedString(long + ' q', P.AI), // a long input: fused, or replaced
+        h.engine.getRegexedString(slow + ' q', P.AI), // slow run 1
+        h.engine.getRegexedString(slow + ' q', P.AI), // slow run 2: trips the breaker (count 2)
+        h.engine.getRegexedString('xxy q', P.AI), // after the trip: skipped by the breaker, else replaced
+    ];
+    const after = rpk ? await row('Risky') : null;
+    const toast = h.toasts.at(-1);
+    let undone = null;
+    let toastText = '';
+    if (toast && /rpk-undo/.test(toast[1])) { // the toast's HTML as toastr would show it: read it, click its Undo
+        document.body.insertAdjacentHTML('beforeend', `<div id="rpk_toast_test">${toast[1]}</div>`);
+        const div = document.getElementById('rpk_toast_test');
+        toastText = div.textContent;
+        div.querySelector('.rpk-undo').click();
+        div.remove();
+        undone = h.engine.getRegexedString('xxy q', P.AI);
+    }
+    return { outs, after, toast: toast?.[1] ?? '', toastText, undone, plain: rpk ? await row('Plain') : null };
+}
+
+/** Feature list 1.5. The report lists every backtracking risk with its reason and a suggestion; the badges carry them. */
+export async function redosReport(h) {
+    await useScripts(h, [
+        script({ scriptName: 'Nested', findRegex: '/(?:\\w+\\s?)+!/g', replaceString: '!' }),
+        script({ scriptName: 'Adjacent', findRegex: '/\\s*\\s*x/g', replaceString: 'X' }),
+        script({ scriptName: 'Fine', findRegex: '/<status>([\\s\\S]*?)<\\/status>/g', replaceString: '$1' }),
+        script({ scriptName: 'Dot', findRegex: '/(.|\\n)*z/g', replaceString: 'Z' }),
+    ]);
+    for (const s of ['hello world!', ' x', '<status>a</status>', 'z']) h.engine.getRegexedString(s, P.AI);
+    const root = panel(true);
+    const badges = Object.fromEntries([...root?.querySelectorAll('#rpk_table tbody tr[data-i]') ?? []].map(tr => [
+        tr.querySelector('.rpk-col-name').firstChild.textContent.trim(),
+        Object.fromEntries([...tr.querySelectorAll('.rpk-badge')].map(b => [b.textContent, b.title])),
+    ]));
+    const json = JSON.parse(await h.commands.regexperf.callback({}, 'json'));
+    return { report: await report(h), badges, redos: Object.fromEntries(json.rows.map(r => [r.name, r.redos])), counts: json.scripts };
 }
 
 /** tests/screenshots.mjs: a realistic session in the panel (the corpus chat, a measurement, a per-row stopwatch). */

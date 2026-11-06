@@ -42,8 +42,9 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
   - **Replacer** is the part of the total spent in SillyTavern's replacer (group filling, trim strings, macros). If it is large, the replacement is slow, not the pattern.
   - **Matched** counts the runs where the pattern matched (even if the text came out the same); **Changed** those that actually changed the text.
 - Badges next to a name:
-  - `.*` a pattern that may backtrack a lot
-  - `(a+)+` a nested quantifier (can backtrack catastrophically on long text)
+  - `(a+)+` exponential backtracking: a nested quantifier or an alternation whose branches can start with the same character, as the static analyzer reads the pattern's shape (hover for the reason and a rewrite; the text report has a "Backtracking risks" section)
+  - `a*a*` polynomial backtracking: adjacent quantifiers that can match the same characters
+  - `fuse` inputs ⑦ skipped, `off` a script ⑧ turned off for the session (click to turn it back on)
   - `⚡` a single run took over 50 ms; hover the badge for the newest spike's input length and first 80 characters, also listed in the text report's "Spikes" section
   - `⇅` order conflict: an earlier script removed what this one looks for, so a match was lost (the summary and the report name the pair and the count; on inputs up to 4000 characters the match is verified by running the pattern)
   - `∅` ran 20+ times without ever matching (a candidate to disable, also listed in the summary); a script that matches but leaves the text as it is gets no mark

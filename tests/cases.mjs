@@ -193,7 +193,7 @@ test('extra: ⑤ persisted display output refreshes when the message depth or a 
 
 // Words the Korean UI keeps in English: product and SillyTavern setting names, slash command verbs, data formats,
 // units, the test's script names.
-const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|staging|regexperf|reset|text|json|csv|measure|\boff\b|JSON|CSV|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b|{{(?:user|char|persona|group)}}/g;
+const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|staging|regexperf|reset|text|json|csv|measure|\boff\b|JSON|CSV|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b|{{(?:user|char|persona|group)}}|\bfuse\b/g;
 
 /** What the Korean panel must say (the plain-language wording of the panel redesign), as shown on screen. */
 const KO_PANEL = [
@@ -434,7 +434,7 @@ test('reset settings restores the defaults; open sections are remembered across 
     assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000 }, 'defaultSettings');
+    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3 }, 'defaultSettings');
     assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistMaxMB: '8' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
@@ -562,7 +562,7 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
@@ -709,6 +709,50 @@ test('feature list 1.3: the panel refreshes on its own after activity, on a fram
     assert.equal(r.immediately, r.before, 'nothing is rendered inside the regex call');
     assert.notEqual(r.later, r.before, 'rendered within 1.3 s without the refresh button');
     assert.equal(r.later, '7');
+});
+
+test('feature list 1.5: with the fuse and the breaker off (defaults) a risky script runs as always; the analyzer flags it', async ({ each }) => {
+    const r = await each('breakerFuse', { mode: 'off' }, { variants: ['none', 'current'] });
+    assert.deepEqual(r.none.outs, ['Y' + 'a'.repeat(1500) + ' Q', 'x'.repeat(22) + ' Q', 'x'.repeat(22) + ' Q', 'Y Q']);
+    assert.deepEqual(r.current.outs, r.none.outs);
+    assert.deepEqual(r.current.after, { fused: 0, broken: 0, tripped: false, redos: 'exp' });
+    assert.deepEqual(r.current.plain, { fused: 0, broken: 0, tripped: false, redos: null });
+    assert.equal(r.current.toast, '');
+});
+
+test('feature list 1.5: the fuse skips inputs over fuseLen for risky scripts only', async ({ each }) => {
+    const r = (await each('breakerFuse', { mode: 'fuse' }, { variants: ['current'] })).current;
+    assert.deepEqual(r.outs, ['xxy' + 'a'.repeat(1500) + ' Q', 'x'.repeat(22) + ' Q', 'x'.repeat(22) + ' Q', 'Y Q']);
+    assert.deepEqual(r.after, { fused: 1, broken: 0, tripped: false, redos: 'exp' });
+    assert.deepEqual(r.plain, { fused: 0, broken: 0, tripped: false, redos: null }, 'the long input ran through the plain script');
+});
+
+test('feature list 1.5: the circuit breaker turns a script off after N long runs, with an Undo in the toast', async ({ each }) => {
+    const r = (await each('breakerFuse', { mode: 'breaker' }, { variants: ['current'] })).current;
+    assert.deepEqual(r.outs.slice(0, 3), ['Y' + 'a'.repeat(1500) + ' Q', 'x'.repeat(22) + ' Q', 'x'.repeat(22) + ' Q']);
+    assert.equal(r.outs[3], 'xxy Q', 'skipped after the trip');
+    assert.deepEqual(r.after, { fused: 0, broken: 1, tripped: true, redos: 'exp' });
+    assert.match(r.toastText, /^"Risky" was turned off for this session: 2 runs took over 20 ms\. Undo Open script$/);
+    assert.match(r.toast, /class="rpk-undo"/);
+    assert.equal(r.undone, 'Y Q', 'Undo turns it back on');
+});
+
+test('feature list 1.5: the report and the badges explain each backtracking risk with a rewrite suggestion', async ({ each }) => {
+    const r = (await each('redosReport', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.redos.Nested, { severity: 'exp', kind: 'nested', snippet: '(?:\\w+\\s?)+' });
+    assert.deepEqual(r.redos.Adjacent, { severity: 'poly', kind: 'adjacent', snippet: '\\s*\\s*' });
+    assert.deepEqual(r.redos.Fine, { severity: null, kind: null, snippet: null });
+    assert.deepEqual(r.redos.Dot, { severity: null, kind: 'dotalt', snippet: '(.|\\n)*' });
+    assert.match(r.badges.Nested['(a+)+'], /^Exponential backtracking: nested quantifier \(\?:\\w\+\\s\?\)\+\. Repeat one thing only/);
+    assert.match(r.badges.Adjacent['a*a*'], /^Polynomial backtracking: adjacent overlapping quantifiers \\s\*\\s\*\. Merge them/);
+    assert.deepEqual(Object.keys(r.badges.Fine), []);
+    assert.deepEqual(Object.keys(r.badges.Dot), [], 'a suggestion alone gets no badge');
+    const section = r.report.slice(r.report.indexOf('\nBacktracking risks'));
+    assert.match(section, /^Nested: exponential: nested quantifier \(\?:\\w\+\\s\?\)\+\. Repeat one thing only: /m);
+    assert.match(section, /^Adjacent: polynomial: adjacent overlapping quantifiers \\s\*\\s\*\. Merge them into one quantifier/m);
+    assert.match(section, /^Dot: \(\.\|\\n\)\* → a character class such as \[\\s\\S\]$/m);
+    assert.doesNotMatch(section, /^Fine:/m);
+    assert.deepEqual([r.counts.redos, r.counts.redosExp], [2, 1]);
 });
 
 test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with a note', async ({ each }) => {

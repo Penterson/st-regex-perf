@@ -22,9 +22,9 @@ globalThis.SillyTavern = {
         addLocaleData() { },
     }),
 };
-const { extractNeedle, buildTemplate } = await import('../index.js');
+const { extractNeedle, buildTemplate, analyzeRedos } = await import('../index.js');
 
-const cases = runCases(extractNeedle, buildTemplate);
+const cases = runCases(extractNeedle, buildTemplate, analyzeRedos);
 console.log(`  ok  ${cases.checked} hand-checked cases` + (cases.unsupported.length ? ` (${cases.unsupported.length} of ${CASES.length} need a newer V8: ${cases.unsupported.join(' ')})` : ''));
 
 const seed = Number(process.env.FUZZ_SEED ?? Math.floor(Math.random() * 2 ** 31));

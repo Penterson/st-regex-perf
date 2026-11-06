@@ -44,6 +44,11 @@ const defaultSettings = {
     memoHashKeys: false, // ③ keyed by hash64(input) + length instead of the input: half the memory, see the Limits note
     autoMeasure: false, // run "Measure on this chat" once after a chat opens
     loadHintMs: 3000, // a chat whose first render takes longer gets a one-time hint about "# Messages to Load"
+    fuse: false, // ⑦ risky patterns are not run on inputs longer than fuseLen (changes the result: off by default)
+    fuseLen: 20000,
+    breaker: false, // ⑧ a script with breakerCount runs over breakerMs is skipped for the session (off by default)
+    breakerMs: 500,
+    breakerCount: 3,
 };
 
 // ST keeps this object for the whole session, so it is resolved once instead of on every replace.
@@ -453,8 +458,241 @@ function pruneTerms(terms) {
     return [...singles.slice(0, 6).map(s => [s]), ...sets.slice(0, 2)];
 }
 
-// .*  .+  [\s\S]*  [^]*  (.|\n)*  [\w\W]* — likely heavy backtracking
-const HEAVY_HINT = /\.\*|\.\+|\[\\s\\S\]\*|\[\^\]\*|\(\.\|\\n\)\*|\[\\w\\W\]\*/;
+// ---- Catastrophic backtracking (feature list 1.5) ----
+
+// Character-class overlap is approximated on a sample: ASCII plus a few other scripts and an astral character.
+const REDOS_SAMPLE = [...Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)), '가', '한', '中', 'é', 'ß', 'Σ', '😀', '　', ' '];
+const charSets = new Map(); // atom source + flags -> the sample characters it matches on its own
+function charSet(src, flags) {
+    const key = src + '\u0000' + flags;
+    let s = charSets.get(key);
+    if (!s) {
+        s = new Set();
+        try {
+            const re = new RegExp('^(?:' + src + ')$', flags.replace(/[gyd]/g, ''));
+            for (const c of REDOS_SAMPLE) if (re.test(c)) s.add(c);
+        } catch { /* nothing matches */ }
+        if (charSets.size >= 4000) charSets.delete(charSets.keys().next().value);
+        charSets.set(key, s);
+    }
+    return s;
+}
+const overlaps = (a, b) => {
+    for (const c of a) if (b.has(c)) return true;
+    return false;
+};
+
+/**
+ * Parses a pattern into alternatives of sequences of {atom, q}: atom {kind: 'char', src} | {kind: 'group', alts, look,
+ * src} | {kind: 'anchor'} | {kind: 'back'}; q = {min, max, lazy} or null. Throws BAIL on syntax it does not understand.
+ */
+function parseRegex(source, flags) {
+    const u = flags.includes('u') || flags.includes('v');
+    const n = source.length;
+    let i = 0;
+    const quant = () => {
+        const c = source[i];
+        let q = null;
+        if (c === '?' || c === '*' || c === '+') {
+            q = { min: c === '+' ? 1 : 0, max: c === '?' ? 1 : Infinity };
+            i++;
+        } else if (c === '{') {
+            const m = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(i, i + 24));
+            if (m) {
+                q = { min: Number(m[1]), max: m[2] ? (m[3] === '' ? Infinity : Number(m[3])) : Number(m[1]) };
+                i += m[0].length;
+            }
+        }
+        if (q && source[i] === '?') {
+            q.lazy = true;
+            i++;
+        }
+        return q;
+    };
+    const atom = () => {
+        const c = source[i];
+        const start = i;
+        if (c === '\\') {
+            const nx = source[i + 1];
+            if (nx === undefined) throw BAIL;
+            i += 2;
+            if (nx === 'b' || nx === 'B') return { kind: 'anchor' };
+            if (nx >= '1' && nx <= '9') {
+                while (source[i] >= '0' && source[i] <= '9') i++;
+                return { kind: 'back' };
+            }
+            if (nx === 'k' && source[i] === '<') {
+                i = source.indexOf('>', i) + 1;
+                if (i === 0) throw BAIL;
+                return { kind: 'back' };
+            }
+            if ((nx === 'p' || nx === 'P' || nx === 'u' || nx === 'x') && source[i] === '{') {
+                i = source.indexOf('}', i) + 1;
+                if (i === 0) throw BAIL;
+            } else if ((nx === 'u' || nx === 'x') && HEX.test(source.slice(i, i + (nx === 'x' ? 2 : 4)))) {
+                i += nx === 'x' ? 2 : 4;
+            } else if (nx === 'c') {
+                i++;
+            }
+            return { kind: 'char', src: source.slice(start, i) };
+        }
+        if (c === '[') {
+            let j = i + 1;
+            if (source[j] === '^') j++;
+            while (j < n && source[j] !== ']') {
+                if (source[j] === '\\') j++;
+                j++;
+            }
+            if (j >= n) throw BAIL;
+            i = j + 1;
+            return { kind: 'char', src: source.slice(start, i) };
+        }
+        if (c === '(') {
+            i++;
+            let look = false;
+            if (source[i] === '?') {
+                i++;
+                if (source[i] === ':') {
+                    i++;
+                } else if (source[i] === '<' && source[i + 1] !== '=' && source[i + 1] !== '!') {
+                    i = source.indexOf('>', i) + 1;
+                    if (i === 0) throw BAIL;
+                } else {
+                    const m = /^(?:<?[=!]|[a-z]*(?:-[a-z]*)?:)/.exec(source.slice(i, i + 16));
+                    if (!m) throw BAIL;
+                    look = !m[0].endsWith(':');
+                    i += m[0].length;
+                }
+            }
+            const alts = alternation();
+            if (source[i] !== ')') throw BAIL;
+            i++;
+            return { kind: 'group', alts, look, src: source.slice(start, i) };
+        }
+        if (c === ')' || c === '|' || c === '*' || c === '+' || c === '?') throw BAIL;
+        if (c === '^' || c === '$') {
+            i++;
+            return { kind: 'anchor' };
+        }
+        if (c === '{' && /^\{\d+(,\d*)?\}/.test(source.slice(i, i + 24))) throw BAIL;
+        const pair = u && c >= '\uD800' && c <= '\uDBFF';
+        i += pair ? 2 : 1;
+        return { kind: 'char', src: source.slice(start, i) };
+    };
+    const sequence = () => {
+        const items = [];
+        while (i < n && source[i] !== '|' && source[i] !== ')') {
+            const a = atom();
+            items.push({ atom: a, q: a.kind === 'anchor' ? null : quant() });
+        }
+        return items;
+    };
+    const alternation = () => {
+        const alts = [sequence()];
+        while (source[i] === '|') {
+            i++;
+            alts.push(sequence());
+        }
+        return alts;
+    };
+    const alts = alternation();
+    if (i < n) throw BAIL;
+    return alts;
+}
+
+/** Sample characters a sequence can start with: the leading optional items' joined with the first mandatory one's. */
+function firstOfSeq(items, flags) {
+    const s = new Set();
+    for (const { atom, q } of items) {
+        if (atom.kind === 'anchor' || (atom.kind === 'group' && atom.look)) continue;
+        for (const c of firstOfAtom(atom, flags)) s.add(c);
+        const optional = q ? q.min === 0 : false;
+        const canBeEmpty = atom.kind === 'group' && atom.alts.some(a => a.length === 0);
+        if (!optional && !canBeEmpty && atom.kind !== 'back') break;
+    }
+    return s;
+}
+function firstOfAtom(atom, flags) {
+    if (atom.kind === 'char') return charSet(atom.src, flags);
+    const s = new Set();
+    if (atom.kind === 'group') for (const alt of atom.alts) for (const c of firstOfSeq(alt, flags)) s.add(c);
+    return s;
+}
+const unbounded = (q) => !!q && q.max === Infinity;
+/** An unbounded quantifier anywhere inside (lookarounds aside). */
+const hasUnboundedInside = (alts) => alts.some(items => items.some(({ atom, q }) => (unbounded(q) && atom.kind !== 'anchor') || (atom.kind === 'group' && !atom.look && hasUnboundedInside(atom.alts))));
+
+const NO_REDOS = { severity: null, kind: null, snippet: null };
+/**
+ * Static ReDoS analysis (feature list 1.5): nested unbounded quantifiers (x+)+ and an unbounded group whose branches can
+ * start with the same character (a|ab)+ are exponential; adjacent unbounded atoms that can match the same characters
+ * \s*\s* polynomial (exponential inside an unbounded group). Character overlap is sampled, so this is a verdict on the
+ * pattern's shape, not a proof. kind names the shape (also 'dotalt' for the linear but slow (.|\n)*, which gets a
+ * suggestion and no severity), snippet the piece of the pattern.
+ * @param {string} source
+ * @param {string} flags
+ * @returns {{severity: 'exp' | 'poly' | null, kind: 'nested' | 'alternation' | 'adjacent' | 'dotalt' | null, snippet: string | null}}
+ */
+export function analyzeRedos(source, flags) {
+    let alts;
+    try {
+        alts = parseRegex(source, flags);
+    } catch (e) {
+        if (e !== BAIL) throw e;
+        return NO_REDOS;
+    }
+    let found = null;
+    const report = (severity, kind, snippet) => {
+        if (!found || (severity === 'exp' && found.severity !== 'exp')) found = { severity, kind, snippet };
+    };
+    const quantText = (q) => (q.max === Infinity && q.min <= 1 ? (q.min ? '+' : '*') : `{${q.min},}`);
+    const walk = (seqs, inUnbounded) => {
+        for (const items of seqs) {
+            for (let k = 0; k < items.length; k++) {
+                const { atom, q } = items[k];
+                if (atom.kind === 'anchor' || atom.kind === 'back' || (atom.kind === 'group' && atom.look)) continue;
+                if (atom.kind === 'group') {
+                    const rep = unbounded(q);
+                    if (rep && hasUnboundedInside(atom.alts)) report('exp', 'nested', atom.src + quantText(q));
+                    if (rep && atom.alts.length > 1) {
+                        const sets = atom.alts.map(a => firstOfSeq(a, flags));
+                        let overlap = false;
+                        for (let a = 0; a < sets.length && !overlap; a++) {
+                            for (let b = a + 1; b < sets.length && !overlap; b++) overlap = overlaps(sets[a], sets[b]);
+                        }
+                        if (overlap) report('exp', 'alternation', atom.src + quantText(q));
+                        else if (!found && atom.alts.every(a => a.length === 1 && a[0].atom.kind === 'char' && !a[0].q)) found = { severity: null, kind: 'dotalt', snippet: atom.src + quantText(q) };
+                    }
+                    walk(atom.alts, inUnbounded || rep);
+                }
+                const next = items[k + 1];
+                if (unbounded(q) && next && unbounded(next.q) && next.atom.kind !== 'anchor' && next.atom.kind !== 'back' && overlaps(firstOfAtom(atom, flags), firstOfAtom(next.atom, flags))) {
+                    report(inUnbounded ? 'exp' : 'poly', 'adjacent', atom.src + quantText(q) + next.atom.src + quantText(next.q));
+                }
+            }
+        }
+    };
+    walk(alts, false);
+    return found ?? NO_REDOS;
+}
+const redosCache = new Map(); // "source\0flags" -> analyzeRedos()
+const redosOf = (re) => cached(redosCache, keyOf(re), () => analyzeRedos(re.source, re.flags));
+
+/** The analyzer's verdict in words, and what to do about it. */
+const REDOS_REASONS = {
+    nested: (s) => t`nested quantifier ${s}`,
+    alternation: (s) => t`alternation with overlapping branches ${s}`,
+    adjacent: (s) => t`adjacent overlapping quantifiers ${s}`,
+    dotalt: (s) => t`${s} → a character class such as [\\s\\S]`,
+};
+const REDOS_SUGGESTIONS = {
+    nested: () => t`Repeat one thing only: (x+)+ → x+, (?:\\w+\\s?)* → [\\w\\s]*`,
+    alternation: () => t`Make the branches start with different characters, or merge them: (a|ab) → ab?`,
+    adjacent: () => t`Merge them into one quantifier, or end the first at a character the second cannot match: .*.* → .*`,
+    dotalt: (s) => t`${s} → a character class such as [\\s\\S]`,
+};
+const redosReason = (r) => REDOS_REASONS[r.kind]?.(r.snippet) ?? '';
+const redosSuggestion = (r) => REDOS_SUGGESTIONS[r.kind]?.(r.snippet) ?? '';
 
 // ---- Script info: compiled pattern key -> script metadata ----
 
@@ -634,7 +872,7 @@ function buildInfo(groups) {
     const { substituteParamsExtended } = ctx();
     const map = new Map();
     const dynamic = []; // {raw, substitute, shape, info} of RAW/ESCAPED scripts whose pattern has macros, see resolveDynamic()
-    const counts = { total: 0, active: 0, noNeedle: 0, heavy: 0, nested: 0, types: {} };
+    const counts = { total: 0, active: 0, noNeedle: 0, redos: 0, redosExp: 0, types: {} };
     const versionParts = [];
     const displayParts = []; // the parts that can change a display result: the ⑤ key's version (feature list 3, row 4)
     const depthRules = []; // [min, max] of display scripts with depth limits, for the ⑤ key
@@ -664,8 +902,11 @@ function buildInfo(groups) {
             const trimSig = trims.join('\u0002');
             const needle = needleOf(re);
             if (!needle.needles) counts.noNeedle++;
-            if (HEAVY_HINT.test(re.source)) counts.heavy++;
-            if (needle.nested) counts.nested++;
+            const redos = redosOf(re);
+            if (redos.severity) {
+                counts.redos++;
+                if (redos.severity === 'exp') counts.redosExp++;
+            }
 
             // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
             const replacement = replaceString.replace(/{{match}}/gi, '$0');
@@ -684,6 +925,7 @@ function buildInfo(groups) {
                 semiPureTrims: semiPure && strippedTrims.some((trim, k) => trim !== String(trims[k])), // a trim string holds a static macro
                 replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
                 needle,
+                redos,
                 ids: [s.id], // for the row actions in the table
                 statKey: isDynamic ? '\u0004' + s.findRegex : key, // a dynamic pattern's runs are counted under its raw pattern
                 raw: isDynamic ? s.findRegex : null,
@@ -745,6 +987,31 @@ const SPIKE_HEAD = 80; // characters of the input kept in the sample
 const SAMPLE_AFTER = 1000; // ① with profilerSampling, a script past this many runs is timed on 1 run in SAMPLE_EVERY
 const SAMPLE_EVERY = 8;
 let statsDirty = false; // the stats changed since the panel was last rendered
+let tripSeq = 0; // ⑧ ids for the Undo controls of tripped scripts
+
+/** ⑧ Turns a script off for the session and says so, with Undo and Open script in the toast (feature list 1.5). */
+function trip(stat) {
+    stat.tripped = true;
+    statsDirty = true;
+    const control = (cls, text) => ` <span class="${cls}" data-trip="${stat.tripId}">${esc(text)}</span>`;
+    toastr.warning(esc(t`"${stat.name}" was turned off for this session: ${stat.slowRuns} runs took over ${cfg.breakerMs} ms.`)
+        + control('rpk-undo', t`Undo`) + (stat.ids.length ? control('rpk-open', t`Open script`) : ''), 'Regex Perf Kit', { timeOut: 0, extendedTimeOut: 0, escapeHtml: false, closeButton: true });
+}
+function untrip(stat) {
+    stat.tripped = false;
+    stat.slowRuns = 0;
+    statsDirty = true;
+}
+/** The Undo / Open script controls of the breaker's toasts and badges, wherever they are shown. */
+function onTripControl(e) {
+    const el = e.target.closest?.('.rpk-undo, .rpk-open');
+    if (!el) return;
+    const stat = [...stats.values()].find(s => String(s.tripId) === el.dataset.trip);
+    if (!stat) return;
+    if (el.classList.contains('rpk-undo')) untrip(stat);
+    else scriptAction(stat, false);
+    renderPanel();
+}
 const stats = new Map(); // pattern key -> counters, see getStat()
 let statsSince = Date.now();
 const persistStats = { hits: 0, stores: 0 };
@@ -818,8 +1085,13 @@ function getStat(key, re) {
             skipped: 0, hits: 0, streamSkipped: 0, bypass: 0, fast: 0,
             seen: 0, // every run that executed, also the ones sampling left untimed
             spike: null, // {ms, len, head}: the newest run over SPIKE_MS
-            heavy: HEAVY_HINT.test(re.source),
             needle: null, // the needle the wrapper uses (and its nested flag), set with its meta
+            redos: NO_REDOS, // the analyzer's verdict, set with its meta
+            fused: 0, // ⑦ inputs the fuse skipped
+            broken: 0, // ⑧ runs skipped since the breaker tripped
+            slowRuns: 0, // ⑧ runs over breakerMs
+            tripped: false, // ⑧ turned off for the session
+            tripId: ++tripSeq, // for the Undo controls
             ids: [], // scripts with this pattern
         };
         stats.set(key, st);
@@ -844,6 +1116,14 @@ class PerfRegExp extends RegExp {
             stat.bypass++;
             statsDirty = true;
             return str;
+        }
+        if (stat.tripped) { // ⑧ turned off by the circuit breaker for this session
+            stat.broken++;
+            return unchanged(stat, str);
+        }
+        if (cfg.fuse && stat.redos.severity && str.length > cfg.fuseLen) { // ⑦ a risky pattern on a very long input
+            stat.fused++;
+            return unchanged(stat, str);
         }
         if (cfg.streamingSkip && markdownOnly && !streamApply && liveStream()) {
             stat.streamSkipped++;
@@ -892,7 +1172,7 @@ class PerfRegExp extends RegExp {
         let out;
         let fastRun = false;
         let macroSeen = false; // a match contained macro syntax: SillyTavern substituted it, the result is not memoizable
-        const t0 = profile ? performance.now() : 0;
+        const t0 = profile || cfg.breaker ? performance.now() : 0;
         // ⑥ With no macro syntax in the input, SillyTavern's per-match callback amounts to its template, which V8 applies
         // without a JS call per match. Should group text assemble macro syntax anyway, the callback is used instead.
         const fast = cfg.fastPath && typeof replacer === 'function' && !hasMacro(str) ? this._meta.fast : null;
@@ -934,8 +1214,9 @@ class PerfRegExp extends RegExp {
             out = RegExp.prototype[Symbol.replace].call(native, str, fn);
             if (checked && this._meta.fast) fast.verify--;
         }
+        const dt = t0 ? performance.now() - t0 : 0;
+        if (cfg.breaker && dt > cfg.breakerMs && ++stat.slowRuns >= cfg.breakerCount) trip(stat); // ⑧
         if (profile) {
-            const dt = performance.now() - t0;
             if (t0 - lastCall > BURST_GAP_MS) burstStart = t0;
             lastCall = t0 + dt;
             stat.calls += weight;
@@ -1049,6 +1330,9 @@ function patchProvider() {
             if (info?.raw) stat.src = info.raw;
             stat.ids = info?.ids ?? [];
             stat.needle = info?.needle ?? needleOf(base);
+            stat.redos = info?.redos ?? redosOf(base);
+            stat.tripped = false; // ⑧ an edit resets the breaker
+            stat.slowRuns = 0;
             w._meta = {
                 stat,
                 markdownOnly: !!info?.markdownOnly,
@@ -1244,8 +1528,10 @@ const badge = (text, title) => ` <span class="rpk-badge" title="${esc(title)}">$
 function warnings(r, badges = false) {
     const conflicted = conflictsOf(r);
     return [
-        r.heavy && (badges ? badge('.*', t`Contains .* or similar: may be slow on long text (backtracking)`) : t`.*-style`),
-        r.needle?.nested && (badges ? badge('(a+)+', t`Nested quantifier such as (a+)+: can become extremely slow on long text`) : t`nested quantifier`),
+        r.redos.severity === 'exp' && (badges ? badge('(a+)+', t`Exponential backtracking: ${redosReason(r.redos)}. ${redosSuggestion(r.redos)}`) : t`exponential backtracking (${redosReason(r.redos)})`),
+        r.redos.severity === 'poly' && (badges ? badge('a*a*', t`Polynomial backtracking: ${redosReason(r.redos)}. ${redosSuggestion(r.redos)}`) : t`polynomial backtracking (${redosReason(r.redos)})`),
+        r.fused > 0 && (badges ? badge('fuse', t`${r.fused} inputs over ${settings.fuseLen} characters were skipped by the fuse`) : t`fused`),
+        r.tripped && (badges ? ` <span class="rpk-badge rpk-undo" data-trip="${r.tripId}" title="${esc(t`Turned off by the circuit breaker: ${r.slowRuns} runs took over ${settings.breakerMs} ms. Click to turn it back on.`)}">off</span>` : t`breaker`),
         r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)` + (r.spike ? '\n' + spikeText(r.spike) : '')) : t`spike`),
         conflicted.length > 0 && (badges ? badge('⇅', conflicted.map(conflictText).join('\n')) : t`order conflict`),
         ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without ever matching: consider turning it off`) : t`no match`),
@@ -1361,7 +1647,7 @@ function buildReportText() {
     const lines = [
         `Regex Perf Kit report (${new Date().toLocaleString()})`,
         t`Since: ${new Date(statsSince).toLocaleTimeString()} / chat messages: ${s.chatLen}`,
-        t`Scripts: ${c.total} total, ${c.active} active (${typeCounts(c)}), no literal ${c.noNeedle}, possibly heavy ${c.heavy}, nested quantifiers ${c.nested}`,
+        t`Scripts: ${c.total} total, ${c.active} active (${typeCounts(c)}), no literal ${c.noNeedle}, backtracking risk ${c.redos} (exponential ${c.redosExp})`,
         t`Ran ${s.calls} times / ${fmtMs(s.total)} ms total | skipped ${skips} (prefilter ${s.skipped}, cache hits ${s.hits}, streaming ${s.streamSkipped}) | persistent cache bypasses ${s.bypass} (hits ${persistStats.hits}, stored ${persistStats.stores})`,
         s.calls
             ? t`Estimated time saved: ≈${fmtMs(s.saved)} ms (${skips} skipped runs × each script's average run time)`
@@ -1385,6 +1671,14 @@ function buildReportText() {
         lines.push('', t`Spikes (newest run over ${SPIKE_MS} ms per script)`);
         spikes.forEach(r => lines.push(`${r.name}: ${spikeText(r.spike)}`));
     }
+    const risks = s.rows.filter(r => r.redos.kind);
+    if (risks.length) {
+        lines.push('', t`Backtracking risks (the pattern's shape, as the analyzer reads it)`);
+        for (const r of risks) {
+            const sev = r.redos.severity === 'exp' ? t`exponential` : r.redos.severity === 'poly' ? t`polynomial` : null;
+            lines.push(`${r.name}: ${sev ? `${sev}: ${redosReason(r.redos)}. ${redosSuggestion(r.redos)}` : redosReason(r.redos)}`);
+        }
+    }
     return lines.join('\n');
 }
 
@@ -1405,6 +1699,7 @@ function buildReportData() {
             rank: i + 1, name: r.name, pattern: r.src, runs: r.calls, totalMs: r.totalMs, avgMs: avgMs(r), maxMs: r.maxMs, replacerMs: r.replMs,
             matched: r.matched, changed: r.changed, skips: r.skipped, hits: r.hits, streamSkips: r.streamSkipped, fastRuns: r.fast,
             sampled: !!settings.profilerSampling && r.seen > SAMPLE_AFTER, // runs, totals, matched and changed are scaled from 1 run in 8
+            redos: r.redos, fused: r.fused, broken: r.broken, tripped: r.tripped,
             literal: r.needle?.terms ?? [], literalReason: r.needle?.reason ?? null, minLength: r.needle?.minLen ?? 0, warnings: warnings(r), spike: r.spike,
         })),
     };
@@ -1436,10 +1731,10 @@ function turnOffByName(name) {
     return t`Turned off: ${hits[0].name}`;
 }
 
-const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'seen', 'spike'];
-const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false }; // what a measurement turns off
+const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'seen', 'fused', 'broken', 'slowRuns', 'spike'];
+const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false, breaker: false }; // what a measurement turns off
 
-const CACHES_OFF = { profiler: false, memo: false, persist: false }; // a per-row measurement keeps the prefilter as set
+const CACHES_OFF = { profiler: false, memo: false, persist: false, breaker: false }; // a per-row measurement keeps the prefilter as set
 
 const MEASURE_CHUNK = 10; // messages formatted between two yields to the page
 let measureBusy = false; // a measurement is running (it yields, so other code runs in between)
@@ -1588,6 +1883,8 @@ const settingsHtml = () => `
         ${feature('rpk_stream_throttle', t`Compromise: keep formatting the finished lines`, t`With ④ on, display scripts still format the lines that are already complete, at most once per interval (0.5 s by default, under Limits). The line being written stays raw; the finished reply gets every script.`, { sub: true })}
         </div>
         ${feature('rpk_persist', t`⑤ Save results in the chat file (persistent cache)`, t`Stores the display result with the message, so reopening the chat skips the work. The chat file grows; results are recomputed automatically when a script changes.`, { labelId: 'rpk_persist_label' })}
+        ${feature('rpk_fuse', t`⑦ Fuse: skip very long inputs for risky patterns`, t`A pattern the analyzer flags for catastrophic backtracking is not run on inputs longer than the limit under Limits (20,000 characters by default): that text is shown as it is. Off by default, as it changes the result.`)}
+        ${feature('rpk_breaker', t`⑧ Circuit breaker: turn off a script that keeps running long`, t`After the set number of runs over the set time (3 runs over 500 ms by default), the script is skipped for the rest of the session, with an Undo in the toast and in the table. The script itself is never changed. Off by default.`)}
       </div>
       <div class="rpk-note" id="rpk_persist_note"></div>
       <div class="rpk-note" id="rpk_usage"></div>
@@ -1601,6 +1898,9 @@ const settingsHtml = () => `
           ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved in the chat.`)}
           ${limit('persistMaxMB', t`⑤ Saved results per chat (MB)`, t`Beyond this, the oldest messages' results are dropped from the chat.`)}
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
+          ${limit('fuseLen', t`⑦ Fuse: longest input a risky pattern runs on (characters)`)}
+          ${limit('breakerMs', t`⑧ Breaker: a run counts as long over (ms)`)}
+          ${limit('breakerCount', t`⑧ Breaker: long runs before the script is turned off`)}
           ${limit('memoHashKeys', t`③ Key the cache by a hash of the input`, t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`, 'checkbox')}
           ${limit('loadHintMs', t`Hint about "# Messages to Load" when opening a chat takes longer than (ms)`, t`Shown once per session as a toast.`)}
           ${limit('autoMeasure', t`Measure automatically when a chat opens`, t`Runs "Measure on this chat" once after a chat opens.`, 'checkbox')}
@@ -1635,7 +1935,7 @@ const settingsHtml = () => `
           <li>${t`Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.`}</li>
           <li>${t`<b>Runs</b> are real regex executions; <b>Skips</b> and <b>Hits</b> are runs avoided by ② and ③. A script with 0 runs and many skips never had to run at all.`}</li>
           <li>${t`<b>Replacer</b> is the part of Total ms spent in the replacement; if it is large, the replacement (macros) is slow, not the pattern.`}</li>
-          <li>${t`Marks after a name: <code>.*</code> may be slow on long text, <code>(a+)+</code> nested quantifier, <code>⚡</code> one run over ${SPIKE_MS} ms, <code>∅</code> ran ${INEFFECTIVE_RUNS}+ times without ever matching, <code>⇅</code> an earlier script removes what this one looks for (order conflict).`}</li>
+          <li>${t`Marks after a name: <code>(a+)+</code> exponential backtracking (a nested quantifier or an alternation whose branches overlap; hover for the reason and a rewrite), <code>a*a*</code> polynomial backtracking (adjacent overlapping quantifiers), <code>⚡</code> one run over ${SPIKE_MS} ms, <code>∅</code> ran ${INEFFECTIVE_RUNS}+ times without ever matching, <code>⇅</code> an earlier script removes what this one looks for (order conflict), <code>fuse</code> long inputs skipped by ⑦, <code>off</code> turned off by ⑧ (click to turn it back on).`}</li>
           <li>${t`Click a row to open the script in the Regex extension; the stopwatch re-renders this chat without the script and shows the time it costs, the power icon turns it off.`}</li>
         </ul>
       </details>
@@ -1652,9 +1952,9 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
+const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
 // editable limits: setting -> [min, max]
-const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], loadHintMs: [100, 600000] };
+const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], fuseLen: [1000, 1e7], breakerMs: [50, 60000], breakerCount: [1, 100], loadHintMs: [100, 600000] };
 
 const RENDER_MIN_MS = 500; // the panel is re-rendered at most this often while stats keep changing
 let ui = null; // panel elements, cached by bindUi()
@@ -1682,8 +1982,8 @@ function renderPanel() {
     const skips = s.skipped + s.hits + s.streamSkipped;
     const lines = [];
     lines.push(t`${c.active} of ${c.total} scripts active (${typeCounts(c)}). ${s.chatLen} messages in this chat.`);
-    if (c.noNeedle || c.heavy || c.nested) {
-        lines.push(`<span class="rpk-dim">${t`Patterns to look at: no fixed text ${c.noNeedle}, .*-style ${c.heavy}, nested quantifiers ${c.nested}.`}</span>`);
+    if (c.noNeedle || c.redos) {
+        lines.push(`<span class="rpk-dim">${t`Patterns to look at: no fixed text ${c.noNeedle}, backtracking risk ${c.redos} (exponential ${c.redosExp}).`}</span>`);
     }
     const breakdown = t`prefilter ${s.skipped}, cache ${s.hits}, streaming ${s.streamSkipped}` + (persistAvailable ? ', ' + t`saved results ${s.bypass}` : '');
     if (!s.calls && !skips && !s.bypass) {
@@ -1720,7 +2020,7 @@ function renderPanel() {
     }
     ui.rows = rows.slice(0, 60);
     setContent(ui.tbody, ui.rows.map((r, i) => {
-        const cls = (s.total > 0 && r.totalMs / s.total >= 0.5) ? 'rpk-hot' : (r.heavy ? 'rpk-heavy' : '');
+        const cls = (s.total > 0 && r.totalMs / s.total >= 0.5) ? 'rpk-hot' : (r.redos.severity === 'exp' ? 'rpk-heavy' : '');
         const lit = fmtNeedles(r);
         const m = rowMeasures.get(r);
         const actions = (m ? `<span class="rpk-row-ms" title="${esc(t`Without this script the chat renders in ${fmtMs(m.without)} ms instead of ${fmtMs(m.with)} ms (③ and ⑤ off)`)}">${m.with >= m.without ? '−' : '+'}${fmtMs(Math.abs(m.with - m.without))} ms</span>` : '')
@@ -1859,6 +2159,7 @@ function bindUi() {
         renderPanel();
     });
     ui.tbody.addEventListener('click', (e) => {
+        if (e.target.closest('.rpk-undo, .rpk-open')) return; // the breaker's controls, see onTripControl()
         const r = ui.rows[e.target.closest('tr[data-i]')?.dataset.i];
         if (!r) return;
         if (e.target.closest('.rpk-measure-row')) {
@@ -1967,6 +2268,7 @@ eventSource.on(event_types.APP_READY, () => {
         if (container) {
             container.insertAdjacentHTML('beforeend', settingsHtml());
             bindUi();
+            document.addEventListener('click', onTripControl); // ⑧ Undo / Open script, in toasts and in the table
             renderPanel();
         }
     } catch (e) { console.warn('[RegexPerf] UI init failed', e); }
