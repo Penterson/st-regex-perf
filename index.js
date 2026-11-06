@@ -3,9 +3,9 @@
  *
  * The engine compiles every script pattern through RegexProvider.instance.get(). That method is patched to
  * return a RegExp subclass whose [Symbol.replace] (where String.prototype.replace() dispatches) adds
- * ① profiler, ② literal prefilter, ③ memo cache and ④ streaming skip of display-only scripts.
- * ST's MessageFormatter hooks add ⑤ a persisted display cache and ④'s compromise mode.
- * No ST core file is modified.
+ * ① profiler, ② literal prefilter, ③ memo cache, ④ streaming skip of display-only scripts, ⑥ replacer fast path,
+ * ⑦ input-length fuse and ⑧ circuit breaker. ST's MessageFormatter hooks add ⑤ a persisted display cache and
+ * ④'s compromise mode. No ST core file is modified.
  */
 
 // Namespace import: older engines lack getScriptsByType / SCRIPT_TYPES, and a missing named import fails to load.
@@ -129,6 +129,34 @@ const HEX_DIGITS = { u: 4, x: 2 }; // digits after \u and \x
 const HEX = /^[0-9a-fA-F]+$/;
 const ASCII_LETTER = /[a-zA-Z]/;
 const BAIL = Symbol('bail');
+const BRACE_QUANT = /^\{(\d+)(,(\d*))?\}/;
+const GROUP_PREFIX = /^(?:<?[=!]|[a-z]*(?:-[a-z]*)?:)/; // after "(?": a lookaround or a modifier group
+const MATCH_MACRO = /{{match}}/gi; // {{match}} in a replacement is $0, as runRegexScript() reads it
+const escapeRe = (s) => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
+
+/** The quantifier at source[i], its lazy '?' included: {min, max, len} (len: the characters it spans) or null. */
+function quantAt(source, i) {
+    const c = source[i];
+    let q = null;
+    if (c === '?' || c === '*' || c === '+') {
+        q = { min: c === '+' ? 1 : 0, max: c === '?' ? 1 : Infinity, len: 1 };
+    } else if (c === '{') {
+        const m = BRACE_QUANT.exec(source.slice(i, i + 24));
+        if (m) q = { min: Number(m[1]), max: m[2] ? (m[3] === '' ? Infinity : Number(m[3])) : Number(m[1]), len: m[0].length };
+    }
+    if (q && source[i + q.len] === '?') q.len++;
+    return q;
+}
+/** Index of the ']' that closes the class opening at source[i] (source.length when none does). */
+function classEnd(source, i) {
+    let j = i + 1;
+    if (source[j] === '^') j++; // in JS "[]" is an empty class and "[^]" matches anything: a ']' right after closes it
+    while (j < source.length && source[j] !== ']') {
+        if (source[j] === '\\') j++;
+        j++;
+    }
+    return j;
+}
 
 // ② Literal presence per input: each literal (or case-insensitive check) gets a small id, and an input's answers are
 // kept in an array by id, so a string flowing through every script is scanned once per literal. The last input needs
@@ -189,21 +217,9 @@ export function extractNeedle(source, flags) {
     let opaqueLits = 0; // literal characters inside them
     let opaque = 0; // depth inside such groups
 
-    // Quantifier at i, with its lazy '?': {min, inf} or null.
     const quant = () => {
-        let q = null;
-        const c = source[i];
-        if (c === '?' || c === '*' || c === '+') {
-            q = { min: c === '+' ? 1 : 0, inf: c !== '?' };
-            i++;
-        } else if (c === '{') {
-            const m = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(i, i + 24));
-            if (m) {
-                q = { min: Number(m[1]), inf: m[3] === '' };
-                i += m[0].length;
-            }
-        }
-        if (q && source[i] === '?') i++;
+        const q = quantAt(source, i);
+        if (q) i += q.len;
         return q;
     };
 
@@ -257,14 +273,7 @@ export function extractNeedle(source, flags) {
             return literal(CONTROL_ESCAPES[nx] ?? nx); // \n \t \r \f \v, or an escaped character
         }
         if (c === '[') {
-            let j = i + 1;
-            if (source[j] === '^') j++;
-            // In JS "[]" is an empty class and "[^]" matches anything: a ']' right after '[' closes it.
-            while (j < n && source[j] !== ']') {
-                if (source[j] === '\\') j++;
-                j++;
-            }
-            i = j + 1;
+            i = classEnd(source, i) + 1;
             return one;
         }
         if (c === '(') {
@@ -280,7 +289,7 @@ export function extractNeedle(source, flags) {
                     i = e === -1 ? n : e + 1;
                 } else { // (?= (?! (?<= (?<! lookarounds, (?i: (?-s: modifiers
                     hidden = true;
-                    const m = /^(?:<?[=!]|[a-z]*(?:-[a-z]*)?:)/.exec(source.slice(i, i + 16));
+                    const m = GROUP_PREFIX.exec(source.slice(i, i + 16));
                     zero = !!m && !m[0].endsWith(':');
                     i += m ? m[0].length : 0;
                 }
@@ -335,13 +344,14 @@ export function extractNeedle(source, flags) {
             const a = atom();
             const q = quant();
             const reps = q ? q.min : 1;
-            if (q?.inf) inf = true;
+            const rep = q?.max === Infinity;
+            if (rep) inf = true;
             if (a.group) {
                 const g = a.group;
                 if (!a.zero) len += g.len * reps;
                 if (g.inf) {
                     inf = true;
-                    if (q?.inf) nested = true;
+                    if (rep) nested = true;
                 }
                 if (a.opaque || reps === 0) {
                     end();
@@ -412,7 +422,7 @@ export function extractNeedle(source, flags) {
     } else if (flags.includes('i')) {
         // With the i flag, escaped copies of the literals under the pattern's i/u flags decide: they fold case exactly
         // like the pattern itself (toLowerCase() does not: σ/ς/Σ, µ/μ, ſ/s ...).
-        const res = terms.map(set => new RegExp(set.map(s => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')).join('|'), u ? 'iu' : 'i'));
+        const res = terms.map(set => new RegExp(set.map(escapeRe).join('|'), u ? 'iu' : 'i'));
         const ids = res.map(re => litId('\0' + re.source + '/' + re.flags));
         has = res.length === 1 ? (str, keep) => litPresent(str, ids[0], null, res[0], keep) : (str, keep) => res.every((re, k) => litPresent(str, ids[k], null, re, keep));
     } else if (terms.length === 1 && terms[0].length === 1) {
@@ -465,20 +475,14 @@ function pruneTerms(terms) {
 // Character-class overlap is approximated on a sample: ASCII plus a few other scripts and an astral character.
 const REDOS_SAMPLE = [...Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)), '가', '한', '中', 'é', 'ß', 'Σ', '😀', '　', ' '];
 const charSets = new Map(); // atom source + flags -> the sample characters it matches on its own
-function charSet(src, flags) {
-    const key = src + '\u0000' + flags;
-    let s = charSets.get(key);
-    if (!s) {
-        s = new Set();
-        try {
-            const re = new RegExp('^(?:' + src + ')$', flags.replace(/[gyd]/g, ''));
-            for (const c of REDOS_SAMPLE) if (re.test(c)) s.add(c);
-        } catch { /* nothing matches */ }
-        if (charSets.size >= 4000) charSets.delete(charSets.keys().next().value);
-        charSets.set(key, s);
-    }
+const charSet = (src, flags) => cached(charSets, src + '\u0000' + flags, () => {
+    const s = new Set();
+    try {
+        const re = new RegExp('^(?:' + src + ')$', flags.replace(/[gyd]/g, ''));
+        for (const c of REDOS_SAMPLE) if (re.test(c)) s.add(c);
+    } catch { /* nothing matches */ }
     return s;
-}
+}, 4000);
 const overlaps = (a, b) => {
     for (const c of a) if (b.has(c)) return true;
     return false;
@@ -486,29 +490,15 @@ const overlaps = (a, b) => {
 
 /**
  * Parses a pattern into alternatives of sequences of {atom, q}: atom {kind: 'char', src} | {kind: 'group', alts, look,
- * src} | {kind: 'anchor'} | {kind: 'back'}; q = {min, max, lazy} or null. Throws BAIL on syntax it does not understand.
+ * src} | {kind: 'anchor'} | {kind: 'back'}; q = {min, max} or null. Throws BAIL on syntax it does not understand.
  */
 function parseRegex(source, flags) {
     const u = flags.includes('u') || flags.includes('v');
     const n = source.length;
     let i = 0;
     const quant = () => {
-        const c = source[i];
-        let q = null;
-        if (c === '?' || c === '*' || c === '+') {
-            q = { min: c === '+' ? 1 : 0, max: c === '?' ? 1 : Infinity };
-            i++;
-        } else if (c === '{') {
-            const m = /^\{(\d+)(,(\d*))?\}/.exec(source.slice(i, i + 24));
-            if (m) {
-                q = { min: Number(m[1]), max: m[2] ? (m[3] === '' ? Infinity : Number(m[3])) : Number(m[1]) };
-                i += m[0].length;
-            }
-        }
-        if (q && source[i] === '?') {
-            q.lazy = true;
-            i++;
-        }
+        const q = quantAt(source, i);
+        if (q) i += q.len;
         return q;
     };
     const atom = () => {
@@ -539,12 +529,7 @@ function parseRegex(source, flags) {
             return { kind: 'char', src: source.slice(start, i) };
         }
         if (c === '[') {
-            let j = i + 1;
-            if (source[j] === '^') j++;
-            while (j < n && source[j] !== ']') {
-                if (source[j] === '\\') j++;
-                j++;
-            }
+            const j = classEnd(source, i);
             if (j >= n) throw BAIL;
             i = j + 1;
             return { kind: 'char', src: source.slice(start, i) };
@@ -560,7 +545,7 @@ function parseRegex(source, flags) {
                     i = source.indexOf('>', i) + 1;
                     if (i === 0) throw BAIL;
                 } else {
-                    const m = /^(?:<?[=!]|[a-z]*(?:-[a-z]*)?:)/.exec(source.slice(i, i + 16));
+                    const m = GROUP_PREFIX.exec(source.slice(i, i + 16));
                     if (!m) throw BAIL;
                     look = !m[0].endsWith(':');
                     i += m[0].length;
@@ -576,7 +561,7 @@ function parseRegex(source, flags) {
             i++;
             return { kind: 'anchor' };
         }
-        if (c === '{' && /^\{\d+(,\d*)?\}/.test(source.slice(i, i + 24))) throw BAIL;
+        if (c === '{' && BRACE_QUANT.test(source.slice(i, i + 24))) throw BAIL;
         const pair = u && c >= '\uD800' && c <= '\uDBFF';
         i += pair ? 2 : 1;
         return { kind: 'char', src: source.slice(start, i) };
@@ -687,14 +672,13 @@ const REDOS_REASONS = {
     adjacent: (s) => t`adjacent overlapping quantifiers ${s}`,
     dotalt: (s) => t`${s} → a character class such as [\\s\\S]`,
 };
-const REDOS_SUGGESTIONS = {
+const REDOS_SUGGESTIONS = { // for the exp / poly shapes; dotalt's reason is its suggestion
     nested: () => t`Repeat one thing only: (x+)+ → x+, (?:\\w+\\s?)* → [\\w\\s]*`,
     alternation: () => t`Make the branches start with different characters, or merge them: (a|ab) → ab?`,
     adjacent: () => t`Merge them into one quantifier, or end the first at a character the second cannot match: .*.* → .*`,
-    dotalt: (s) => t`${s} → a character class such as [\\s\\S]`,
 };
 const redosReason = (r) => REDOS_REASONS[r.kind]?.(r.snippet) ?? '';
-const redosSuggestion = (r) => REDOS_SUGGESTIONS[r.kind]?.(r.snippet) ?? '';
+const redosSuggestion = (r) => REDOS_SUGGESTIONS[r.kind]?.() ?? '';
 
 // ---- Script info: compiled pattern key -> script metadata ----
 
@@ -704,7 +688,7 @@ const keyOf = (re) => re.source + '\u0000' + re.flags;
 // compiled key misses its script. The raw pattern is matched instead: re-substituted (exact when the macro's value is
 // stable) or as a shape in which each macro stands for any text (feature list 3, row 2).
 const MACRO_SPLIT = /{{[^{}]*}}|<(?:user|bot|char(?:ifnotgroup)?|group)>/gi;
-const shapeOf = (raw) => new RegExp('^' + raw.split(MACRO_SPLIT).map(s => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')).join('[\\s\\S]*?') + '$');
+const shapeOf = (raw) => new RegExp('^' + raw.split(MACRO_SPLIT).map(escapeRe).join('[\\s\\S]*?') + '$');
 function resolveDynamic(regexString, dynamic) {
     if (!dynamic.length) return undefined;
     const { substituteParamsExtended } = ctx();
@@ -737,7 +721,7 @@ export function buildTemplate(replaceString, re) {
     const named = !!probe.groups;
     const refs = [];
     let ok = true;
-    const template = replaceString.replace(/{{match}}/gi, '$0').replace(/\$(\d+)|\$<([^>]+)>|\$/g, (m, num, name) => {
+    const template = replaceString.replace(MATCH_MACRO, '$0').replace(/\$(\d+)|\$<([^>]+)>|\$/g, (m, num, name) => {
         if (num) {
             const n = Number(num);
             if (n === 0) return '$&';
@@ -804,7 +788,7 @@ function matchesWhole(re, text) {
 
 /** The second tier: groups filled and trim strings removed as runRegexScript() does it, without substituteParams(). */
 function buildTrimReplacer(replaceString, trims, named) {
-    const normalized = replaceString.replace(/{{match}}/gi, '$0');
+    const normalized = replaceString.replace(MATCH_MACRO, '$0');
     return function () {
         const args = arguments;
         const groups = named ? args[args.length - 1] : null;
@@ -829,11 +813,11 @@ const CACHE_MAX = 2000;
 const compiledCache = new Map(); // pattern string, as RegexProvider receives it -> RegExp | null
 const needleCache = new Map(); // "source\0flags" -> extractNeedle()
 const templateCache = new Map(); // fast key -> buildTemplate()
-function cached(map, key, make) {
+function cached(map, key, make, max = CACHE_MAX) {
     let v = map.get(key);
     if (v === undefined) {
         v = make();
-        if (map.size >= CACHE_MAX) map.delete(map.keys().next().value);
+        if (map.size >= max) map.delete(map.keys().next().value);
         map.set(key, v);
     }
     return v;
@@ -868,6 +852,9 @@ function readGroups() {
 }
 /** What an edit that fires no event changes: ids, switches, pattern and replacement lengths, the display flags. */
 const fingerprint = (groups) => groups.map(([, list]) => list.map(s => `${s?.id}|${s?.disabled ? 1 : 0}|${s?.findRegex?.length ?? 0}|${s?.replaceString?.length ?? 0}|${s?.markdownOnly ? 1 : 0}${s?.promptOnly ? 1 : 0}`).join()).join(';');
+// A replacement (with {{match}} as $0) and trim strings without macros, and without a group reference that could
+// complete one (<$1>, {$1}): the output then depends only on the input, so it can be memoized.
+const pureOf = (rep, trims) => !MACRO.test(rep) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(rep) && !trims.some(trim => MACRO.test(String(trim)));
 
 function ensureInfo() { // runs on every RegexProvider.get(): Date.now() is the cheaper clock
     if (!infoCache) return (infoCache = buildInfo(readGroups()));
@@ -926,13 +913,9 @@ function buildInfo(groups) {
                 if (redos.severity === 'exp') counts.redosExp++;
             }
 
-            // As runRegexScript() reads it: {{match}} is $0, then group references are filled in.
-            const replacement = replaceString.replace(/{{match}}/gi, '$0');
-            // No macros, and no group reference that could complete one (<$1>, {$1}): the output then depends only
-            // on the input, so it can be memoized. semiPure: the same once the static macros are taken out, so it
-            // depends on the input and their values.
-            const pureOf = (rep, trimList) => !MACRO.test(rep) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(rep) && !trimList.some(trim => MACRO.test(String(trim)));
+            const replacement = replaceString.replace(MATCH_MACRO, '$0');
             const pure = pureOf(replacement, trims);
+            // semiPure: pure once the static macros are taken out, so the output depends on the input and their values
             const strippedTrims = trims.map(trim => String(trim).replace(STATIC_MACRO, ''));
             const semiPure = !pure && pureOf(replacement.replace(STATIC_MACRO, ''), strippedTrims);
             const info = {
@@ -1571,7 +1554,7 @@ function warnings(r, badges = false) {
         r.redos.severity === 'exp' && (badges ? badge('(a+)+', t`Exponential backtracking: ${redosReason(r.redos)}. ${redosSuggestion(r.redos)}`) : t`exponential backtracking (${redosReason(r.redos)})`),
         r.redos.severity === 'poly' && (badges ? badge('a*a*', t`Polynomial backtracking: ${redosReason(r.redos)}. ${redosSuggestion(r.redos)}`) : t`polynomial backtracking (${redosReason(r.redos)})`),
         r.fused > 0 && (badges ? badge('fuse', t`${r.fused} inputs over ${settings.fuseLen} characters were skipped by the fuse`) : t`fused`),
-        r.tripped && (badges ? ` <span class="rpk-badge rpk-undo" data-trip="${r.tripId}" title="${esc(t`Turned off by the circuit breaker: ${r.slowRuns} runs took over ${settings.breakerMs} ms. Click to turn it back on.`)}">off</span>` : t`breaker`),
+        r.tripped && (badges ? badge('off', t`Turned off by the circuit breaker: ${r.slowRuns} runs took over ${settings.breakerMs} ms. Click to turn it back on.`, 'rpk-undo', ` data-trip="${r.tripId}"`) : t`breaker`),
         r.maxMs > SPIKE_MS && (badges ? badge('⚡', t`One run took ${fmtMs(r.maxMs)} ms (more than ${SPIKE_MS} ms)` + (r.spike ? '\n' + spikeText(r.spike) + spikeHistory(r) : ''), 'rpk-spike', r.spike?.messageId != null ? ` data-mesid="${r.spike.messageId}"` : '') : t`spike`),
         conflicted.length > 0 && (badges ? badge('⇅', conflicted.map(conflictText).join('\n')) : t`order conflict`),
         ineffective(r) && (badges ? badge('∅', t`Ran ${r.calls} times without ever matching: consider turning it off`) : t`no match`),
@@ -1585,6 +1568,7 @@ function buildSummary() {
     const total = sum('totalMs');
     const top = rows.find(r => r.calls > 0);
     const { chat } = ctx();
+    const persist = persistAvailable ? persistTotals(chat) : null; // ⑤ storage in this chat (only scanned when the hooks exist)
     return {
         counts,
         invalid,
@@ -1602,8 +1586,8 @@ function buildSummary() {
         top,
         topShare: top && total > 0 ? top.totalMs / total * 100 : 0,
         usage: t`③ memory cache: ${memoLru.size} entries, ${(memoBytes / 1048576).toFixed(1)} of ${settings.memoMaxMB} MB`
-            + (persistAvailable ? '. ' + persistUsage(chat) : ''),
-        persist: persistAvailable ? (({ entries, chars }) => ({ entries, chars }))(persistTotals(chat)) : null,
+            + (persist ? '. ' + t`⑤ saved in this chat: ${persist.entries} messages, ≈${Math.round(persist.chars / 1024)} KB of ${settings.persistMaxMB} MB` : ''),
+        persist: persist && { entries: persist.entries, chars: persist.chars },
     };
 }
 
@@ -1657,12 +1641,6 @@ function trimPersisted(chat) {
         acct.entries--;
         delete chat[i].extra[EXTRA_KEY];
     }
-}
-
-/** ⑤ storage in this chat against its cap (only scanned when the hooks exist). */
-function persistUsage(chat) {
-    const { entries, chars } = persistTotals(chat);
-    return t`⑤ saved in this chat: ${entries} messages, ≈${Math.round(chars / 1024)} KB of ${settings.persistMaxMB} MB`;
 }
 
 let measured = null; // last "Measure on this chat" result
@@ -1805,14 +1783,6 @@ async function saveScript(ids, patch) {
     return saved;
 }
 
-const LINT_TEXT = {
-    'missing-g': () => t`Matched more than once in a message, but without the g flag only the first match is replaced`,
-    'group-ref': (refs) => t`Group references the pattern cannot fill: ${refs}`,
-    'double-escape': () => t`Double escapes such as \\\\n in the pattern (a JSON copy): they match a backslash and a letter, not a newline`,
-    'browser-compat': (what) => t`Not supported by every browser: ${what} (invalid on iOS and Safari before 16.4 / 17, where the script does nothing)`,
-    'duplicate': (names) => t`Several scripts share this pattern (${names}): one wrapper serves all of them, so ③ and ④ apply only when they suit every one`,
-};
-
 /** The lint findings for every active script: {rule, info, text, fix}, fix = {label, patch} where it is mechanical. */
 function lintRows() {
     if (!settings.lint) return [];
@@ -1822,19 +1792,19 @@ function lintRows() {
         const find = String(info.find ?? '');
         if (!info.flags.includes('g') && stat?.moreMatches >= 3) {
             const m = /^\/([\s\S]+)\/([a-z]*)$/i.exec(find);
-            rows.push({ rule: 'missing-g', info, text: LINT_TEXT['missing-g'](), fix: { label: t`Add g`, patch: { findRegex: m ? `/${m[1]}/${m[2]}g` : `/${find}/g` } } });
+            rows.push({ rule: 'missing-g', info, text: t`Matched more than once in a message, but without the g flag only the first match is replaced`, fix: { label: t`Add g`, patch: { findRegex: m ? `/${m[1]}/${m[2]}g` : `/${find}/g` } } });
         }
         const bad = [...new Set(info.refs.filter(r => !r.ok).map(r => r.ref))];
-        if (bad.length) rows.push({ rule: 'group-ref', info, text: LINT_TEXT['group-ref'](bad.join(' ')), fix: null });
-        if (/\\\\[nrtsdwb]/.test(find)) rows.push({ rule: 'double-escape', info, text: LINT_TEXT['double-escape'](), fix: { label: t`Unescape`, patch: { findRegex: find.replace(/\\\\([nrtsdwb])/g, '\\$1') } } });
+        if (bad.length) rows.push({ rule: 'group-ref', info, text: t`Group references the pattern cannot fill: ${bad.join(' ')}`, fix: null });
+        if (/\\\\[nrtsdwb]/.test(find)) rows.push({ rule: 'double-escape', info, text: t`Double escapes such as \\\\n in the pattern (a JSON copy): they match a backslash and a letter, not a newline`, fix: { label: t`Unescape`, patch: { findRegex: find.replace(/\\\\([nrtsdwb])/g, '\\$1') } } });
         const compat = [];
         if (/\(\?<[=!]/.test(info.source)) compat.push(t`lookbehind`);
         if (info.flags.includes('v')) compat.push(t`the v flag`);
         if (info.flags.includes('d')) compat.push(t`the d flag`);
         const names = info.source.match(/\(\?<([^>=!][^>]*)>/g) ?? [];
         if (new Set(names).size < names.length) compat.push(t`duplicate group names`);
-        if (compat.length) rows.push({ rule: 'browser-compat', info, text: LINT_TEXT['browser-compat'](compat.join(', ')), fix: null });
-        if (info.ids.length > 1) rows.push({ rule: 'duplicate', info, text: LINT_TEXT.duplicate(info.name), fix: null });
+        if (compat.length) rows.push({ rule: 'browser-compat', info, text: t`Not supported by every browser: ${compat.join(', ')} (invalid on iOS and Safari before 16.4 / 17, where the script does nothing)`, fix: null });
+        if (info.ids.length > 1) rows.push({ rule: 'duplicate', info, text: t`Several scripts share this pattern (${info.name}): one wrapper serves all of them, so ③ and ④ apply only when they suit every one`, fix: null });
     }
     return rows;
 }
@@ -2240,20 +2210,18 @@ function renderPanel() {
  * button (and a .regex-toggle-on switch, the fallback for turning it off on an engine without saveScriptsByType).
  */
 async function scriptAction(r, off) {
-    if (off && await saveScript(r.ids, { disabled: true })) {
-        toastr.info(t`Turned off: ${r.name}`);
-        return;
+    if (!off || !await saveScript(r.ids, { disabled: true })) {
+        const rows = r.ids.map(id => document.getElementById(id));
+        if (!rows[0]) {
+            toastr.warning(t`"${r.name}" is not in the Regex extension's list.`);
+            return;
+        }
+        if (!off) {
+            rows[0].querySelector('.edit_existing_regex')?.click();
+            return;
+        }
+        rows.forEach(row => row?.querySelector('.regex-toggle-on')?.click());
     }
-    const rows = r.ids.map(id => document.getElementById(id));
-    if (!rows[0]) {
-        toastr.warning(t`"${r.name}" is not in the Regex extension's list.`);
-        return;
-    }
-    if (!off) {
-        rows[0].querySelector('.edit_existing_regex')?.click();
-        return;
-    }
-    rows.forEach(row => row?.querySelector('.regex-toggle-on')?.click());
     toastr.info(t`Turned off: ${r.name}`);
 }
 
@@ -2316,14 +2284,7 @@ function bindUi() {
     find('#rpk_refresh').addEventListener('click', () => { markDirty(); renderPanel(); });
     find('#rpk_reset').addEventListener('click', () => { resetStats(); renderPanel(); toastr.info(t`Stats reset.`); });
     for (const [id, build] of [['rpk_copy', buildReportText], ['rpk_copy_json', () => JSON.stringify(buildReportData(), null, 2)], ['rpk_copy_csv', buildReportCsv]]) {
-        find('#' + id).addEventListener('click', async () => {
-            try {
-                await navigator.clipboard.writeText(build());
-                toastr.success(t`Report copied to the clipboard.`);
-            } catch {
-                toastr.warning(t`Could not copy — use the /regexperf command to see the report in a popup.`);
-            }
-        });
+        find('#' + id).addEventListener('click', () => copyText(build, t`Report copied to the clipboard.`));
     }
     find('#rpk_clear_persist').addEventListener('click', async () => {
         const n = await clearPersistedCache();
@@ -2401,11 +2362,11 @@ function bindUi() {
     }, RENDER_MIN_MS);
 }
 
-/** Copies text to the clipboard, with a toast either way. */
-async function copyText(text) {
+/** Copies text (or what a function returns) to the clipboard, with a toast either way. */
+async function copyText(text, done = t`Copied to the clipboard.`) {
     try {
-        await navigator.clipboard.writeText(text);
-        toastr.success(t`Copied to the clipboard.`);
+        await navigator.clipboard.writeText(typeof text === 'function' ? text() : text);
+        toastr.success(done);
     } catch {
         toastr.warning(t`Could not copy — use the /regexperf command to see the report in a popup.`);
     }

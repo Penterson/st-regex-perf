@@ -388,12 +388,14 @@
 .regex-perf-kit .rpk-lint li {
     margin: 0.2em 0;
 }
+
 .regex-perf-kit .rpk-lint .rpk-fix {
     display: inline-block;
     padding: 0 0.5em;
     font-size: 0.85em;
     margin-left: 0.4em;
 }
+
 .regex-perf-kit .rpk-lint .rpk-edit {
     cursor: pointer;
     margin-left: 0.3em;
