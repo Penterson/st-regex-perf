@@ -444,7 +444,23 @@ const HEAVY_HINT = /\.\*|\.\+|\[\\s\\S\]\*|\[\^\]\*|\(\.\|\\n\)\*|\[\\w\\W\]\*/;
 
 const keyOf = (re) => re.source + '\u0000' + re.flags;
 
-/** @type {{map: Map<string, object>, counts: object, depthRules: number[][], version: string, builtAt: number} | null} */
+// A RAW/ESCAPED find pattern with macros ({{random}}, {{getvar::x}}) compiles to another string on every run, so the
+// compiled key misses its script. The raw pattern is matched instead: re-substituted (exact when the macro's value is
+// stable) or as a shape in which each macro stands for any text (feature list 3, row 2).
+const MACRO_SPLIT = /{{[^{}]*}}|<(?:user|bot|char(?:ifnotgroup)?|group)>/gi;
+const shapeOf = (raw) => new RegExp('^' + raw.split(MACRO_SPLIT).map(s => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')).join('[\\s\\S]*?') + '$');
+function resolveDynamic(regexString, dynamic) {
+    if (!dynamic.length) return undefined;
+    const { substituteParamsExtended } = ctx();
+    for (const d of dynamic) {
+        try {
+            if (substituteParamsExtended(d.raw, {}, d.substitute === 2 ? sanitizeRegexMacro : undefined) === regexString) return d.info;
+        } catch { /* try the shape */ }
+    }
+    return dynamic.find(d => d.shape.test(regexString))?.info;
+}
+
+/** @type {{map: Map<string, object>, dynamic: object[], counts: object, depthRules: number[][], version: string, displayVersion: string, builtAt: number} | null} */
 let infoCache = null; // null = rebuild on next use
 const markDirty = () => { infoCache = null; };
 
@@ -465,8 +481,10 @@ function buildInfo() {
     } catch (e) { console.warn('[RegexPerf] reading regex scripts failed', e); }
     const { substituteParamsExtended } = ctx();
     const map = new Map();
+    const dynamic = []; // {raw, substitute, shape, info} of RAW/ESCAPED scripts whose pattern has macros, see resolveDynamic()
     const counts = { total: 0, active: 0, noNeedle: 0, heavy: 0, nested: 0, types: {} };
     const versionParts = [];
+    const displayParts = []; // the parts that can change a display result: the ⑤ key's version (feature list 3, row 4)
     const depthRules = []; // [min, max] of display scripts with depth limits, for the ⑤ key
 
     for (const [origin, list] of groups) {
@@ -480,6 +498,7 @@ function buildInfo() {
 
             let rs = s.findRegex;
             const substitute = Number(s.substituteRegex);
+            const isDynamic = (substitute === 1 || substitute === 2) && MACRO.test(rs);
             if (substitute === 1 || substitute === 2) { // RAW / ESCAPED, as runRegexScript() compiles them
                 try { rs = substituteParamsExtended(rs, {}, substitute === 2 ? sanitizeRegexMacro : undefined); } catch { /* keep the raw pattern */ }
             }
@@ -509,25 +528,34 @@ function buildInfo() {
                 replaceSig: fnv1a(replaceString + '\u0001' + trimSig),
                 needle,
                 ids: [s.id], // for the row actions in the table
+                statKey: isDynamic ? '\u0004' + s.findRegex : key, // a dynamic pattern's runs are counted under its raw pattern
+                raw: isDynamic ? s.findRegex : null,
             };
             if (prev) { // scripts with the same pattern share one wrapper: keep only what holds for all of them
                 info.name = prev.name + ', ' + info.name;
                 info.ids = [...prev.ids, s.id];
                 info.markdownOnly &&= prev.markdownOnly;
                 info.pure &&= prev.pure && prev.replaceSig === info.replaceSig;
+                info.statKey = prev.statKey;
+                info.raw = prev.raw;
+                for (const d of dynamic) if (d.info === prev) d.info = info;
             }
             map.set(key, info);
+            if (isDynamic) dynamic.push({ raw: s.findRegex, substitute, shape: shapeOf(s.findRegex), info });
 
             // The same limits getRegexedString() applies; display scripts only, as those are what ⑤ stores.
             const min = !isNaN(s.minDepth) && s.minDepth !== null && s.minDepth >= -1 ? Number(s.minDepth) : -Infinity;
             const max = !isNaN(s.maxDepth) && s.maxDepth !== null && s.maxDepth >= 0 ? Number(s.maxDepth) : Infinity;
             if (s.markdownOnly && (min > -Infinity || max < Infinity)) depthRules.push([min, max]);
-            versionParts.push(re.source, re.flags, replaceString, trimSig, String(!!s.markdownOnly), String(!!s.promptOnly), String(s.minDepth), String(s.maxDepth), String(s.placement));
+            // a dynamic pattern is versioned by its raw form: its compiled form can change on every rebuild
+            const part = [isDynamic ? s.findRegex : re.source, re.flags, replaceString, trimSig, String(!!s.markdownOnly), String(!!s.promptOnly), String(s.minDepth), String(s.maxDepth), String(s.placement)].join('\u0003');
+            versionParts.push(part);
+            if (!s.promptOnly) displayParts.push(part);
         }
     }
     const version = fnv1a(versionParts.join('\u0003'));
     if (version !== infoCache?.version) clearLitCache(); // other scripts, other literals
-    return { map, counts, depthRules, version, builtAt: Date.now() };
+    return { map, dynamic, counts, depthRules, version, displayVersion: fnv1a(displayParts.join('\u0003')), builtAt: Date.now() };
 }
 
 // ---- Instrumented RegExp ----
@@ -608,7 +636,7 @@ class PerfRegExp extends RegExp {
         const { stat, markdownOnly, test, memoPrefix } = this._meta;
 
         if (stat === skipStat) return str;
-        if (bypass) {
+        if (bypass && displayPass) { // a stored ⑤ result is being shown for this message
             stat.bypass++;
             return str;
         }
@@ -742,7 +770,7 @@ function patchProvider() {
     inst.get = patchedGet = function (regexString) {
         const base = origGet(regexString);
         if (!base) return null;
-        const { map, version } = ensureInfo();
+        const { map, dynamic, version } = ensureInfo();
         let w = wrapped.get(regexString);
         if (!w) {
             try {
@@ -757,9 +785,10 @@ function patchProvider() {
         // Script info is re-read whenever it changes, so an edited script takes effect without RegexProvider.clear().
         if (w._version !== version) {
             const key = keyOf(base);
-            const info = map.get(key);
-            const stat = getStat(key, base);
+            const info = map.get(key) ?? resolveDynamic(regexString, dynamic);
+            const stat = getStat(info?.statKey ?? key, base);
             if (info) stat.name = info.name;
+            if (info?.raw) stat.src = info.raw;
             stat.ids = info?.ids ?? [];
             stat.needle = info?.needle ?? extractNeedle(base.source, base.flags);
             w._meta = {
@@ -847,7 +876,7 @@ function installPersistHooks() {
         if (!msg) return mes;
         // {{user}}/{{char}} in replacements and trim strings resolve to these names (ch_name: the message author).
         const names = fnv1a([c.ch_name ?? c.characterName, name1, name2].join('\u0000'));
-        const { version, depthRules } = ensureInfo();
+        const { displayVersion, depthRules } = ensureInfo();
         let depths = '';
         if (depthRules.length) { // which depth-limited scripts apply at this message's depth, as messageFormatting() counts it
             let depth = 0;
@@ -856,10 +885,12 @@ function installPersistHooks() {
         }
         // 64 bits of the text: a 32-bit hash alone collides once in a few tens of thousands of same-length messages.
         // Entries keyed the old way simply miss and are recomputed.
-        const key = hash64(mes) + ':' + mes.length + ':' + version + ':' + names + depths;
+        const key = hash64(mes) + ':' + mes.length + ':' + displayVersion + ':' + names + depths;
         const e = msg.extra?.[EXTRA_KEY];
         if (e && e.k === key) {
             bypass = true;
+            // messageFormatting() is synchronous: should it throw before the after-regex hook, the next task starts clean
+            queueMicrotask(resetPass);
             persistStats.hits++;
             return e.same ? mes : String(e.v ?? mes);
         }

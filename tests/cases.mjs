@@ -594,6 +594,33 @@ test('unchanged vs baseline: saved user settings are kept as they are', async ({
     assert.deepEqual(r.current.checked, r.baseline.checked);
 });
 
+test('feature list 3 row 3: bypass does not stick when something throws between the two hooks', async ({ each }) => {
+    const r = await each('bypassStuck', null, { variants: ['none', 'current'] });
+    assert.deepEqual(r.none, ['y', 'y', true, 'q', 'y']);
+    assert.deepEqual(r.current, r.none);
+});
+
+test('feature list 3 row 4: ⑤ keys use a display-only version, so editing a prompt script keeps the stored results', async ({ each }) => {
+    const r = await each('persistDisplayVersion', null, { variants: ['none', 'current'] });
+    assert.deepEqual(r.none, ['b p', 0, 'b p', 0, 'b p', 0, 'c p', 0]);
+    assert.deepEqual(r.current, ['b p', 0, 'b p', 1, 'b p', 2, 'c p', 2]);
+});
+
+test('feature list 3 row 2: a find pattern with a dynamic macro keeps its script name, ③ and ④', async ({ each }) => {
+    const r = await each('dynamicFind', null, { variants: ['none', 'current'] });
+    const allowed = new Set(['X [b] U', '[a] X U']);
+    for (const o of [...r.none.outs, ...r.current.outs]) assert.ok(allowed.has(o), o);
+    assert.equal(r.current.live, '[a] [b] Ann!', 'display scripts rest while streaming');
+    assert.doesNotMatch(r.current.report, /\(unknown\)/);
+    const names = r.current.rows.map(x => x.name);
+    assert.equal(names.filter(n => n === 'Dyn').length, 1, `one row for the raw pattern: ${names.join(', ')}`);
+    assert.ok(names.includes('Var'));
+    const dyn = r.current.rows.find(x => x.name === 'Dyn');
+    assert.equal(dyn.runs + dyn.hits, 6, JSON.stringify(dyn));
+    assert.ok(dyn.hits >= 1, 'the same compiled pattern came back and hit ③');
+    assert.equal(dyn.streamSkips, 1);
+});
+
 test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with a note', async ({ each }) => {
     const r = await each('ux', null, { hooks: false, variants: ['baseline', 'current'] });
     assert.deepEqual(r.current.checked, r.baseline.checked);

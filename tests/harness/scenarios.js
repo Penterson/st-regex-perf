@@ -930,6 +930,79 @@ export async function ux(h) {
     return { initial, ids, checked, toggled, slash, stored, cleared, note: root.querySelector('#rpk_persist_note').textContent };
 }
 
+/**
+ * Feature list 3, row 3. A ⑤ hit sets bypass; if something throws between the two hooks (here: another extension's
+ * wrapper of get()), the prompt-side regex that runs next must not be skipped.
+ */
+export async function bypassStuck(h) {
+    applyProfile(h, { persist: true });
+    await useScripts(h, [
+        script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true }),
+        script({ findRegex: '/p/g', replaceString: 'q', promptOnly: true }),
+    ]);
+    h.st.setState({ chat: [msg('x')] });
+    const render = () => h.st.messageFormatting(h.st.chat[0].mes, h.st.chat[0].name, false, false, 0);
+    const out = [render(), render()]; // the second render is served from ⑤
+    const inst = h.engine.RegexProvider.instance;
+    const prev = inst.get.bind(inst);
+    let armed = true;
+    inst.get = (s) => {
+        if (armed) {
+            armed = false;
+            throw new Error('boom');
+        }
+        return prev(s);
+    };
+    let threw = false;
+    try {
+        render();
+    } catch {
+        threw = true;
+    }
+    await Promise.resolve(); // the next task: a generation builds its prompt
+    out.push(threw, h.engine.getRegexedString('p', P.AI, { isPrompt: true }), render());
+    return out;
+}
+
+/** Feature list 3, row 4. Editing a prompt-only script must not invalidate the ⑤ results of display scripts. */
+export async function persistDisplayVersion(h) {
+    applyProfile(h, { persist: true });
+    const display = script({ scriptName: 'D', findRegex: '/a/g', replaceString: 'b', markdownOnly: true });
+    const prompt = script({ scriptName: 'P', findRegex: '/p/g', replaceString: 'q', promptOnly: true });
+    await useScripts(h, [display, prompt]);
+    h.st.setState({ chat: [msg('a p')] });
+    const render = () => h.st.messageFormatting(h.st.chat[0].mes, h.st.chat[0].name, false, false, 0);
+    const bypasses = async () => (h.commands.regexperf ? JSON.parse(await h.commands.regexperf.callback({}, 'json')).totals.bypass : 0);
+    const out = [];
+    const step = async () => { out.push(render(), await bypasses()); };
+    await step();
+    await step();
+    await useScripts(h, [display, { ...prompt, replaceString: 'r' }]); // the editor saves a new object for the same id, then reloads the chat
+    await step();
+    await useScripts(h, [{ ...display, replaceString: 'c' }, { ...prompt, replaceString: 'r' }]);
+    await step();
+    return out;
+}
+
+/** Feature list 3, row 2. A find pattern with a dynamic macro compiles to a new string on every run. */
+export async function dynamicFind(h) {
+    h.st.setState({ name1: 'Ann', name2: 'Cat', chat: [msg('[a] [b] Ann!')] });
+    await useScripts(h, [
+        script({ scriptName: 'Dyn', findRegex: '/\\[{{random::a::b}}\\]/g', replaceString: 'X', substituteRegex: 1, markdownOnly: true }),
+        script({ scriptName: 'Var', findRegex: '/{{user}}!/g', replaceString: 'U', substituteRegex: 1, markdownOnly: true }),
+    ]);
+    const render = () => h.st.messageFormatting(h.st.chat[0].mes, h.st.chat[0].name, false, false, 0);
+    const outs = [];
+    for (let i = 0; i < 6; i++) outs.push(render());
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    h.st.setState({ streamingProcessor: { messageId: 0, isFinished: false, isStopped: false } });
+    const live = render();
+    h.st.setState({ streamingProcessor: null });
+    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    const json = h.commands.regexperf ? JSON.parse(await h.commands.regexperf.callback({}, 'json')) : null;
+    return { outs, live, report: await report(h), rows: json?.rows.map(r => ({ name: r.name, runs: r.runs, hits: r.hits, streamSkips: r.streamSkips })) ?? [] };
+}
+
 /** tests/screenshots.mjs: a realistic session in the panel (the corpus chat, a measurement, a per-row stopwatch). */
 export async function screenshot(h) {
     const corpus = await import('./corpus.js');
