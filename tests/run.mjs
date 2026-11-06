@@ -2,14 +2,10 @@
 // regex engine produces with no extension ("none"), with the BASELINE commit ("baseline") and with the working
 // tree ("current").
 // Usage: node tests/run.mjs [name regex]   Chrome: $CHROME_PATH, else google-chrome / chromium on PATH.
-import puppeteer from 'puppeteer-core';
-import { fetchSt } from './fetch-st.mjs';
-import { chromePath, startServer } from './server.mjs';
+import { launch } from './server.mjs';
 import { tests } from './cases.mjs';
 
-await fetchSt();
-const server = await startServer();
-const browser = await puppeteer.launch({ executablePath: chromePath(), headless: true, args: ['--no-sandbox'] });
+const { server, browser, close } = await launch();
 const VARIANTS = { none: 'none', baseline: 'baseline', current: 'st-regex-perf' };
 
 /**
@@ -65,7 +61,6 @@ for (const [name, fn] of tests) {
         console.log(`FAIL  ${name}\n      ${String(e?.stack ?? e).split('\n').slice(0, 12).join('\n      ')}`);
     }
 }
-await browser.close();
-await server.close();
+await close();
 console.log(`\n${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

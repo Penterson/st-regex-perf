@@ -30,6 +30,28 @@ export async function useScripts(h, scripts) {
     await h.eventSource.emit(h.event_types.CHAT_CHANGED);
 }
 
+/** A chat message as SillyTavern stores it (a character's, unless props say otherwise). */
+const msg = (mes, props = {}) => ({ name: 'Char', is_user: false, is_system: false, mes, extra: {}, ...props });
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+/** The extension's panel (null without the extension), refreshed first when asked, so it shows the current stats. */
+function panel(refresh = false) {
+    const root = document.getElementById('regex_perf_kit');
+    if (refresh) root?.querySelector('#rpk_refresh').click();
+    return root;
+}
+/** The table row of the script called name. */
+const rowOf = (root, name) => [...root?.querySelectorAll('#rpk_table tbody tr') ?? []].find(tr => tr.querySelector('.rpk-col-name')?.firstChild.textContent.trim() === name);
+/** Edits a panel control as a user would (a checkbox by boolean, else the value) and fires change; false if it is missing. */
+function setControl(root, id, value) {
+    const el = root.querySelector('#' + id);
+    if (!el) return false;
+    if (typeof value === 'boolean') el.checked = value;
+    else el.value = String(value);
+    el.dispatchEvent(new Event('change'));
+    return true;
+}
+
 /** Extension settings per test profile (applied on top of the extension's defaults). */
 const PROFILES = {
     default: {},
@@ -92,7 +114,7 @@ export async function equivalence(h, { profile }) {
     // "Measure on this chat" re-renders the chat with the features off and on: nothing it leaves behind may change
     // the output
     document.querySelector('#rpk_measure')?.click();
-    await new Promise(r => setTimeout(r, 60));
+    await sleep(60);
     h.st.reseed(); // its renders also rolled {{random}}, as any re-render does
     renderAll(h, rec, 'after measure');
 
@@ -404,14 +426,13 @@ export async function uiTexts(h) {
         script({ scriptName: 'Nobody', findRegex: '/nothing-here/g', replaceString: '' }),
         script({ scriptName: 'Digits', findRegex: '/\\d+/g', replaceString: '#' }), // no literal: shows "none"
     ]);
-    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: 'x <status>ok</status> y', extra: {} }] });
+    h.st.setState({ chat: [msg('x <status>ok</status> y')] });
     for (let i = 0; i < 3; i++) {
         h.engine.getRegexedString(h.st.chat[0].mes, P.AI);
         h.st.messageFormatting(h.st.chat[0].mes, 'Char', false, false, 0);
     }
-    const root = document.getElementById('regex_perf_kit');
+    const root = panel(true);
     if (!root) return null;
-    root.querySelector('#rpk_refresh').click();
     const texts = new Set();
     const walk = (el) => {
         for (const node of el.childNodes) {
@@ -438,8 +459,7 @@ export async function uiTexts(h) {
 
 /** The panel's headline numbers as shown: the summary's key figures by key, the table rows and the empty-table text. */
 function panelNumbers() {
-    const root = document.getElementById('regex_perf_kit');
-    root.querySelector('#rpk_refresh').click();
+    const root = panel(true);
     const figures = Object.fromEntries([...root.querySelectorAll('#rpk_summary [data-k]')].map(el => [el.dataset.k, el.textContent]));
     const rows = [...root.querySelectorAll('#rpk_table tbody tr[data-i]')];
     return {
@@ -477,15 +497,15 @@ export async function measure(h) {
         script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true })]);
     const long = 'word **bold** '.repeat(400);
     const mes = (i) => `${i} ${i === 5 ? long.repeat(6) : long}`; // message 5 is six times longer: the slowest
-    h.st.setState({ chat: Array.from({ length: 8 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: mes(i), extra: {} })) });
+    h.st.setState({ chat: Array.from({ length: 8 }, (_, i) => msg(mes(i))) });
     h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
     const table = async () => (await report(h)).split('\n\n')[1]; // the per-script rows
     const before = await table();
-    const root = document.getElementById('regex_perf_kit');
+    const root = panel();
     const button = root?.querySelector('#rpk_measure');
     if (!button) return null;
     button.click();
-    await new Promise(r => setTimeout(r, 50));
+    await sleep(50);
     return {
         text: root.querySelector('#rpk_measure_result p')?.textContent ?? root.querySelector('#rpk_measure_result').textContent,
         slowest: root.querySelector('#rpk_measure_result p.rpk-dim')?.textContent ?? '',
@@ -503,22 +523,20 @@ export async function rowMeasure(h) {
         script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true }),
     ]);
     const long = 'word **bold** '.repeat(900); // the quadratic script dominates by far
-    h.st.setState({ chat: Array.from({ length: 8 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: `${i} ${long}`, extra: {} })) });
+    h.st.setState({ chat: Array.from({ length: 8 }, (_, i) => msg(`${i} ${long}`)) });
     h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
     const table = async () => (await report(h)).split('\n\n')[1];
     const before = await table();
-    const root = document.getElementById('regex_perf_kit');
-    root.querySelector('#rpk_refresh').click();
-    const rowOf = (name) => [...root.querySelectorAll('#rpk_table tbody tr')].find(tr => tr.querySelector('.rpk-col-name')?.firstChild.textContent.trim() === name);
-    const watch = rowOf('Slow')?.querySelector('.rpk-measure-row');
+    const root = panel(true);
+    const watch = rowOf(root, 'Slow')?.querySelector('.rpk-measure-row');
     if (!watch) return null;
     watch.click();
-    await new Promise(r => setTimeout(r, 80));
-    const cell = rowOf('Slow').querySelector('.rpk-row-ms');
+    await sleep(80);
+    const cell = rowOf(root, 'Slow').querySelector('.rpk-row-ms');
     return {
         text: cell?.textContent ?? '',
         title: cell?.title ?? '',
-        boldHas: !!rowOf('Bold').querySelector('.rpk-row-ms'),
+        boldHas: !!rowOf(root, 'Bold').querySelector('.rpk-row-ms'),
         toasts: h.toasts.map(([, m]) => m),
         statsUnchanged: (await table()) === before,
         chatUnchanged: h.st.chat.every((m, i) => m.mes === `${i} ${long}`),
@@ -539,10 +557,8 @@ export async function orderConflict(h, { long = false } = {}) {
     for (let i = 0; i < 3; i++) out.push(h.engine.getRegexedString(`a <x>y b ${i} ${pad}`, P.AI)); // the conflict, three times
     out.push(h.engine.getRegexedString('plain <r> text', P.AI)); // Quiet did not change the text: no conflict
     out.push(h.engine.getRegexedString('no y: <x> here', P.AI)); // Tagged would not have matched anyway
-    const root = document.getElementById('regex_perf_kit');
-    root?.querySelector('#rpk_refresh').click();
-    const rowOf = (name) => [...root?.querySelectorAll('#rpk_table tbody tr') ?? []].find(tr => tr.querySelector('.rpk-col-name')?.firstChild.textContent.trim() === name);
-    const badge = (name) => rowOf(name)?.querySelector('.rpk-badge[title*="runs first"]');
+    const root = panel(true);
+    const badge = (name) => rowOf(root, name)?.querySelector('.rpk-badge[title*="runs first"]');
     return {
         out,
         summary: root?.querySelector('#rpk_summary').textContent ?? '',
@@ -572,8 +588,7 @@ export async function insights(h, arg) {
     }
     for (let i = 0; i < 3; i++) h.engine.getRegexedString(`user ${i}`, P.USER);
     for (let i = 0; i < 3; i++) h.engine.getRegexedString('@'.repeat(longHead ? 100 : 30) + i, P.AI); // ~60 ms per call (200 ms with longHead)
-    const root = document.getElementById('regex_perf_kit');
-    root?.querySelector('#rpk_refresh').click();
+    const root = panel(true);
     const badges = Object.fromEntries([...root?.querySelectorAll('#rpk_table tbody tr[data-i]') ?? []].map(tr => [
         tr.querySelector('.rpk-col-name').firstChild.textContent.trim(),
         Object.fromEntries([...tr.querySelectorAll('.rpk-badge')].map(b => [b.textContent, b.title])),
@@ -596,15 +611,15 @@ export async function exports(h) {
         row.find('.regex-toggle-on').on('click', () => row.find('.disable_regex').prop('checked', true).trigger('input'));
         $('#saved_regex_scripts').append(row);
     }
-    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: 'alpha beta max', extra: {} }] });
+    h.st.setState({ chat: [msg('alpha beta max')] });
     for (let i = 0; i < 3; i++) h.engine.getRegexedString(`alpha beta ${i}`, P.AI);
     const cmd = h.commands.regexperf;
     const run = (arg) => cmd.callback({}, arg);
     const copied = [];
     Object.defineProperty(navigator, 'clipboard', { value: { writeText: async (text) => { copied.push(text); } }, configurable: true });
-    const root = document.getElementById('regex_perf_kit');
+    const root = panel();
     for (const id of ['rpk_copy_json', 'rpk_copy_csv']) root.querySelector('#' + id)?.click();
-    await new Promise(r => setTimeout(r, 0));
+    await sleep(0);
     return {
         text: await run('text'),
         json: await run('json'),
@@ -624,13 +639,13 @@ export async function exports(h) {
 
 /** Auto-measure after a chat opens (option, default off) and the one-time "# Messages to Load" hint. */
 export async function chatOpen(h) {
-    const root = document.getElementById('regex_perf_kit');
+    const root = panel();
     const box = root.querySelector('#rpk_autoMeasure');
     const limit = root.querySelector('#rpk_loadHintMs');
     if (!box || !limit) return null;
     const before = { auto: h.extension_settings.regex_perf_kit.autoMeasure, hintMs: h.extension_settings.regex_perf_kit.loadHintMs };
     await useScripts(h, [script({ scriptName: 'Slow macro', findRegex: '/@/g', replaceString: '{{slow}}', markdownOnly: true })]); // 2 ms per match
-    h.st.setState({ chat: Array.from({ length: 4 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: `${i} ${'@'.repeat(20)}`, extra: {} })) });
+    h.st.setState({ chat: Array.from({ length: 4 }, (_, i) => msg(`${i} ${'@'.repeat(20)}`)) });
     const open = async () => { // SillyTavern renders every message, then announces the chat
         h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
         await h.eventSource.emit(h.event_types.CHAT_CHANGED);
@@ -648,28 +663,22 @@ export async function chatOpen(h) {
     box.checked = true;
     box.dispatchEvent(new Event('change'));
     await open();
-    await new Promise(r => setTimeout(r, 700));
+    await sleep(700);
     const auto = { hints: hints(), measures: measures(), shown: root.querySelector('#rpk_measure_result').textContent, setting: h.extension_settings.regex_perf_kit.autoMeasure };
     return { before, quiet, afterHint, second, auto };
 }
 
 /** "Reset settings" restores the defaults; open <details> sections are remembered in settings.ui. */
 export async function resetSettings(h) {
-    const root = document.getElementById('regex_perf_kit');
+    const root = panel();
     const button = root.querySelector('#rpk_reset_settings');
     if (!button) return null;
     const rpk = h.extension_settings.regex_perf_kit;
     const sections = () => Object.fromEntries([...root.querySelectorAll('details[data-section]')].map(d => [d.dataset.section, d.open]));
     const openAtStart = sections();
-    const change = (id, value) => {
-        const el = root.querySelector('#' + id);
-        if (typeof value === 'boolean') el.checked = value;
-        else el.value = String(value);
-        el.dispatchEvent(new Event('change'));
-    };
-    change('rpk_prefilter', false);
-    change('rpk_memoMaxEntries', 4);
-    change('rpk_persistMaxMB', 2);
+    setControl(root, 'rpk_prefilter', false);
+    setControl(root, 'rpk_memoMaxEntries', 4);
+    setControl(root, 'rpk_persistMaxMB', 2);
     const changed = { prefilter: rpk.prefilter, memoMaxEntries: rpk.memoMaxEntries, persistMaxMB: rpk.persistMaxMB };
     const saves = h.st.counters.saveSettings;
     button.click();
@@ -677,29 +686,29 @@ export async function resetSettings(h) {
     const controls = { prefilter: root.querySelector('#rpk_prefilter').checked, memoMaxEntries: root.querySelector('#rpk_memoMaxEntries').value, persistMaxMB: root.querySelector('#rpk_persistMaxMB').value };
     const limits = root.querySelector('details[data-section="limits"]');
     limits.open = true;
-    await new Promise(r => setTimeout(r, 0)); // the toggle event is queued
+    await sleep(0); // the toggle event is queued
     const uiAfterOpen = JSON.parse(JSON.stringify(rpk.ui ?? null));
     limits.open = false;
-    await new Promise(r => setTimeout(r, 0));
+    await sleep(0);
     return { openAtStart, changed, after, controls, saved: h.st.counters.saveSettings - saves, uiAfterOpen, uiAfterClose: JSON.parse(JSON.stringify(rpk.ui ?? null)), toast: h.toasts.at(-1)?.[1] };
 }
 
 /** Other wrappers of RegexProvider.instance.get: one that was there first (?prewrap=1), or one installed later. */
 export async function wrapperWarning(h, arg) {
     const replaceLater = !!arg?.replaceLater;
-    const root = document.getElementById('regex_perf_kit');
+    const root = panel();
     const inst = h.engine.RegexProvider.instance;
     if (replaceLater) {
         const prev = inst.get.bind(inst);
         inst.get = (regexString) => prev(regexString); // a wrapper that still calls ours...
-        root?.querySelector('#rpk_refresh').click();
+        panel(true);
     }
     await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y' })]);
     const out = h.engine.getRegexedString('x', P.AI);
-    root?.querySelector('#rpk_refresh').click();
+    panel(true);
     const summary = root?.querySelector('#rpk_summary').textContent ?? '';
     const warns = h.warnings.filter(w => w.includes('get()'));
-    root?.querySelector('#rpk_refresh').click();
+    panel(true);
     return { out, summary, warns, warnsAfterSecondRender: h.warnings.filter(w => w.includes('get()')).length };
 }
 
@@ -723,18 +732,15 @@ export async function rowActions(h) {
     'alpha beta'.replace(h.engine.RegexProvider.instance.get('/alpha/g'), 'A');
     'beta'.replace(h.engine.RegexProvider.instance.get('/beta/g'), 'B');
     'gamma'.replace(h.engine.RegexProvider.instance.get('/gamma/g'), 'C'); // not a script: no actions
-    const root = document.getElementById('regex_perf_kit');
-    root.querySelector('#rpk_refresh').click();
-    const rows = () => [...root.querySelectorAll('#rpk_table tbody tr')];
-    const rowOf = (name) => rows().find(tr => tr.textContent.includes(name));
-    rowOf('Alpha')?.querySelector('td:nth-child(2)')?.click();
-    rowOf('Beta')?.querySelector('.rpk-off')?.click();
-    await new Promise(r => setTimeout(r, 0));
+    const root = panel(true);
+    rowOf(root, 'Alpha')?.querySelector('td:nth-child(2)')?.click();
+    rowOf(root, 'Beta')?.querySelector('.rpk-off')?.click();
+    await sleep(0);
     return {
         events,
         ids: scripts.map(s => s.id),
         disabled: scripts.map(s => !!s.disabled),
-        unknownHasActions: !!rows().find(tr => tr.title.includes('gamma'))?.querySelector('.rpk-off, .rpk-edit'),
+        unknownHasActions: !!root.querySelector('#rpk_table tbody tr[title*="gamma"] .rpk-off, #rpk_table tbody tr[title*="gamma"] .rpk-edit'),
     };
 }
 
@@ -747,8 +753,7 @@ export async function sortFilter(h) {
     ]);
     for (let i = 0; i < 3; i++) h.engine.getRegexedString(`ab ${i}`, P.AI); // Beta and Alpha run 3 times, Gamma 0 (skipped)
     h.engine.getRegexedString('aaaa 9', P.AI); // Alpha runs once more: 4
-    const root = document.getElementById('regex_perf_kit');
-    root.querySelector('#rpk_refresh').click();
+    const root = panel(true);
     const names = () => [...root.querySelectorAll('#rpk_table tbody tr[data-i]')].map(tr => tr.querySelector('.rpk-col-name').firstChild.textContent.trim());
     const ranks = () => [...root.querySelectorAll('#rpk_table tbody tr[data-i]')].map(tr => tr.querySelector('.rpk-col-rank').textContent);
     const header = (col) => root.querySelector(`#rpk_table thead th[data-col="${col}"]`);
@@ -778,40 +783,33 @@ export async function sortFilter(h) {
 
 /** Item 15. Hidden limits are editable in the panel; memo memory and this chat's ⑤ size are shown. */
 export async function limits(h) {
-    const root = document.getElementById('regex_perf_kit');
-    const set = (id, value) => {
-        const el = root.querySelector('#' + id);
-        if (!el) return false;
-        el.value = String(value);
-        el.dispatchEvent(new Event('change'));
-        return true;
-    };
+    const root = panel();
     const rpk = h.extension_settings.regex_perf_kit;
     const found = ['rpk_memoMaxEntries', 'rpk_memoMaxLen', 'rpk_memoMaxMB', 'rpk_persistMaxLen'].map(id => !!root.querySelector('#' + id));
     if (found.includes(false)) return { found };
     await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
     for (let i = 0; i < 10; i++) h.engine.getRegexedString(`x ${i}`, P.AI, { isMarkdown: true });
-    set('rpk_memoMaxEntries', 4);
-    set('rpk_memoMaxLen', '-5');
-    set('rpk_memoMaxMB', 'abc');
-    set('rpk_persistMaxLen', 123456.7);
+    setControl(root, 'rpk_memoMaxEntries', 4);
+    setControl(root, 'rpk_memoMaxLen', '-5');
+    setControl(root, 'rpk_memoMaxMB', 'abc');
+    setControl(root, 'rpk_persistMaxLen', 123456.7);
     const values = { memoMaxEntries: rpk.memoMaxEntries, memoMaxLen: rpk.memoMaxLen, memoMaxMB: rpk.memoMaxMB, persistMaxLen: rpk.persistMaxLen };
     rpk.persist = true;
-    h.st.setState({ chat: [0, 1, 2].map(i => ({ name: 'Char', is_user: false, is_system: false, mes: `x ${i}`, extra: {} })) });
+    h.st.setState({ chat: [0, 1, 2].map(i => msg(`x ${i}`)) });
     h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
-    root.querySelector('#rpk_refresh').click();
+    panel(true);
     return { found, values, usage: root.querySelector('#rpk_usage')?.textContent ?? '' };
 }
 
 /** ③ hashed keys: with the Limits toggle on, entries hold no input (half the memory) and still serve exact results. */
 export async function memoHash(h) {
-    const root = document.getElementById('regex_perf_kit');
+    const root = panel();
     const box = root.querySelector('#rpk_memoHashKeys');
     if (!box) return null;
     await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y' })]);
     const long = 'x'.repeat(10000);
     const inputs = Array.from({ length: 20 }, (_, i) => `${String(i).padStart(2, '0')} ${long}`); // same length, different text
-    const usage = () => Number(/cache: \d+ entries, ([\d.]+) of/.exec((root.querySelector('#rpk_refresh').click(), root.querySelector('#rpk_usage').textContent))[1]);
+    const usage = () => Number(/cache: \d+ entries, ([\d.]+) of/.exec(panel(true).querySelector('#rpk_usage').textContent)[1]);
     const run = (str) => executionsBySource(() => h.engine.getRegexedString(str, P.AI)).x ?? 0;
     const plain = { out: inputs.map(str => h.engine.getRegexedString(str, P.AI)) };
     plain.rerun = inputs.map(run);
@@ -830,7 +828,7 @@ export async function persistKey(h) {
     applyProfile(h, { persist: true });
     await useScripts(h, [script({ findRegex: '/o/g', replaceString: '0', markdownOnly: true })]);
     const [a, b] = ['zhjotclp', 'tiofsnfk']; // fnv1a("zhjotclp") === fnv1a("tiofsnfk") === 2945646617
-    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: a, extra: {} }] });
+    h.st.setState({ chat: [msg(a)] });
     const render = () => h.st.messageFormatting(h.st.chat[0].mes, 'Char', false, false, 0);
     const out = [render()];
     h.st.chat[0].mes = b; // edited to a colliding message of the same length
@@ -847,21 +845,13 @@ export async function persistBudget(h) {
     applyProfile(h, { persist: true, persistMaxMB: 1, persistMaxLen: 100000 });
     await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
     const body = 'x'.repeat(50000); // each stored result is ≈50 KB: 1 MB holds 20 of them
-    h.st.setState({ chat: Array.from({ length: 26 }, (_, i) => ({ name: 'Char', is_user: false, is_system: false, mes: `${i} ${body}`, extra: {} })) });
+    h.st.setState({ chat: Array.from({ length: 26 }, (_, i) => msg(`${i} ${body}`)) });
     h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
     const stored = h.st.chat.map(m => !!m.extra.regex_perf_cache);
     const chars = h.st.chat.reduce((a, m) => a + (m.extra.regex_perf_cache ? m.extra.regex_perf_cache.k.length + (m.extra.regex_perf_cache.v?.length ?? 0) : 0), 0);
-    const root = document.getElementById('regex_perf_kit');
-    root.querySelector('#rpk_refresh').click();
-    const set = (id, value) => {
-        const el = root.querySelector('#' + id);
-        if (!el) return false;
-        el.value = String(value);
-        el.dispatchEvent(new Event('change'));
-        return true;
-    };
+    const root = panel(true);
     const usage = root.querySelector('#rpk_usage')?.textContent ?? ''; // the baseline has no usage line
-    const hasLimit = set('rpk_persistMaxMB', 2);
+    const hasLimit = setControl(root, 'rpk_persistMaxMB', 2);
     return { stored, chars, usage, hasLimit, limit: h.extension_settings.regex_perf_kit.persistMaxMB };
 }
 
@@ -870,7 +860,7 @@ export async function streamThrottle(h, { throttle }) {
     applyProfile(h, { streamingThrottle: throttle, streamingThrottleMs: 500 });
     const bold = script({ findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true });
     await useScripts(h, [bold]);
-    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: '', extra: {} }] });
+    h.st.setState({ chat: [msg('')] });
     const source = h.engine.RegexProvider.instance.get(bold.findRegex).source;
     const realNow = performance.now.bind(performance);
     let clock = 0;
@@ -902,7 +892,7 @@ export async function streamThrottle(h, { throttle }) {
 
 /** The user-facing surface the baseline already had: settings, controls, toggles, /regexperf, clearing ⑤. */
 export async function ux(h) {
-    const root = document.getElementById('regex_perf_kit');
+    const root = panel();
     const rpk = h.extension_settings.regex_perf_kit;
     const initial = { ...rpk };
     const ids = [...root.querySelectorAll('[id]')].map(e => e.id);
@@ -930,12 +920,12 @@ export async function ux(h) {
     };
     // ⑤: entries stored in the chat, then cleared by the button (which saves the chat)
     rpk.persist = true;
-    h.st.setState({ chat: [{ name: 'Char', is_user: false, is_system: false, mes: 'x', extra: {} }] });
+    h.st.setState({ chat: [msg('x')] });
     h.st.messageFormatting('x', 'Char', false, false, 0);
     const stored = Object.keys(h.st.chat[0].extra.regex_perf_cache ?? {}).sort();
     const chatSaves = h.st.counters.saveChat;
     root.querySelector('#rpk_clear_persist').click();
-    await new Promise(r => setTimeout(r, 0));
+    await sleep(0);
     const cleared = { left: 'regex_perf_cache' in h.st.chat[0].extra, saved: h.st.counters.saveChat - chatSaves, toast: h.toasts.at(-1)?.[1] };
     return { initial, ids, checked, toggled, slash, stored, cleared, note: root.querySelector('#rpk_persist_note').textContent };
 }
@@ -948,13 +938,13 @@ export async function screenshot(h) {
     await useScripts(h, [...corpus.SCRIPTS(), script({ scriptName: 'Digits', findRegex: '/\\d{4,}/g', replaceString: '####', markdownOnly: true })]);
     for (let k = 0; k < 3; k++) h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, m.is_system, m.is_user, i));
     h.st.chat.forEach((m) => h.engine.getRegexedString(m.mes, P.AI));
-    const root = document.getElementById('regex_perf_kit');
+    const root = panel();
     root.querySelector('#rpk_measure').click();
-    await new Promise(r => setTimeout(r, 80));
+    await sleep(80);
     root.querySelector('#rpk_table tbody tr[data-i="0"] .rpk-measure-row')?.click();
-    await new Promise(r => setTimeout(r, 80));
+    await sleep(80);
     root.querySelector('details[data-section="limits"]').open = true;
-    root.querySelector('#rpk_refresh').click();
+    panel(true);
     return root.getBoundingClientRect().height;
 }
 
