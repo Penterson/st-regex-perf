@@ -29,7 +29,7 @@
     "⑤ Longest result to save (characters)": "⑤ 저장할 최대 결과 길이 (글자)",
     "Compromise interval (ms)": "절충안 간격 (ms)",
     "Measure on this chat": "이 채팅으로 측정",
-    "Re-renders this chat twice, with the features off and on, and shows the real difference. The page freezes for a moment.": "이 채팅 전체를 기능 끄고 한 번, 켜고 한 번 다시 그려 실제 차이 측정. 몇 초간 화면 정지.",
+    "Re-renders this chat twice, with the features off and on, and shows the real difference. Runs in small steps, so the page stays usable.": "이 채팅 전체를 기능 끄고 한 번, 켜고 한 번 다시 그려 실제 차이 측정. 조금씩 나누어 돌므로 화면은 계속 사용 가능.",
     "Copy report": "리포트 복사",
     "Reset stats": "측정 초기화",
     "rpk_refresh": "새로고침",
@@ -147,7 +147,7 @@
     "Rendering this chat took ${0} s. A lower \"# Messages to Load\" (User Settings) opens chats faster.": "이 채팅을 그리는 데 ${0}초 걸렸습니다. User Settings의 \"# Messages to Load\"를 낮추면 채팅이 빨리 열립니다.",
     "Hint about \"# Messages to Load\" when opening a chat takes longer than (ms)": "채팅 열기가 이보다 오래 걸리면 \"# Messages to Load\" 안내 (ms)",
     "Shown once per session as a toast.": "세션당 한 번 토스트로 표시.",
-    "Runs \"Measure on this chat\" once after a chat opens. The page freezes for a moment each time.": "채팅을 열면 \"이 채팅으로 측정\"을 한 번 실행. 그때마다 화면이 잠깐 멈춤.",
+    "Runs \"Measure on this chat\" once after a chat opens.": "채팅을 열면 \"이 채팅으로 측정\"을 한 번 실행.",
     "Measure automatically when a chat opens": "채팅을 열 때 자동 측정",
     "Settings restored to their defaults.": "설정을 기본값으로 되돌렸습니다.",
     "Turns every feature and limit back to its default.": "모든 기능과 한도를 기본값으로.",
@@ -160,5 +160,9 @@
     "Also cache scripts that use {{user}}, {{char}}, {{persona}} or {{group}}": "{{user}}, {{char}}, {{persona}}, {{group}}를 쓰는 스크립트도 캐시",
     "These macros keep their value while a message is rendered, so the result is cached per name set and computed again after a rename or a persona change. Other macros still exclude a script.": "이 매크로들은 메시지 하나를 그리는 동안 값이 바뀌지 않으므로 이름 조합별로 결과를 캐시. 이름이나 페르소나가 바뀌면 다시 계산. 그 밖의 매크로가 든 스크립트는 여전히 제외.",
     "Also cache messages that show macro syntax": "매크로 문법이 보이는 메시지도 캐시",
-    "A message with {{ outside the matched text (a code sample, for instance) is cached when no match itself contained macro syntax.": "매치된 부분 밖에만 {{ 가 있는 메시지(코드 예시 등)는 매치 자체에 매크로 문법이 없을 때 캐시."
+    "A message with {{ outside the matched text (a code sample, for instance) is cached when no match itself contained macro syntax.": "매치된 부분 밖에만 {{ 가 있는 메시지(코드 예시 등)는 매치 자체에 매크로 문법이 없을 때 캐시.",
+    "Sample: past 1000 runs of a script, time 1 run in 8": "샘플링: 스크립트가 1000번 넘게 돌면 8번 중 1번만 시간 측정",
+    "Timing is two clock reads per run; with sampling, the totals of a busy script are scaled from every eighth run. On by default on devices with 4 GB or less.": "시간 측정은 실행마다 시계를 두 번 읽는 비용. 샘플링을 켜면 바쁜 스크립트의 합계를 8번 중 1번 측정값으로 환산. 메모리 4 GB 이하 기기에서는 기본 켜짐.",
+    "Time the replacement separately (the Replacer column)": "치환 부분 시간을 따로 측정 (표의 치환 열)",
+    "Two more clock reads per match. Off, that column stays 0.": "매치마다 시계를 두 번 더 읽음. 끄면 그 열은 0."
 }

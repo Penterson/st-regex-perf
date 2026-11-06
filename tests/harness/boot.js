@@ -72,6 +72,8 @@ if (params.get('prewrap') === '1') { // another extension's wrapper, loaded firs
     const prev = inst.get.bind(inst);
     inst.get = (regexString) => prev(regexString);
 }
+// The extension sizes some defaults by navigator.deviceMemory: pin it, so the defaults the tests expect do not depend on the machine.
+Object.defineProperty(navigator, 'deviceMemory', { value: 8, configurable: true });
 if (variant !== 'none') await import(`/scripts/extensions/third-party/${variant}/index.js`);
 await eventSource.emit(event_types.APP_READY);
 

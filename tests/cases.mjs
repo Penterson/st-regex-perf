@@ -434,7 +434,7 @@ test('reset settings restores the defaults; open sections are remembered across 
     assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000 }, 'defaultSettings');
+    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000 }, 'defaultSettings');
     assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistMaxMB: '8' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
@@ -562,7 +562,7 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
@@ -673,6 +673,42 @@ test('feature list 1.2: an unchanged output is stored as a marker, not as a copy
     assert.equal(r.same, true);
     assert.equal(r.hits, 1);
     assert.ok(r.bytes > 0 && r.bytes <= r.len * 2 + 64, `bytes ${r.bytes} for a ${r.len}-character input`);
+});
+
+test('feature list 3 row 5: script info is rebuilt on events or a fingerprint change, never on a timer', async ({ each }) => {
+    const r = (await each('rebuilds', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.outs, ['AB', 'Ab']);
+    assert.equal(r.builds[1], r.builds[0], 'no rebuild while nothing changed');
+    assert.equal(r.builds[2], r.builds[0] + 1, 'one rebuild after the switch, caught by the fingerprint');
+    assert.deepEqual(r.active, [2, 2, 1]);
+});
+
+test('feature list 1.4: "Measure on this chat" yields to the page between chunks of messages', async ({ each }) => {
+    const r = (await each('measureAsync', null, { variants: ['current'] })).current;
+    assert.match(r.text, /^This chat \(120 messages\)/);
+    assert.ok(r.ticks >= 20, `the page ran ${r.ticks} timer ticks during the measurement (2 passes of 12 chunks)`);
+});
+
+test('feature list 1.3: ⑤ usage is kept incrementally and matches a scan of the chat', async ({ each }) => {
+    const r = (await each('persistAccounting', null, { variants: ['current'] })).current;
+    for (const [shown, scanned] of [r.a, r.b]) {
+        assert.deepEqual(shown, scanned);
+        assert.ok(scanned.chars <= r.max && scanned.entries >= 5, JSON.stringify(scanned));
+    }
+});
+
+test('feature list 1.3: sampled profiling after 1000 runs; the replacer timing can be turned off', async ({ each }) => {
+    const r = (await each('sampling', null, { variants: ['current'] })).current;
+    assert.equal(r.sampled.sampled, true);
+    for (const k of ['runs', 'changed', 'matched']) assert.ok(Math.abs(r.sampled[k] - 1100) <= 8, `${k}: ${JSON.stringify(r.sampled)}`);
+    assert.deepEqual(r.untimed, { runs: 5, replacerMs: 0, matched: 5, sampled: false });
+});
+
+test('feature list 1.3: the panel refreshes on its own after activity, on a frame, not on a timer', async ({ each }) => {
+    const r = (await each('autoRefresh', null, { variants: ['current'] })).current;
+    assert.equal(r.immediately, r.before, 'nothing is rendered inside the regex call');
+    assert.notEqual(r.later, r.before, 'rendered within 1.3 s without the refresh button');
+    assert.equal(r.later, '7');
 });
 
 test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with a note', async ({ each }) => {

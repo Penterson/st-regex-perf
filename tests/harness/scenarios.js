@@ -1146,6 +1146,111 @@ export async function memoSame(h) {
     return { same: out[0] === str && out[1] === str, bytes: json?.memo.bytes ?? 0, hits: json?.rows[0]?.hits ?? 0, len: str.length };
 }
 
+/** Feature list 3 row 5 / 1.3. Script info is rebuilt on events or when the script lists' fingerprint changes, not on a timer. */
+export async function rebuilds(h) {
+    await useScripts(h, [
+        script({ scriptName: 'A', findRegex: '/a/g', replaceString: 'A' }),
+        script({ scriptName: 'B', findRegex: '/b/g', replaceString: 'B' }),
+    ]);
+    const json = async () => JSON.parse(await h.commands.regexperf.callback({}, 'json')).scripts;
+    const outs = [h.engine.getRegexedString('ab', P.AI)];
+    const s0 = await json();
+    for (let i = 0; i < 30; i++) h.engine.getRegexedString('ab' + i, P.AI);
+    await sleep(40); // a few frames
+    for (let i = 0; i < 30; i++) h.engine.getRegexedString('ab' + i, P.AI);
+    const s1 = await json();
+    h.extension_settings.regex[1].disabled = true; // the list's switch, without any event
+    await sleep(40);
+    outs.push(h.engine.getRegexedString('ab', P.AI));
+    const s2 = await json();
+    return { outs, builds: [s0.infoBuilds, s1.infoBuilds, s2.infoBuilds], active: [s0.active, s1.active, s2.active] };
+}
+
+/** Feature list 1.4. "Measure on this chat" yields to the page between chunks of messages. */
+export async function measureAsync(h) {
+    const corpus = await import('./corpus.js');
+    await useScripts(h, corpus.SCRIPTS());
+    h.st.setState({ name1: 'User', name2: 'Dr. A (B)', chat: Array.from({ length: 20 }, () => corpus.CHAT()).flat() });
+    const root = panel();
+    const button = root?.querySelector('#rpk_measure');
+    if (!button) return null;
+    // Without scheduler.yield() the measurement falls back to a timeout, so a timer of our own gets a turn at every
+    // chunk (with scheduler.yield(), Chrome runs the continuation before other timers: that path yields to rendering).
+    Object.defineProperty(globalThis, 'scheduler', { value: undefined, configurable: true });
+    let ticks = 0;
+    let running = true;
+    const tick = () => {
+        if (!running) return;
+        ticks++;
+        setTimeout(tick, 0);
+    };
+    try {
+        button.click();
+        await sleep(25); // the "Measuring..." toast's delay: the measurement starts after it
+        setTimeout(tick, 0);
+        const until = Date.now() + 5000;
+        while (Date.now() < until && !root.querySelector('#rpk_measure_result p')) await sleep(0);
+    } finally {
+        running = false;
+        delete globalThis.scheduler;
+    }
+    return { ticks, text: root.querySelector('#rpk_measure_result p')?.textContent ?? '', messages: h.st.chat.length };
+}
+
+/** Feature list 1.3. ⑤ usage is kept incrementally and matches a full scan of the chat. */
+export async function persistAccounting(h) {
+    applyProfile(h, { persist: true, persistMaxMB: 1 });
+    await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
+    h.st.setState({ chat: Array.from({ length: 30 }, (_, i) => msg(`${i} x ` + 'x'.repeat(50000))) }); // ~100 KB each
+    const render = (i) => h.st.messageFormatting(h.st.chat[i].mes, h.st.chat[i].name, false, false, i);
+    const scan = () => {
+        let entries = 0;
+        let chars = 0;
+        for (const m of h.st.chat) {
+            const e = m.extra?.regex_perf_cache;
+            if (!e) continue;
+            entries++;
+            chars += String(e.k).length + (e.v?.length ?? 0);
+        }
+        return { entries, chars };
+    };
+    const shown = async () => JSON.parse(await h.commands.regexperf.callback({}, 'json')).memo.persist;
+    for (let i = 0; i < 30; i++) render(i);
+    const a = [await shown(), scan()];
+    render(3); // its entry was dropped as one of the oldest: stored again, the oldest remaining one dropped
+    render(29); // a hit: nothing changes
+    const b = [await shown(), scan()];
+    return { a, b, max: 1048576 };
+}
+
+/** Feature list 1.3. Sampled profiling after 1000 runs, and the replacer timing toggle. */
+export async function sampling(h) {
+    const rpk = applyProfile(h, { profilerSampling: true, memo: false, prefilter: false });
+    await useScripts(h, [script({ scriptName: 'S', findRegex: '/a/g', replaceString: 'b' })]);
+    for (let i = 0; i < 1100; i++) h.engine.getRegexedString('a' + i, P.AI);
+    const row = async () => JSON.parse(await h.commands.regexperf.callback({}, 'json')).rows.find(r => r.name === 'S');
+    const s = await row();
+    rpk.timeReplacer = false;
+    rpk.fastPath = false; // SillyTavern's callback runs, untimed
+    await h.commands.regexperf.callback({}, 'reset');
+    for (let i = 0; i < 5; i++) h.engine.getRegexedString('a' + i, P.AI);
+    const u = await row();
+    return { sampled: { runs: s.runs, changed: s.changed, matched: s.matched, sampled: s.sampled }, untimed: { runs: u.runs, replacerMs: u.replacerMs, matched: u.matched, sampled: u.sampled } };
+}
+
+/** Feature list 1.3. The panel refreshes on its own soon after activity, without the refresh button. */
+export async function autoRefresh(h) {
+    await useScripts(h, [script({ scriptName: 'R', findRegex: '/r/g', replaceString: 'R' })]);
+    const root = panel();
+    if (!root) return null;
+    const runs = () => root.querySelector('#rpk_summary [data-k="runs"]')?.textContent ?? '';
+    const before = runs();
+    for (let i = 0; i < 7; i++) h.engine.getRegexedString('r' + i, P.AI);
+    const immediately = runs();
+    await sleep(1300);
+    return { before, immediately, later: runs() };
+}
+
 /** tests/screenshots.mjs: a realistic session in the panel (the corpus chat, a measurement, a per-row stopwatch). */
 export async function screenshot(h) {
     const corpus = await import('./corpus.js');

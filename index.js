@@ -25,6 +25,8 @@ const deviceMemory = Number(globalThis.navigator?.deviceMemory) || 0;
 
 const defaultSettings = {
     profiler: true,
+    profilerSampling: deviceMemory > 0 && deviceMemory <= 4, // ① past 1000 runs of a script, time 1 run in 8 and scale
+    timeReplacer: true, // ① two more clock reads per match for the Replacer column
     prefilter: true,
     memo: true,
     memoStatic: true, // ③ also for scripts whose only macros are {{user}} {{char}} {{persona}} {{group}}: keyed by their values
@@ -49,6 +51,9 @@ const settings = (extensionSettings.regex_perf_kit ||= {});
 for (const [key, value] of Object.entries(defaultSettings)) {
     if (!Object.hasOwn(settings, key)) settings[key] = value;
 }
+// What the hot path reads. A measurement swaps in an object inheriting from settings with some features off, for the
+// duration of one message's formatting, so the saved settings are never touched (and never saved by mistake).
+let cfg = settings;
 
 // ---- Utilities ----
 
@@ -136,7 +141,7 @@ const litId = (key) => {
 function litPresent(str, id, lit, re, keep) {
     if (str !== litIn) {
         litIn = str;
-        if (!keep || str.length > settings.memoMaxLen) {
+        if (!keep || str.length > cfg.memoMaxLen) {
             litSeen = [];
         } else {
             litSeen = litCache.get(str);
@@ -575,14 +580,31 @@ function buildTrimReplacer(replaceString, trims, named) {
 /** @type {{map: Map<string, object>, dynamic: object[], counts: object, depthRules: number[][], version: string, displayVersion: string, builtAt: number} | null} */
 let infoCache = null; // null = rebuild on next use
 const markDirty = () => { infoCache = null; };
+let infoBuilds = 0; // how often the script info was rebuilt (in the JSON report)
+const FINGERPRINT_EVERY_MS = 16; // the script lists are fingerprinted at most once per frame
 
-function ensureInfo() { // runs on every RegexProvider.get(): Date.now() is the cheaper clock
-    if (!infoCache || Date.now() - infoCache.builtAt > 5000) infoCache = buildInfo();
-    return infoCache;
+// Parsed patterns, needles and templates outlive a rebuild: with hundreds of scripts, re-parsing all of them on every
+// rebuild was a parse storm (feature list 1.3, 3 row 5).
+const CACHE_MAX = 2000;
+const compiledCache = new Map(); // pattern string, as RegexProvider receives it -> RegExp | null
+const needleCache = new Map(); // "source\0flags" -> extractNeedle()
+const templateCache = new Map(); // fast key -> buildTemplate()
+function cached(map, key, make) {
+    let v = map.get(key);
+    if (v === undefined) {
+        v = make();
+        if (map.size >= CACHE_MAX) map.delete(map.keys().next().value);
+        map.set(key, v);
+    }
+    return v;
 }
+const compile = (pattern) => cached(compiledCache, pattern, () => {
+    try { return regexFromString(pattern) ?? null; } catch { return null; }
+});
+const needleOf = (re) => cached(needleCache, keyOf(re), () => extractNeedle(re.source, re.flags));
 
-function buildInfo() {
-    // Scripts by origin, in the engine's priority order (global, preset, scoped); older engines only have the flat list.
+/** The scripts by origin, in the engine's priority order (global, preset, scoped); older engines only have the flat list. */
+function readGroups() {
     const groups = [];
     try {
         if (typeof getScriptsByType === 'function' && SCRIPT_TYPES) {
@@ -591,6 +613,24 @@ function buildInfo() {
             groups.push(['global', getRegexScripts({ allowedOnly: true }) ?? []]);
         }
     } catch (e) { console.warn('[RegexPerf] reading regex scripts failed', e); }
+    return groups;
+}
+/** What an edit that fires no event changes: ids, switches, pattern and replacement lengths, the display flags. */
+const fingerprint = (groups) => groups.map(([, list]) => list.map(s => `${s?.id}|${s?.disabled ? 1 : 0}|${s?.findRegex?.length ?? 0}|${s?.replaceString?.length ?? 0}|${s?.markdownOnly ? 1 : 0}${s?.promptOnly ? 1 : 0}`).join()).join(';');
+
+function ensureInfo() { // runs on every RegexProvider.get(): Date.now() is the cheaper clock
+    if (!infoCache) return (infoCache = buildInfo(readGroups()));
+    const now = Date.now();
+    if (now - infoCache.checkedAt >= FINGERPRINT_EVERY_MS) { // edits that fire no event are caught here, once per frame
+        infoCache.checkedAt = now;
+        const groups = readGroups();
+        if (fingerprint(groups) !== infoCache.fp) infoCache = buildInfo(groups);
+    }
+    return infoCache;
+}
+
+function buildInfo(groups) {
+    infoBuilds++;
     const { substituteParamsExtended } = ctx();
     const map = new Map();
     const dynamic = []; // {raw, substitute, shape, info} of RAW/ESCAPED scripts whose pattern has macros, see resolveDynamic()
@@ -614,8 +654,7 @@ function buildInfo() {
             if (substitute === 1 || substitute === 2) { // RAW / ESCAPED, as runRegexScript() compiles them
                 try { rs = substituteParamsExtended(rs, {}, substitute === 2 ? sanitizeRegexMacro : undefined); } catch { /* keep the raw pattern */ }
             }
-            let re;
-            try { re = regexFromString(rs); } catch { /* invalid pattern */ }
+            const re = compile(rs);
             if (!re) continue;
 
             const key = keyOf(re);
@@ -623,7 +662,7 @@ function buildInfo() {
             const replaceString = String(s.replaceString ?? '');
             const trims = Array.isArray(s.trimStrings) ? s.trimStrings : [];
             const trimSig = trims.join('\u0002');
-            const needle = prev?.needle ?? extractNeedle(re.source, re.flags);
+            const needle = needleOf(re);
             if (!needle.needles) counts.noNeedle++;
             if (HEAVY_HINT.test(re.source)) counts.heavy++;
             if (needle.nested) counts.nested++;
@@ -666,7 +705,7 @@ function buildInfo() {
             const fastKey = key + '\u0001' + info.replaceSig;
             info.fast = null;
             if (info.pure && !fastPathOff.has(fastKey)) {
-                const tpl = buildTemplate(replaceString, re);
+                const tpl = cached(templateCache, fastKey, () => buildTemplate(replaceString, re));
                 if (tpl.template !== null) {
                     info.fast = {
                         key: fastKey,
@@ -691,7 +730,7 @@ function buildInfo() {
     }
     const version = fnv1a(versionParts.join('\u0003'));
     if (version !== infoCache?.version) clearLitCache(); // other scripts, other literals
-    return { map, dynamic, counts, depthRules, version, displayVersion: fnv1a(displayParts.join('\u0003')), builtAt: Date.now() };
+    return { map, dynamic, counts, depthRules, version, displayVersion: fnv1a(displayParts.join('\u0003')), fp: fingerprint(groups), checkedAt: Date.now(), builtAt: Date.now() };
 }
 
 // ---- Instrumented RegExp ----
@@ -703,6 +742,9 @@ let burstStart = 0;
 let lastCall = -Infinity;
 const SPIKE_MS = 50; // a single run slower than this is flagged, with a sample of its input
 const SPIKE_HEAD = 80; // characters of the input kept in the sample
+const SAMPLE_AFTER = 1000; // ① with profilerSampling, a script past this many runs is timed on 1 run in SAMPLE_EVERY
+const SAMPLE_EVERY = 8;
+let statsDirty = false; // the stats changed since the panel was last rendered
 const stats = new Map(); // pattern key -> counters, see getStat()
 let statsSince = Date.now();
 const persistStats = { hits: 0, stores: 0 };
@@ -757,8 +799,8 @@ const clearMemo = () => {
 
 /** Evicts least recently used entries until the memo fits both its entry and its memory limit. */
 function trimMemo() {
-    const maxBytes = settings.memoMaxMB * 1048576;
-    while (memoLru.size && (memoLru.size > settings.memoMaxEntries || memoBytes > maxBytes)) {
+    const maxBytes = cfg.memoMaxMB * 1048576;
+    while (memoLru.size && (memoLru.size > cfg.memoMaxEntries || memoBytes > maxBytes)) {
         const old = memoLru.values().next().value;
         memoLru.delete(old);
         old.bucket.delete(old.key);
@@ -774,6 +816,7 @@ function getStat(key, re) {
             src: '/' + re.source + '/' + re.flags,
             calls: 0, totalMs: 0, maxMs: 0, replMs: 0, matched: 0, changed: 0,
             skipped: 0, hits: 0, streamSkipped: 0, bypass: 0, fast: 0,
+            seen: 0, // every run that executed, also the ones sampling left untimed
             spike: null, // {ms, len, head}: the newest run over SPIKE_MS
             heavy: HEAVY_HINT.test(re.source),
             needle: null, // the needle the wrapper uses (and its nested flag), set with its meta
@@ -799,15 +842,16 @@ class PerfRegExp extends RegExp {
         if (stat === skipStat) return str;
         if (bypass && displayPass) { // a stored ⑤ result is being shown for this message
             stat.bypass++;
+            statsDirty = true;
             return str;
         }
-        if (settings.streamingSkip && markdownOnly && !streamApply && liveStream()) {
+        if (cfg.streamingSkip && markdownOnly && !streamApply && liveStream()) {
             stat.streamSkipped++;
             return unchanged(stat, str);
         }
         // a displayed message comes back on every re-render: its literal answers are kept (save-time inputs do not)
         const keep = markdownOnly || displayPass;
-        if (settings.prefilter && test && !test(str, keep)) {
+        if (cfg.prefilter && test && !test(str, keep)) {
             stat.skipped++;
             if (prevOut === str && prevIn !== str && prevStat !== stat) noteConflict(prevStat, stat, prevIn, test, this._native, keep);
             return unchanged(stat, str);
@@ -818,12 +862,12 @@ class PerfRegExp extends RegExp {
         let postHoc = false; // the input has macro syntax: memoized only if no match contains any (checked as the callback runs)
         // Matched text with macros is substituted again after the groups are inserted, so it is not memoized. A script
         // with static macros is keyed by their values, which are known inside a display pass only.
-        const staticKey = memoStatic === 0 ? '' : settings.memoStatic && passChName !== null ? staticKeyFor(memoStatic) : null;
-        if (settings.memo && memoPrefix && staticKey !== null && str.length <= settings.memoMaxLen
-            && (!hasMacro(str) || (postHoc = settings.memoPostHoc && typeof replacer === 'function'))) {
+        const staticKey = memoStatic === 0 ? '' : cfg.memoStatic && passChName !== null ? staticKeyFor(memoStatic) : null;
+        if (cfg.memo && memoPrefix && staticKey !== null && str.length <= cfg.memoMaxLen
+            && (!hasMacro(str) || (postHoc = cfg.memoPostHoc && typeof replacer === 'function'))) {
             bucket = memo.get(memoPrefix);
             if (!bucket) memo.set(memoPrefix, bucket = new Map());
-            memoKey = settings.memoHashKeys ? hash64(str) + ':' + str.length : str;
+            memoKey = cfg.memoHashKeys ? hash64(str) + ':' + str.length : str;
             if (staticKey) memoKey = staticKey + '\u0000' + memoKey;
             const hit = bucket.get(memoKey);
             if (hit) {
@@ -836,7 +880,12 @@ class PerfRegExp extends RegExp {
 
         const native = this._native;
         native.lastIndex = 0;
-        const profile = settings.profiler;
+        // ① Past SAMPLE_AFTER runs of a script with sampling on, one run in SAMPLE_EVERY is timed and counted for all.
+        stat.seen++;
+        const sampled = cfg.profilerSampling && stat.seen > SAMPLE_AFTER;
+        const profile = cfg.profiler && (!sampled || stat.seen % SAMPLE_EVERY === 0);
+        const weight = sampled ? SAMPLE_EVERY : 1;
+        const timeRepl = profile && cfg.timeReplacer;
         let replMs = 0;
         let matched = false; // the replacer ran, so the pattern matched (even if the text came out the same)
         let fn = replacer;
@@ -846,7 +895,7 @@ class PerfRegExp extends RegExp {
         const t0 = profile ? performance.now() : 0;
         // ⑥ With no macro syntax in the input, SillyTavern's per-match callback amounts to its template, which V8 applies
         // without a JS call per match. Should group text assemble macro syntax anyway, the callback is used instead.
-        const fast = settings.fastPath && typeof replacer === 'function' && !hasMacro(str) ? this._meta.fast : null;
+        const fast = cfg.fastPath && typeof replacer === 'function' && !hasMacro(str) ? this._meta.fast : null;
         if (fast && fast.verify <= 0) {
             out = RegExp.prototype[Symbol.replace].call(native, str, fast.template ?? fast.replacer);
             if (MACRO.test(out)) {
@@ -865,9 +914,9 @@ class PerfRegExp extends RegExp {
                 const meta = this._meta;
                 fn = function () {
                     matched = true;
-                    const t1 = profile ? performance.now() : 0;
+                    const t1 = timeRepl ? performance.now() : 0;
                     const r = replacer.apply(this, arguments);
-                    if (profile) replMs += performance.now() - t1;
+                    if (timeRepl) replMs += performance.now() - t1;
                     if (postHoc && !macroSeen && MACRO.test(arguments[0])) macroSeen = true;
                     if (fast && meta.fast) {
                         const mine = fast.template !== null ? expandTemplate(fast.template, arguments) : fast.replacer.apply(this, arguments);
@@ -889,20 +938,20 @@ class PerfRegExp extends RegExp {
             const dt = performance.now() - t0;
             if (t0 - lastCall > BURST_GAP_MS) burstStart = t0;
             lastCall = t0 + dt;
-            stat.calls++;
-            stat.totalMs += dt;
-            stat.replMs += replMs;
-            if (fastRun) stat.fast++;
+            stat.calls += weight;
+            stat.totalMs += dt * weight;
+            stat.replMs += replMs * weight;
+            if (fastRun) stat.fast += weight;
             if (dt > stat.maxMs) stat.maxMs = dt;
             if (dt > SPIKE_MS) stat.spike = { ms: dt, len: str.length, head: str.slice(0, SPIKE_HEAD) };
-            if (out !== str) stat.changed++;
+            if (out !== str) stat.changed += weight;
             if (!matched) {
                 // A template changed the text or not: unchanged means no match unless a match can be its own replacement.
                 if (fastRun) matched = out !== str || (fast.identity && native.test(str));
                 // A string replacer (not SillyTavern's) tells nothing: test short inputs, assume a match on long ones.
                 else if (fn === replacer) matched = out !== str || str.length > 2000 || native.test(str);
             }
-            if (matched) stat.matched++;
+            if (matched) stat.matched += weight;
         }
         this.lastIndex = native.lastIndex; // leave this regex as a native replace would
 
@@ -910,7 +959,7 @@ class PerfRegExp extends RegExp {
             // an unchanged output is kept as a marker: V8 shares the string anyway, and counting it twice evicts early
             const same = out === str;
             const size = (memoKey.length + (same ? 0 : out.length)) * 2;
-            if (size <= settings.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
+            if (size <= cfg.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
                 const entry = { bucket, key: memoKey, out: same ? null : out, same, size };
                 bucket.set(memoKey, entry);
                 memoLru.add(entry);
@@ -924,6 +973,7 @@ class PerfRegExp extends RegExp {
 
 /** Records a call's input and output for the order-conflict check (see prevStat) and returns the output. */
 function done(stat, str, out) {
+    statsDirty = true;
     prevStat = stat;
     prevIn = str;
     prevOut = out;
@@ -998,7 +1048,7 @@ function patchProvider() {
             if (info) stat.name = info.name;
             if (info?.raw) stat.src = info.raw;
             stat.ids = info?.ids ?? [];
-            stat.needle = info?.needle ?? extractNeedle(base.source, base.flags);
+            stat.needle = info?.needle ?? needleOf(base);
             w._meta = {
                 stat,
                 markdownOnly: !!info?.markdownOnly,
@@ -1040,6 +1090,23 @@ const streamViews = new Map(); // ④ compromise: "<messageId><m|r>" -> {at, pre
 let streamView = null; // the view this pass formats
 let streamTail = null; // raw text this pass appends after the regex stage
 
+// Depth of a message as messageFormatting() counts it (non-system messages after it), from one table per render burst:
+// built on first use, dropped by a microtask, so a synchronous run over the chat computes it once (feature list 1.3).
+let depthTable = null;
+function depthAt(chat, i) {
+    if (depthTable?.chat !== chat || depthTable.len !== chat.length) {
+        const n = chat.length;
+        const d = new Int32Array(n);
+        for (let k = n - 1, after = 0; k >= 0; k--) {
+            d[k] = after;
+            if (!chat[k]?.is_system) after++;
+        }
+        depthTable = { chat, len: n, d };
+        queueMicrotask(() => { depthTable = null; });
+    }
+    return depthTable.d[i];
+}
+
 /** Clears the state the two hooks share for one formatting pass. */
 function resetPass() {
     bypass = streamApply = displayPass = false;
@@ -1056,7 +1123,7 @@ function streamPass(mes, c) {
     const now = performance.now();
     // the last line is still being written, along with any ``` / ~~~ fence SillyTavern appends to balance it
     const cut = mes.replace(/(?:\n(?:```|~~~))+$/, '').lastIndexOf('\n') + 1;
-    if (view?.out != null && mes.startsWith(view.prefix) && (cut <= view.prefix.length || now - view.at < settings.streamingThrottleMs)) {
+    if (view?.out != null && mes.startsWith(view.prefix) && (cut <= view.prefix.length || now - view.at < cfg.streamingThrottleMs)) {
         streamTail = mes.slice(view.prefix.length); // the streaming skip leaves the reused part alone
         return view.out;
     }
@@ -1079,9 +1146,9 @@ function installPersistHooks() {
         displayPass = true;
         if (c.messageId < 0 || c.isSystem) return mes;
         passChName = c.ch_name ?? c.characterName ?? ''; // static-macro scripts resolve their key on first use
-        const sp = settings.persist || settings.streamingThrottle ? liveStream() : null;
-        if (sp) return settings.streamingSkip && settings.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;
-        if (!settings.persist || c.isReasoning) return mes;
+        const sp = cfg.persist || cfg.streamingThrottle ? liveStream() : null;
+        if (sp) return cfg.streamingSkip && cfg.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;
+        if (!cfg.persist || c.isReasoning) return mes;
         const { chat, name1, name2 } = ctx();
         const msg = chat?.[c.messageId];
         if (!msg) return mes;
@@ -1090,8 +1157,7 @@ function installPersistHooks() {
         const { displayVersion, depthRules } = ensureInfo();
         let depths = '';
         if (depthRules.length) { // which depth-limited scripts apply at this message's depth, as messageFormatting() counts it
-            let depth = 0;
-            for (let k = c.messageId + 1; k < chat.length; k++) if (!chat[k]?.is_system) depth++;
+            const depth = depthAt(chat, c.messageId);
             depths = msg.is_system ? ':*' : ':' + depthRules.map(([min, max]) => (depth < min || depth > max ? 0 : 1)).join('');
         }
         // 64 bits of the text: a 32-bit hash alone collides once in a few tens of thousands of same-length messages.
@@ -1119,11 +1185,11 @@ function installPersistHooks() {
             if (view) view.out = mes;
             return mes + tail;
         }
-        if (!p || mes.length > settings.persistMaxLen) return mes;
-        p.msg.extra ||= {};
-        p.msg.extra[EXTRA_KEY] = mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes };
+        if (!p || mes.length > cfg.persistMaxLen) return mes;
+        const chat = ctx().chat;
+        storePersisted(chat, p.msg, mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes });
         persistStats.stores++;
-        trimPersisted(ctx().chat);
+        trimPersisted(chat);
         return mes;
     }, { stage: mf.stage.AFTER_REGEX, order: mf.order?.EARLIEST ?? 0 });
 }
@@ -1137,6 +1203,7 @@ async function clearPersistedCache() {
             removed++;
         }
     }
+    forgetPersistAcct();
     if (removed && typeof saveChat === 'function') {
         try { await saveChat(); } catch (e) { console.warn('[RegexPerf] saveChat failed', e); }
     }
@@ -1209,34 +1276,58 @@ function buildSummary() {
         topShare: top && total > 0 ? top.totalMs / total * 100 : 0,
         usage: t`③ memory cache: ${memoLru.size} entries, ${(memoBytes / 1048576).toFixed(1)} of ${settings.memoMaxMB} MB`
             + (persistAvailable ? '. ' + persistUsage(chat) : ''),
+        persist: persistAvailable ? (({ entries, chars }) => ({ entries, chars }))(persistTotals(chat)) : null,
     };
 }
 
 /** Size of a ⑤ entry, in characters (about its bytes in the chat file). */
 const persistSize = (e) => String(e.k).length + (e.v?.length ?? 0);
 
+// ⑤ usage is a running total per chat (feature list 1.3): a full scan only for another chat or after a change the
+// hooks cannot see (CHAT_CHANGED, a deleted message).
+const persistAcct = { chat: null, entries: 0, chars: 0 };
+const forgetPersistAcct = () => { persistAcct.chat = null; };
+
 /** The ⑤ entries in a chat: how many messages hold one and their total size. */
 function persistTotals(chat) {
-    let entries = 0;
-    let chars = 0;
-    for (const m of chat ?? []) {
-        const e = m?.extra?.[EXTRA_KEY];
-        if (!e) continue;
-        entries++;
-        chars += persistSize(e);
+    if (chat !== persistAcct.chat) {
+        let entries = 0;
+        let chars = 0;
+        for (const m of chat ?? []) {
+            const e = m?.extra?.[EXTRA_KEY];
+            if (!e) continue;
+            entries++;
+            chars += persistSize(e);
+        }
+        Object.assign(persistAcct, { chat, entries, chars });
     }
-    return { entries, chars };
+    return persistAcct;
+}
+
+/** Puts a ⑤ entry on a message, keeping the running total. */
+function storePersisted(chat, msg, entry) {
+    const acct = persistTotals(chat);
+    msg.extra ||= {};
+    const old = msg.extra[EXTRA_KEY];
+    if (old) {
+        acct.entries--;
+        acct.chars -= persistSize(old);
+    }
+    msg.extra[EXTRA_KEY] = entry;
+    acct.entries++;
+    acct.chars += persistSize(entry);
 }
 
 /** Drops ⑤ entries from the oldest messages until the chat is within persistMaxMB. */
 function trimPersisted(chat) {
     if (!chat) return;
-    let { chars } = persistTotals(chat);
-    const max = settings.persistMaxMB * 1048576;
-    for (let i = 0; chars > max && i < chat.length; i++) {
+    const acct = persistTotals(chat);
+    const max = cfg.persistMaxMB * 1048576;
+    for (let i = 0; acct.chars > max && i < chat.length; i++) {
         const e = chat[i]?.extra?.[EXTRA_KEY];
         if (!e) continue;
-        chars -= persistSize(e);
+        acct.chars -= persistSize(e);
+        acct.entries--;
         delete chat[i].extra[EXTRA_KEY];
     }
 }
@@ -1304,15 +1395,16 @@ function buildReportData() {
         generatedAt: new Date().toISOString(),
         since: new Date(statsSince).toISOString(),
         chatMessages: s.chatLen,
-        scripts: s.counts,
+        scripts: { ...s.counts, infoBuilds },
         totals: { calls: s.calls, totalMs: s.total, skipped: s.skipped, hits: s.hits, streamSkipped: s.streamSkipped, bypass: s.bypass, fastRuns: s.fast, persistHits: persistStats.hits, persistStores: persistStats.stores, savedMs: s.calls ? s.saved : null },
-        memo: { entries: memoLru.size, bytes: memoBytes, maxMB: settings.memoMaxMB },
+        memo: { entries: memoLru.size, bytes: memoBytes, maxMB: settings.memoMaxMB, persist: s.persist },
         measured,
         candidatesToDisable: s.ineffective,
         orderConflicts: [...conflicts.values()].map(c => ({ earlier: c.earlier.name, later: c.later.name, count: c.count, confirmed: c.confirmed, sample: c.sample })),
         rows: s.rows.map((r, i) => ({
             rank: i + 1, name: r.name, pattern: r.src, runs: r.calls, totalMs: r.totalMs, avgMs: avgMs(r), maxMs: r.maxMs, replacerMs: r.replMs,
             matched: r.matched, changed: r.changed, skips: r.skipped, hits: r.hits, streamSkips: r.streamSkipped, fastRuns: r.fast,
+            sampled: !!settings.profilerSampling && r.seen > SAMPLE_AFTER, // runs, totals, matched and changed are scaled from 1 run in 8
             literal: r.needle?.terms ?? [], literalReason: r.needle?.reason ?? null, minLength: r.needle?.minLen ?? 0, warnings: warnings(r), spike: r.spike,
         })),
     };
@@ -1344,46 +1436,60 @@ function turnOffByName(name) {
     return t`Turned off: ${hits[0].name}`;
 }
 
-const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'spike'];
+const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'seen', 'spike'];
 const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, persist: false }; // what a measurement turns off
 
 const CACHES_OFF = { profiler: false, memo: false, persist: false }; // a per-row measurement keeps the prefilter as set
+
+const MEASURE_CHUNK = 10; // messages formatted between two yields to the page
+let measureBusy = false; // a measurement is running (it yields, so other code runs in between)
 
 /**
  * Renders every message of the current chat as SillyTavern displays it (messageFormatting), first with the
  * prefilter, the memo and ⑤ off, then with the user's settings, and returns both times. With a stat, both passes
  * run with the caches off, the second one without that pattern: {with, without}. The chat was rendered when it
- * opened, so this is a re-render, as on swipes, edits and reloads. Synchronous, so the temporarily changed settings
- * can never be saved, and the stats are restored afterwards.
+ * opened, so this is a re-render, as on swipes, edits and reloads. Chunked (feature list 1.4): every MEASURE_CHUNK
+ * messages it yields to the page, so the page stays usable. The features are turned off through cfg only while a
+ * message is being formatted, so a render that happens in between gets the user's settings and nothing temporary can
+ * be saved; the stats are restored afterwards.
  */
-function measureChat(without = null) {
+async function measureChat(without = null) {
     const { chat, messageFormatting } = ctx();
-    if (!chat?.length || typeof messageFormatting !== 'function') return null;
-    const render = (times) => { // times: per-message {i, len, ms} are pushed when given
-        const t0 = performance.now();
-        chat.forEach((m, i) => {
-            const t1 = times ? performance.now() : 0;
-            if (m?.mes) messageFormatting(m.mes, m.name, m.is_system, m.is_user, i);
-            if (m?.extra?.reasoning) messageFormatting(m.extra.reasoning, '', false, false, i, {}, true);
-            if (times) times.push({ i, len: (m?.mes?.length ?? 0) + (m?.extra?.reasoning?.length ?? 0), ms: performance.now() - t1 });
-        });
-        return performance.now() - t0;
+    if (!chat?.length || typeof messageFormatting !== 'function' || measureBusy) return null;
+    measureBusy = true;
+    const pause = () => globalThis.scheduler?.yield?.() ?? new Promise(resolve => setTimeout(resolve, 0));
+    const over = (changes) => Object.assign(Object.create(settings), changes);
+    const render = async (times, skip, config) => { // times: per-message {i, len, ms} are pushed when given
+        let total = 0;
+        for (let i = 0; i < chat.length; i++) {
+            const m = chat[i];
+            cfg = config;
+            skipStat = skip;
+            const t1 = performance.now();
+            try {
+                if (m?.mes) messageFormatting(m.mes, m.name, m.is_system, m.is_user, i);
+                if (m?.extra?.reasoning) messageFormatting(m.extra.reasoning, '', false, false, i, {}, true);
+            } finally {
+                cfg = settings;
+                skipStat = null;
+            }
+            const ms = performance.now() - t1;
+            total += ms;
+            if (times) times.push({ i, len: (m?.mes?.length ?? 0) + (m?.extra?.reasoning?.length ?? 0), ms });
+            if (i % MEASURE_CHUNK === MEASURE_CHUNK - 1) await pause();
+        }
+        return total;
     };
-    const user = Object.fromEntries(Object.keys(FEATURES_OFF).map(k => [k, settings[k]]));
     const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => st[c])]));
     const savedPersist = { ...persistStats };
     const savedConflicts = new Map([...conflicts].map(([k, c]) => [k, { ...c }]));
     const times = [];
     let first, second;
     try {
-        Object.assign(settings, without ? CACHES_OFF : FEATURES_OFF);
-        first = render(without ? null : times); // per message with the features off: the raw cost of each
-        if (without) skipStat = without;
-        else Object.assign(settings, user, { profiler: false });
-        second = render();
+        first = await render(without ? null : times, null, over(without ? CACHES_OFF : FEATURES_OFF)); // the raw cost of each message
+        second = await render(null, without, over(without ? CACHES_OFF : { profiler: false }));
     } finally {
-        skipStat = null;
-        Object.assign(settings, user);
+        measureBusy = false;
         for (const [k, st] of stats) COUNTERS.forEach((c, i) => { st[c] = saved.get(k)?.[i] ?? 0; });
         Object.assign(persistStats, savedPersist);
         conflicts.clear();
@@ -1394,8 +1500,8 @@ function measureChat(without = null) {
 }
 
 /** "Measure on this chat": the new result, kept as the last one (an empty chat leaves the previous result). */
-function measureNow() {
-    measured = measureChat() ?? measured;
+async function measureNow() {
+    measured = (await measureChat()) ?? measured;
     renderPanel();
     return measured;
 }
@@ -1465,7 +1571,11 @@ const settingsHtml = () => `
 
       <h4 class="rpk-section">${t`Features`}</h4>
       <div class="rpk-features">
+        <div class="rpk-feature-group">
         ${feature('rpk_profiler', t`① Measure run time (profiler)`, t`Counts how often each script runs and how long it takes, for the table below. Costs almost nothing.`)}
+        ${feature('rpk_profilerSampling', t`Sample: past 1000 runs of a script, time 1 run in 8`, t`Timing is two clock reads per run; with sampling, the totals of a busy script are scaled from every eighth run. On by default on devices with 4 GB or less.`, { sub: true })}
+        ${feature('rpk_timeReplacer', t`Time the replacement separately (the Replacer column)`, t`Two more clock reads per match. Off, that column stays 0.`, { sub: true })}
+        </div>
         ${feature('rpk_prefilter', t`② Skip runs that cannot match (literal prefilter)`, t`If the message does not even contain the fixed text a script looks for (such as &lt;/status&gt;), the regex is not run. The result is exactly the same.`)}
         <div class="rpk-feature-group">
         ${feature('rpk_memo', t`③ Reuse results (memory cache)`, t`When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with {{macros}} are left out automatically.`)}
@@ -1493,12 +1603,12 @@ const settingsHtml = () => `
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
           ${limit('memoHashKeys', t`③ Key the cache by a hash of the input`, t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`, 'checkbox')}
           ${limit('loadHintMs', t`Hint about "# Messages to Load" when opening a chat takes longer than (ms)`, t`Shown once per session as a toast.`)}
-          ${limit('autoMeasure', t`Measure automatically when a chat opens`, t`Runs "Measure on this chat" once after a chat opens. The page freezes for a moment each time.`, 'checkbox')}
+          ${limit('autoMeasure', t`Measure automatically when a chat opens`, t`Runs "Measure on this chat" once after a chat opens.`, 'checkbox')}
         </div>
       </details>
 
       <div class="rpk-buttons">
-        <div class="menu_button rpk-primary" id="rpk_measure" title="${t`Re-renders this chat twice, with the features off and on, and shows the real difference. The page freezes for a moment.`}">${t`Measure on this chat`}</div>
+        <div class="menu_button rpk-primary" id="rpk_measure" title="${t`Re-renders this chat twice, with the features off and on, and shows the real difference. Runs in small steps, so the page stays usable.`}">${t`Measure on this chat`}</div>
         <div class="menu_button" id="rpk_copy">${t`Copy report`}</div>
         <div class="menu_button rpk-minor" id="rpk_copy_json" title="${t`Copy the report as JSON`}">JSON</div>
         <div class="menu_button rpk-minor" id="rpk_copy_csv" title="${t`Copy the table as CSV`}">CSV</div>
@@ -1542,10 +1652,11 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
+const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_persist: 'persist', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure' };
 // editable limits: setting -> [min, max]
 const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], loadHintMs: [100, 600000] };
 
+const RENDER_MIN_MS = 500; // the panel is re-rendered at most this often while stats keep changing
 let ui = null; // panel elements, cached by bindUi()
 const rendered = new WeakMap();
 
@@ -1722,18 +1833,19 @@ function bindUi() {
         toastr.info(t`Removed ${n} persistent cache entries.`);
         renderPanel();
     });
-    /** Runs fn (a measurement that freezes the page) after the toast had a moment to paint; not during a stream. */
+    /** Runs fn (a measurement) after the toast had a moment to paint; not during a stream, not twice at a time. */
     const measuring = async (fn) => {
         if (liveStream()) {
             toastr.warning(t`Wait until the generation finishes.`);
             return;
         }
+        if (measureBusy) return;
         toastr.info(t`Measuring...`);
         await new Promise(resolve => setTimeout(resolve, 20));
-        fn();
+        await fn();
     };
-    find('#rpk_measure').addEventListener('click', () => measuring(() => {
-        if (measureNow()) toastr.success(measureText(measured));
+    find('#rpk_measure').addEventListener('click', () => measuring(async () => {
+        if (await measureNow()) toastr.success(measureText(measured));
     }));
     ui.thead.addEventListener('click', (e) => {
         const col = e.target.closest('th')?.dataset.col;
@@ -1750,8 +1862,8 @@ function bindUi() {
         const r = ui.rows[e.target.closest('tr[data-i]')?.dataset.i];
         if (!r) return;
         if (e.target.closest('.rpk-measure-row')) {
-            measuring(() => {
-                const m = measureChat(r);
+            measuring(async () => {
+                const m = await measureChat(r);
                 if (m) rowMeasures.set(r, m);
                 renderPanel();
             });
@@ -1760,9 +1872,13 @@ function bindUi() {
         }
     });
 
-    // auto-refresh while the drawer is open
+    // auto-refresh: when the stats changed, on the next frame, at most every RENDER_MIN_MS, only while the drawer is open
     const content = find('.inline-drawer-content');
-    setInterval(() => { if (content.offsetParent !== null) renderPanel(); }, 2000);
+    setInterval(() => {
+        if (!statsDirty || content.offsetParent === null) return;
+        statsDirty = false;
+        requestAnimationFrame(renderPanel);
+    }, RENDER_MIN_MS);
 }
 
 function registerSlash() {
@@ -1783,7 +1899,7 @@ function registerSlash() {
             if (arg === 'off') return turnOffByName(rest);
             if (arg === 'measure') {
                 if (liveStream()) return t`Wait until the generation finishes.`;
-                return measureNow() ? measureText(measured) : t`Nothing to measure: the chat is empty.`;
+                return (await measureNow()) ? measureText(measured) : t`Nothing to measure: the chat is empty.`;
             }
             const text = buildReportText();
             if (arg !== 'text' && typeof callGenericPopup === 'function') {
@@ -1827,6 +1943,7 @@ for (const event of [event_types.CHARACTER_MESSAGE_RENDERED, event_types.USER_ME
 eventSource.on(event_types.CHAT_CHANGED, () => {
     markDirty();
     streamViews.clear();
+    forgetPersistAcct();
     chatLen = ctx().chat?.length ?? 0;
     const now = performance.now();
     const loadMs = now - lastCall < BURST_GAP_MS ? lastCall - burstStart : 0; // the render burst that just ended
@@ -1835,11 +1952,12 @@ eventSource.on(event_types.CHAT_CHANGED, () => {
         toastr.info(t`Rendering this chat took ${(loadMs / 1000).toFixed(1)} s. A lower "# Messages to Load" (User Settings) opens chats faster.`, 'Regex Perf Kit', { timeOut: 15000 });
     }
     if (settings.autoMeasure && !liveStream()) {
-        setTimeout(() => { // once the page has settled
-            if (!liveStream() && measureNow()) toastr.info(measureText(measured), 'Regex Perf Kit');
+        setTimeout(async () => { // once the page has settled
+            if (!liveStream() && await measureNow()) toastr.info(measureText(measured), 'Regex Perf Kit');
         }, 500);
     }
 });
+if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, forgetPersistAcct);
 eventSource.on(event_types.SETTINGS_UPDATED, markDirty);
 if (event_types.PRESET_CHANGED) eventSource.on(event_types.PRESET_CHANGED, markDirty);
 eventSource.on(event_types.APP_READY, () => {
