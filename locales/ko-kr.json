@@ -233,6 +233,7 @@
     "Messages over a frame (${0} ms) on their own: ${1} → ${2}.": "혼자서 한 프레임(${0} ms)을 넘긴 메시지: ${1}개 → ${2}개.",
     "The saving is under one frame for the whole chat: nothing a user can feel here. The extension costs nothing either; the profiler is what remains useful.": "채팅 전체에서 아낀 시간이 한 프레임 미만: 체감할 차이 없음. 확장의 비용도 없으므로 남는 용도는 프로파일러.",
     "The regex stage is not the cost in this chat: each message still takes over a frame to render with every feature on.": "이 채팅의 비용은 정규식 단계가 아님: 모든 기능을 켜도 메시지 하나를 그리는 데 한 프레임 초과.",
+    "The regex stage was under 2% of the render with the features off: ②③④⑥ have little to save here; what was saved came from ⑨.": "기능을 끈 렌더링에서 정규식 단계가 2% 미만: 여기서는 ②③④⑥이 아낄 것이 거의 없고, 아낀 시간은 ⑨에서 나온 것.",
     "What helps more: User Settings → \"# Messages to Load\" at 50–100 (fewer renders when a chat opens) and \"Streaming FPS\" at 10–15 (fewer renders while streaming).": "더 도움이 되는 것: User Settings → \"# Messages to Load\"를 50~100으로 (채팅을 열 때 그리는 횟수 감소), \"Streaming FPS\"를 10~15로 (스트리밍 중 그리는 횟수 감소).",
     "Where the time of a display render goes: the regex scripts (what this extension can save), SillyTavern's markdown conversion, and the HTML sanitizer. Timed since the stats were reset.": "표시 렌더링 시간이 어디에 쓰이는지: 정규식 스크립트(이 확장이 아낄 수 있는 부분), SillyTavern의 마크다운 변환, HTML 정화. 측정 초기화 이후 누적.",
     "Adaptive: time 1 run in 64 once regex is under 2% of the renders": "적응형: 정규식이 렌더링의 2% 미만이면 64회 중 1회만 측정",

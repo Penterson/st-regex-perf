@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.4 — 2026-11-07
+
+Why this release: an audit of 0.5.3 against the code, the READMEs and SillyTavern's pinned sources. One user-visible defect, one flaky test with a logic gap behind it, and small inconsistencies; each fixed, with a test where one fits.
+
+### Fixes
+
+- Turning "Show each script's cost in the Regex extension's list" off removes the chips at once. The refresh interval only called the chip code while the option was on, so the branch that removes them never ran from there; the chips stayed until SillyTavern rebuilt the list.
+- The measurement's verdict reads the stage split, not only the saved time. With the regex stage at 1–2% of a render, the "saving" between two renders is noise and could exceed a frame, and then neither "nothing can be felt" nor the settings hint appeared. When the regex stage was under 2% with the features off and no message crossed a frame either way, the verdict says so and gives the hint (the "① adaptive" scenario failed one run in three on a fast machine because of this).
+- ⑧'s breaker resets when the tripped script itself is edited, not when any script, preset or setting changes (every rebuild of the script info un-tripped every script).
+- ⑤ without IndexedDB: rows that can never be written no longer count as storage in the usage line.
+- "Clear saved results" while a chat's rows are still being read: the read no longer puts the deleted rows back into memory, and the estimate is re-measured when rows not yet read were deleted.
+- The paragraph cache's fallback warning from the sanitizer stage named "message #null" (the pass id was already cleared); the message id is kept with the cache entry.
+- `lastIndex` is left as a native replace leaves it (the match checks after the replace moved it; harmless with SillyTavern, which resets it).
+- ③ does not memoize a result in which group text and the replacement assembled macro syntax that SillyTavern then substituted (noticed through ⑥'s verification run; before, only ⑥ fell back).
+
+### Wording
+
+- READMEs: the one-time migration of the stutter option applies to settings saved before 0.5.3 (0.5.2 wrote no schema); how a tripped script runs again. Two stale comments (the narrow layout scrolls rather than hides columns; where getContext() is read).
+
+### Tests
+
+- The list-chip scenario toggles the option off and on; the verdict case feeds a negligible regex stage with a noisy saving (94 cases).
+
 ## 0.5.3 — 2026-11-07
 
 Why this release: the leftovers of the 0.5.2 audit, each small.

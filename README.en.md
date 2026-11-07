@@ -130,7 +130,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`); the 
 - **Limits** lets you change ③'s entry count, longest cached input and memory (MB), ⑤'s longest saved result and size for all chats (MB), the compromise interval, ⑦'s longest input, ⑧'s threshold and count, and ⑨'s entry count and memory (MB). The lint and the Regex list's cost chips are turned off here too.
 - "③ Key the cache by a hash of the input" (off by default) keeps a 64-bit hash instead of each input, about halving the memory; the cost is hashing every input, and two inputs of the same length and hash (once in billions with 64 bits) would share a result.
 - The line above Limits shows ③'s and ⑨'s usage and ⑤'s (messages stored for this chat; size of all chats against the limit).
-- Settings saved by a version before 0.5.2 get the stutter option turned off once; a choice made after that is kept.
+- Settings saved by a version before 0.5.3 (which introduced the settings schema) get the stutter option turned off once; a choice made after that is kept. Turning ⑧ off, Undo, or editing the tripped script lets it run again.
 - **Reset settings** turns every feature and limit back to its default. Whether the Limits, legend and tips sections are open is remembered.
 
 ## SillyTavern settings that help
