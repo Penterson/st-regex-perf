@@ -1775,6 +1775,7 @@ export async function adaptive(h) {
 
 /** ① what a user feels: the frame sampler runs during a generation only; long tasks are counted where supported. */
 export async function frameStats(h) {
+    applyProfile(h, { frameStats: true }); // off by default
     await useScripts(h, [script({ findRegex: '/a/g', replaceString: 'b', markdownOnly: true })]);
     const before = (await json(h)).felt;
     await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
@@ -1794,7 +1795,7 @@ export async function frameStats(h) {
  * display passes it held and the rest, so a stutter can be blamed on the pipeline or on what lies outside it.
  */
 export async function longTaskPipe(h) {
-    applyProfile(h, { htmlMemo: false, memo: false, persist: false });
+    applyProfile(h, { htmlMemo: false, memo: false, persist: false, frameStats: true });
     await useScripts(h, [script({ findRegex: '/\\bme\\b/g', replaceString: 'you', markdownOnly: true })]);
     const text = Array.from({ length: 60 }, (_, i) => `line ${i} about me and **them** and me again`).join('\n');
     h.st.setState({ chat: [msg(text)] });
@@ -1809,6 +1810,36 @@ export async function longTaskPipe(h) {
     await new Promise(r => setTimeout(r, 150));
     const felt = (await json(h)).felt;
     return { renders, felt, text: await report(h) };
+}
+
+/**
+ * ① the measurement's own long tasks: "Measure on this chat" renders a heavy chat in chunks, each chunk a long task; the
+ * observer reports them after the measurement finished, so they must be recognized by their start time and left out.
+ * A long task after the measurement still counts, and turning the option off clears the figures.
+ */
+export async function measureLongTasks(h) {
+    applyProfile(h, { frameStats: true, persist: false });
+    await useScripts(h, [script({ findRegex: '/\\bme\\b/g', replaceString: 'you', markdownOnly: true })]);
+    h.st.setConverter('para');
+    const text = Array.from({ length: 400 }, (_, i) => `line ${i} about **me** and *them* \`x\` and me again`).join('\n');
+    h.st.setState({ chat: Array.from({ length: 60 }, (_, i) => msg(text + i)) });
+    await h.eventSource.emit(h.event_types.CHAT_CHANGED, 'x');
+    await new Promise(r => setTimeout(r, 200));
+    const before = (await json(h)).felt;
+    const t0 = performance.now();
+    await h.commands.regexperf.callback({}, 'measure');
+    const measureMs = performance.now() - t0;
+    await new Promise(r => setTimeout(r, 300)); // the observer delivers what it has
+    const after = (await json(h)).felt;
+    const busyEnd = performance.now() + 120; // a long task of the page's own
+    while (performance.now() < busyEnd) { /* busy */ }
+    await new Promise(r => setTimeout(r, 300));
+    const later = (await json(h)).felt;
+    const box = document.getElementById('rpk_frameStats');
+    box.checked = false;
+    box.dispatchEvent(new Event('change'));
+    const offCleared = (await json(h)).felt.longTasks;
+    return { before, after, later, measureMs, offCleared };
 }
 
 /**

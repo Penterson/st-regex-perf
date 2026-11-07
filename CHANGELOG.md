@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.2 — 2026-11-07
+
+Why this release: an audit of 0.5.1 found that the stutter figures counted the extension's own measurement, and that the option behind them was named vaguely and on by default although its numbers change on their own.
+
+### Fixes
+
+- "Measure on this chat" no longer leaves its own long tasks in the stutter figures. The measurement renders the chat in chunks, each a long task; `PerformanceObserver` delivered them after `measureChat()` had restored the counters, so they were counted, and with the display passes restored too they were attributed entirely to "the rest" (SillyTavern, other extensions). Long tasks that overlap a measurement are left out now (`measureSpans`).
+- The ④ incremental state is kept per stream, as the 0.5.1 changelog said: one slot per pattern made the reasoning and the body of one message overwrite each other's prefix, so neither ran incrementally while both were rendered. A `Map` keyed by the stream now.
+- During a generation, messages other than the streamed one (scrolling up, an edit) are looked up in ⑨/⑤ and stored again; before, every display pass during a stream skipped the caches.
+- Turning the stutter option off clears its figures instead of leaving the last ones in the summary.
+- A `RegexProvider` without `clear()` no longer makes the module fail to load before the panel can warn.
+
+### Wording
+
+- The ① sub-option "Count what a user feels: late frames while streaming, long tasks" is "Measure stutter: late frames during a generation, tasks over 50 ms" (Korean: 끊김 측정), and is **off by default** (`frameStats: false`); its description says why. The summary line is "Stutter:" and names this extension's own storage and panel work among what "the rest" of a long task can be. "while streaming" is "during a generation" where the frame sampler counts (it runs during every generation, streamed or not). The JSON key stays `felt`.
+- READMEs: the ⑨ key lists the message placement, the Regex extension's switch and the name-display setting (0.5.1 additions); ⑤'s head start is described as it happens in `openCharacterChat` (the chat id changes after the view is emptied, so the first render after a switch is usually computed); the AFTER_MARKDOWN hook is "order 0", not unconditionally first; the benchmark table's warm row matches `tests/bench-baseline.json`; the Limits grid keeps ③'s hash-key row with the other ③ rows.
+
+### Tests
+
+- A scenario measures a heavy chat and checks that the stutter counters are unchanged afterwards, that a long task after the measurement still counts, and that turning the option off clears the figures (93 cases). The felt scenarios turn the option on. The fuzz harness's `RegexProvider` stub keeps `get()` on a prototype, so it no longer prints the "another extension" warning.
+
 ## 0.5.1 — 2026-11-07
 
 Why this release: an audit of 0.5.0 against SillyTavern's own source found that two of its features never ran in the real app (the showdown wrapper, and with it the paragraph cache; ⑤'s rows read after the first render) and that a measurement could stop a message from rendering. Every finding of that audit is fixed here, with a regression test for each.
