@@ -1591,6 +1591,7 @@ function wrapSanitize() {
             const tk = passTk ?? passT0;
             const t1 = passT1 ?? t2;
             pipe.passes++;
+            notePass(passT0, t4);
             if (passHtmlHit) { // a ⑨ hit: the stage times are of a full pass only
                 pipe.htmlHits++;
                 pipe.htmlHitMs += t4 - passT0;
@@ -1634,8 +1635,30 @@ function wrapShowdown() {
 // freeze the page (PerformanceObserver 'longtask', Chromium). Counted since the stats were reset; the frame sampler
 // runs only during a generation, so idle pages pay nothing.
 const FRAME_BUDGET_MS = 1000 / 60;
-const feel = { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0 };
-const resetFeel = () => { Object.assign(feel, { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0 }); };
+const feel = { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0, longTaskPipeMs: 0, lastLongTask: null };
+const resetFeel = () => { Object.assign(feel, { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0, longTaskPipeMs: 0, lastLongTask: null }); };
+// The display passes of the last few seconds, as [start, end] on the performance clock, so a long task can be split
+// into "the render pipeline" (what this extension can see and partly save) and "the rest" (SillyTavern's DOM work,
+// layout, other extensions): a stutter whose task holds little pipeline time is not this extension's to fix.
+const recentPasses = [];
+const RECENT_PASSES_MS = 10000;
+function notePass(start, end) {
+    recentPasses.push(start, end);
+    if (recentPasses.length > 1024 || (recentPasses.length && end - recentPasses[0] > RECENT_PASSES_MS)) {
+        let i = 0;
+        while (i < recentPasses.length && end - recentPasses[i + 1] > RECENT_PASSES_MS) i += 2;
+        recentPasses.splice(0, i);
+    }
+}
+/** Display-pass time that fell inside [start, end]. */
+function passMsWithin(start, end) {
+    let ms = 0;
+    for (let i = 0; i < recentPasses.length; i += 2) {
+        const s = recentPasses[i], e = recentPasses[i + 1];
+        if (s >= start && e <= end) ms += e - s;
+    }
+    return ms;
+}
 let frameRaf = 0;
 let frameLast = 0;
 function frameTick() {
@@ -1670,6 +1693,9 @@ function observeLongTasks() {
                 feel.longTaskMs += e.duration;
                 if (e.duration >= 100) feel.longTasks100++;
                 if (generating) feel.streamLongTasks++;
+                const pipeMs = passMsWithin(e.startTime, e.startTime + e.duration);
+                feel.longTaskPipeMs += pipeMs;
+                feel.lastLongTask = { ms: e.duration, pipeMs, streaming: generating };
             }
             statsDirty = true;
         });
@@ -2054,6 +2080,7 @@ function feelText(f) {
     const parts = [];
     if (f.frames) parts.push(t`frames late while streaming: ${f.dropped} of ${f.frames} (${f.frozen} freezes over 100 ms)`);
     if (f.longTasks) parts.push(t`tasks over 50 ms: ${f.longTasks} (${f.longTasks100} over 100 ms, ${fmtMs(f.longTaskMs)} ms blocked, ${f.streamLongTasks} while streaming)`);
+    if (f.longTasks && f.lastLongTask) parts.push(t`display renders inside those tasks: ${fmtMs(f.longTaskPipeMs)} ms of ${fmtMs(f.longTaskMs)} ms; the latest task: ${fmtMs(f.lastLongTask.pipeMs)} ms of ${fmtMs(f.lastLongTask.ms)} ms (the rest is SillyTavern's DOM work, layout and other extensions)`);
     return parts.join('; ');
 }
 

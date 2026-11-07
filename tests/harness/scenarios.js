@@ -1651,3 +1651,25 @@ export async function frameStats(h) {
     const after = (await json(h)).felt;
     return { before, during, after, text: await report(h) };
 }
+
+/**
+ * ① the pipeline share of a long task: a task that renders a message many times and then spins is split into the
+ * display passes it held and the rest, so a stutter can be blamed on the pipeline or on what lies outside it.
+ */
+export async function longTaskPipe(h) {
+    applyProfile(h, { htmlMemo: false, memo: false });
+    await useScripts(h, [script({ findRegex: '/\\bme\\b/g', replaceString: 'you', markdownOnly: true })]);
+    const text = Array.from({ length: 60 }, (_, i) => `line ${i} about me and **them** and me again`).join('\n');
+    h.st.setState({ chat: [msg(text)] });
+    h.st.setConverter('para');
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    const t0 = performance.now();
+    let renders = 0;
+    while (performance.now() - t0 < 60) { h.st.messageFormatting(text, 'Char', false, false, 0); renders++; } // renders inside the task
+    while (performance.now() - t0 < 130) { /* the rest of the task: not the pipeline */ }
+    await new Promise(r => setTimeout(r, 60));
+    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    await new Promise(r => setTimeout(r, 150));
+    const felt = (await json(h)).felt;
+    return { renders, felt, text: await report(h) };
+}

@@ -223,6 +223,7 @@
     "⑨ HTML cache: ${0} renders reused, about ${1} ms saved": "⑨ HTML 캐시: 렌더링 ${0}회 재사용, 약 ${1} ms 절약",
     "frames late while streaming: ${0} of ${1} (${2} freezes over 100 ms)": "스트리밍 중 늦은 프레임 ${1}개 중 ${0}개 (100 ms 넘는 멈춤 ${2}회)",
     "tasks over 50 ms: ${0} (${1} over 100 ms, ${2} ms blocked, ${3} while streaming)": "50 ms 넘는 작업 ${0}회 (100 ms 초과 ${1}회, 멈춘 시간 ${2} ms, 스트리밍 중 ${3}회)",
+    "display renders inside those tasks: ${0} ms of ${1} ms; the latest task: ${2} ms of ${3} ms (the rest is SillyTavern's DOM work, layout and other extensions)": "그 작업 안의 표시 렌더링: ${1} ms 중 ${0} ms. 최근 작업: ${3} ms 중 ${2} ms (나머지는 SillyTavern의 화면 처리, 레이아웃, 다른 확장)",
     "The regex stage is under 2% of the renders: the profiler times 1 run in 64 (adaptive).": "정규식 단계가 렌더링의 2% 미만: 프로파일러는 64회 중 1회만 측정 (적응형).",
     "Felt: ${0}": "체감: ${0}",
     "Opening this chat rendered for ${0} ms": "이 채팅을 열 때 렌더링에 ${0} ms",

@@ -938,3 +938,14 @@ test('① felt: the frame sampler counts frames during a generation only; long t
     if (r.after.longTasks) assert.ok(r.after.streamLongTasks >= 1, JSON.stringify(r.after));
     assert.match(r.text, /^Felt: frames late while streaming: \d+ of \d+/m);
 });
+
+test('① felt: a long task is split into the display passes it held and the rest', async ({ each }) => {
+    const r = (await each('longTaskPipe', null, { variants: ['current'] })).current;
+    assert.ok(r.renders >= 5, `renders inside the task: ${r.renders}`);
+    if (!r.felt.longTasks) return; // the browser did not report long tasks: nothing to split
+    const last = r.felt.lastLongTask;
+    assert.ok(last && last.ms >= 100, JSON.stringify(r.felt));
+    assert.ok(last.pipeMs >= 30 && last.pipeMs <= 75, `about 60 ms of renders inside the ${last.ms} ms task: ${JSON.stringify(last)}`);
+    assert.ok(r.felt.longTaskPipeMs <= r.felt.longTaskMs, JSON.stringify(r.felt));
+    assert.match(r.text, /display renders inside those tasks: [\d.]+ ms of [\d.]+ ms; the latest task: [\d.]+ ms of [\d.]+ ms/);
+});

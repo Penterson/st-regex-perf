@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Measurements
+
+- Each long task (over 50 ms) is split into the display passes it held and the rest. The summary, the text report and the JSON (`felt.longTaskPipeMs`, `felt.lastLongTask`) give "display renders inside those tasks: X ms of Y ms" and the latest task's split, so a stutter can be blamed on the render pipeline (what this extension sees and partly saves) or on SillyTavern's DOM work, layout and other extensions. The passes of the last 10 s are kept as timestamps for this.
+
 ### Fixes
 
 - The settings panel and Limits list the features in order, ① to ⑨ (⑨ sat between ⑥ and ⑦).
