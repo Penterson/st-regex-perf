@@ -36,8 +36,10 @@ jobs:
         run: npm run test:browser
         env:
           CHROME_PATH: /usr/bin/google-chrome
-      - name: Benchmark gate (warm display render vs tests/bench-baseline.json)
+      - name: Benchmark gate (warm display render vs the previous commit and no extension)
         if: matrix.st == 'staging'
         run: npm run bench -- --gate
         env:
           CHROME_PATH: /usr/bin/google-chrome
+          # the reference: the commit before this push, or the pull request's base (HEAD~1 when neither is known)
+          BASELINE_COMMIT: ${{ github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before) || '' }}

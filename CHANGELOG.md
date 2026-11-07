@@ -21,7 +21,7 @@
 ### Tests
 
 - Scenarios for each fix: a chat printed before its CHAT_CHANGED (rows, first and next render, the head start), fused and tripped passes against ⑨ and ⑤, reset then measure then a spike, the streaming skip's scope and an error-ended stream, the converter instance (and a remade one), a renamed group member, the Limits tooltips (92 cases). The stand-in converter has showdown's shape, `script.js` exports `converter`, `reloadMarkdownProcessor()` and `updateMessageBlock()`, the macro engine knows `{{persona}}` and `{{group}}`, the page has a `#chat`.
-- Two assertions that compared an array with itself are gone; the long-task split test says when the browser gave it nothing to check; the allowed-keys list no longer names `persistMaxMB`. A test filter that matches nothing fails the run. The bench baseline marks a dirty tree and the gate notes a SillyTavern ref other than the baseline's. CI jobs time out after 30 minutes.
+- Two assertions that compared an array with itself are gone; the long-task split test says when the browser gave it nothing to check; the allowed-keys list no longer names `persistMaxMB`. A test filter that matches nothing fails the run. The benchmark gate compares the working tree with the previous commit (the commit before the push, a pull request's base, `HEAD~1` locally) measured in the same run on the same machine, interleaved, within 10%, and with no extension within 2%; the ratio stored in `tests/bench-baseline.json` is printed for comparison only, since the same code measures 0.48 of no extension on a desktop and 0.53 on the GitHub runner (the stored 0.478 made the first CI run of these fixes fail at 0.51). The baseline file marks a dirty tree. CI jobs time out after 30 minutes.
 
 ### Code
 
