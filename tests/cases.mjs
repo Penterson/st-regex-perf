@@ -435,7 +435,7 @@ test('reset settings restores the defaults; open sections are remembered across 
     assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistDbMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, fastPathStatic: true, htmlMemo: true, htmlMemoMaxEntries: 2000, htmlMemoMaxMB: 32, streamingIncremental: true, streamingParagraphCache: true, adaptive: true, frameStats: false, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: true, persistMaxLen: 60000, persistDbMaxMB: 64, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
+    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, fastPathStatic: true, htmlMemo: true, htmlMemoMaxEntries: 2000, htmlMemoMaxMB: 32, streamingIncremental: true, streamingParagraphCache: true, adaptive: true, frameStats: false, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: true, persistMaxLen: 60000, persistDbMaxMB: 64, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true, schema: 1 }, 'defaultSettings');
     assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistDbMaxMB: '64' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
@@ -567,7 +567,7 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistDbMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges', 'fastPathStatic', 'htmlMemo', 'htmlMemoMaxEntries', 'htmlMemoMaxMB', 'streamingIncremental', 'adaptive', 'frameStats', 'streamingParagraphCache'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistDbMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges', 'fastPathStatic', 'htmlMemo', 'htmlMemoMaxEntries', 'htmlMemoMaxMB', 'streamingIncremental', 'adaptive', 'frameStats', 'streamingParagraphCache', 'schema'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         // ⑤ is on by default since it stores in IndexedDB instead of the chat file (0.5.0)
         for (const [k, v] of Object.entries(r.baseline.initial)) if (k !== 'persist') assert.equal(r.current.initial[k], v, `default ${k}`);
@@ -996,6 +996,23 @@ test('① felt: the frame sampler counts frames during a generation only; long t
     assert.equal(r.after.frames, r.during.frames, 'the sampler stopped with the generation');
     if (r.after.longTasks) assert.ok(r.after.streamLongTasks >= 1, JSON.stringify(r.after));
     assert.match(r.text, /^Stutter: frames late during a generation: \d+ of \d+/m);
+});
+
+test('settings saved by a version before 0.5.2 get the stutter option turned off once; a later choice is kept', async ({ open }) => {
+    const read = async (settings) => {
+        const p = await open('current', { settings });
+        try {
+            return await p.page.evaluate(() => ({ ...window.__h.extension_settings.regex_perf_kit }));
+        } finally { await p.close(); }
+    };
+    const old = await read({ profiler: true, frameStats: true, memoMaxMB: 64 }); // 0.5.1 and before: no schema
+    assert.equal(old.frameStats, false, 'migrated once');
+    assert.equal(old.schema, 1);
+    assert.equal(old.memoMaxMB, 64, 'other settings kept');
+    const chosen = await read({ frameStats: true, schema: 1 }); // turned on again under 0.5.2
+    assert.equal(chosen.frameStats, true, 'a choice made with the schema stays');
+    const fresh = await read({});
+    assert.equal(fresh.frameStats, false, 'a fresh install: the default');
 });
 
 test('① stutter: "Measure on this chat" leaves no long tasks of its own in the counters', async ({ each }) => {

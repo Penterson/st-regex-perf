@@ -1821,8 +1821,8 @@ export async function measureLongTasks(h) {
     applyProfile(h, { frameStats: true, persist: false });
     await useScripts(h, [script({ findRegex: '/\\bme\\b/g', replaceString: 'you', markdownOnly: true })]);
     h.st.setConverter('para');
-    const text = Array.from({ length: 400 }, (_, i) => `line ${i} about **me** and *them* \`x\` and me again`).join('\n');
-    h.st.setState({ chat: Array.from({ length: 60 }, (_, i) => msg(text + i)) });
+    const text = Array.from({ length: 600 }, (_, i) => `line ${i} about **me** and *them* \`x\` and me again`).join('\n');
+    h.st.setState({ chat: Array.from({ length: 100 }, (_, i) => msg(text + i)) }); // heavy enough for every chunk of 10 to be a long task on a fast runner too
     await h.eventSource.emit(h.event_types.CHAT_CHANGED, 'x');
     await new Promise(r => setTimeout(r, 200));
     const before = (await json(h)).felt;

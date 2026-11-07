@@ -65,10 +65,14 @@ const defaultSettings = {
     breakerCount: 3,
     lint: true, // checks on the scripts (missing g, group references, double escapes, browser support, duplicates), shown only
     listBadges: true, // a cost chip after each script's name in the Regex extension's own list
+    schema: 1, // the settings' shape: 1 since 0.5.2 (frameStats off by default). Settings saved without it are migrated once below.
 };
 
 // ST keeps this object for the whole session, so it is resolved once instead of on every replace.
 const settings = (extensionSettings.regex_perf_kit ||= {});
+// 0.5.2 turned the stutter option off by default: settings an older version saved (no schema yet) follow once; a user
+// who turns it on afterwards keeps it, since the schema is stored with it.
+if (Object.keys(settings).length && !Object.hasOwn(settings, 'schema')) settings.frameStats = false;
 for (const [key, value] of Object.entries(defaultSettings)) {
     if (!Object.hasOwn(settings, key)) settings[key] = value;
 }
@@ -1186,6 +1190,7 @@ function trimMemo() {
         const old = memoLru.values().next().value;
         memoLru.delete(old);
         old.bucket.delete(old.key);
+        if (!old.bucket.size) memo.delete(old.prefix); // a volatile find pattern compiles to a new bucket on every run: empty ones do not pile up
         memoBytes -= old.size;
     }
 }
@@ -1419,7 +1424,7 @@ class PerfRegExp extends RegExp {
             const same = out === str;
             const size = (memoKey.length + (same ? 0 : out.length)) * 2;
             if (size <= cfg.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
-                const entry = { bucket, key: memoKey, out: same ? null : out, same, size };
+                const entry = { bucket, prefix: memoPrefix, key: memoKey, out: same ? null : out, same, size };
                 bucket.set(memoKey, entry);
                 memoLru.add(entry);
                 memoBytes += size;
@@ -1680,6 +1685,7 @@ const resetFeel = () => { Object.assign(feel, FEEL_ZERO); };
 // layout, other extensions): a stutter whose task holds little pipeline time is not this extension's to fix.
 const recentPasses = [];
 const RECENT_PASSES_MS = 10000;
+const RECENT_PASSES_MAX = 1024; // pairs × 2: a bound in entries as well as in time
 // The burst of display passes that ends at CHAT_CHANGED is the chat's first render (see BURST_GAP_MS): counted from
 // every closed pass, ⑨/⑤ hits included, so a cached chat's opening is measured too.
 let passBurstStart = 0;
@@ -1688,9 +1694,10 @@ function notePass(start, end) {
     if (start - passLastEnd > BURST_GAP_MS) passBurstStart = start;
     passLastEnd = end;
     recentPasses.push(start, end);
-    if (recentPasses.length > 1024 || (recentPasses.length && end - recentPasses[0] > RECENT_PASSES_MS)) {
+    if (recentPasses.length > RECENT_PASSES_MAX || (recentPasses.length && end - recentPasses[0] > RECENT_PASSES_MS)) {
         let i = 0;
         while (i < recentPasses.length && end - recentPasses[i + 1] > RECENT_PASSES_MS) i += 2;
+        if (recentPasses.length - i > RECENT_PASSES_MAX) i = recentPasses.length - RECENT_PASSES_MAX; // thousands of passes in one burst: the oldest go anyway
         recentPasses.splice(0, i);
     }
 }
@@ -3453,7 +3460,10 @@ eventSource.on(event_types.CHAT_CHANGED, () => {
         }, 500);
     }
 });
-globalThis.addEventListener?.('pagehide', () => { if (persistPending.size) flushPersisted(); }); // ⑤ the last renders before the tab closes
+// ⑤ the last renders before the tab closes or goes to the background: best effort, a transaction started here usually
+// completes, but a tab killed at once can lose the rows of the last 200 ms
+globalThis.addEventListener?.('pagehide', () => { if (persistPending.size) flushPersisted(); });
+globalThis.document?.addEventListener?.('visibilitychange', () => { if (document.visibilityState === 'hidden' && persistPending.size) flushPersisted(); });
 eventSource.on(event_types.SETTINGS_UPDATED, markDirty);
 if (event_types.PRESET_CHANGED) eventSource.on(event_types.PRESET_CHANGED, markDirty);
 eventSource.on(event_types.APP_READY, () => {
