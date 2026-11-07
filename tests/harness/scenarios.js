@@ -1471,8 +1471,17 @@ export async function listBadges(h) {
     render(); // SillyTavern re-renders the list: the chip must come back
     await sleep(150);
     const chip2 = list.querySelector('.rpk-chip')?.textContent ?? null;
+    const toggle = async (on) => { // the Limits checkbox, as a user clicks it: off removes the chips at once, on draws them again
+        const box = panel().querySelector('#rpk_listBadges');
+        box.checked = on;
+        box.dispatchEvent(new Event('change'));
+        await sleep(20);
+        return list.querySelector('.rpk-chip')?.textContent ?? null;
+    };
+    const chipOff = await toggle(false);
+    const chipOn = await toggle(true);
     list.innerHTML = '';
-    return { chip1, chip2 };
+    return { chip1, chip2, chipOff, chipOn };
 }
 
 /** tests/screenshots.mjs: a realistic session in the panel (the corpus chat, a measurement, a per-row stopwatch). */

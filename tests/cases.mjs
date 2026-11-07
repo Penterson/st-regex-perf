@@ -833,6 +833,8 @@ test('feature list 2.1: a cost chip after each script in the Regex extension\'s 
     const r = (await each('listBadges', null, { variants: ['current'] })).current;
     assert.match(r.chip1 ?? '', /^[\d.]+ ms · \d+%$/, `chip ${r.chip1}`);
     assert.equal(r.chip2, r.chip1);
+    assert.equal(r.chipOff, null, 'turning the option off removes the chips at once');
+    assert.equal(r.chipOn, r.chip1, 'turning it on again brings them back');
 });
 
 test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with a note', async ({ each }) => {
@@ -982,10 +984,13 @@ test('① verdict: an unfelt saving comes with the SillyTavern settings hint, wh
         unfeltBigShare: { off: 10, on: 6, messages: 10, over16: { off: 0, on: 0 }, stages },
         // a felt saving on short messages: no hint, the extension is what helps
         felt: { off: 200, on: 100, messages: 20, over16: { off: 3, on: 0 }, stages },
+        // a negligible regex stage with a "saving" over a frame that is only noise between two renders: the stage split decides
+        negligibleNoise: { off: 230, on: 205, messages: 70, over16: { off: 0, on: 0 }, stages: { off: { regex: 2, markdown: 226, sanitize: 1, hook: 1 } } },
     }, { variants: ['current'] })).current;
     const hint = v => v.some(l => /What helps more: User Settings/.test(l));
     assert.ok(r.unfeltBigShare.some(l => /nothing a user can feel/.test(l)) && hint(r.unfeltBigShare), JSON.stringify(r.unfeltBigShare));
     assert.ok(!r.felt.some(l => /nothing a user can feel/.test(l)) && !hint(r.felt), JSON.stringify(r.felt));
+    assert.ok(r.negligibleNoise.some(l => /under 2% of the render with the features off/.test(l)) && hint(r.negligibleNoise), JSON.stringify(r.negligibleNoise));
 });
 
 test('① felt: the frame sampler counts frames during a generation only; long tasks where the browser reports them', async ({ each }) => {
@@ -998,18 +1003,18 @@ test('① felt: the frame sampler counts frames during a generation only; long t
     assert.match(r.text, /^Stutter: frames late during a generation: \d+ of \d+/m);
 });
 
-test('settings saved by a version before 0.5.2 get the stutter option turned off once; a later choice is kept', async ({ open }) => {
+test('settings saved by a version before 0.5.3 (no schema) get the stutter option turned off once; a later choice is kept', async ({ open }) => {
     const read = async (settings) => {
         const p = await open('current', { settings });
         try {
             return await p.page.evaluate(() => ({ ...window.__h.extension_settings.regex_perf_kit }));
         } finally { await p.close(); }
     };
-    const old = await read({ profiler: true, frameStats: true, memoMaxMB: 64 }); // 0.5.1 and before: no schema
+    const old = await read({ profiler: true, frameStats: true, memoMaxMB: 64 }); // 0.5.2 and before: no schema
     assert.equal(old.frameStats, false, 'migrated once');
     assert.equal(old.schema, 1);
     assert.equal(old.memoMaxMB, 64, 'other settings kept');
-    const chosen = await read({ frameStats: true, schema: 1 }); // turned on again under 0.5.2
+    const chosen = await read({ frameStats: true, schema: 1 }); // turned on again under 0.5.3 or later (0.5.2 wrote no schema: its choice is migrated like older ones)
     assert.equal(chosen.frameStats, true, 'a choice made with the schema stays');
     const fresh = await read({});
     assert.equal(fresh.frameStats, false, 'a fresh install: the default');

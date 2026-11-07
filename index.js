@@ -108,7 +108,8 @@ const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ESCAPES[c]);
 
 // Set from GENERATION_STARTED until GENERATION_ENDED / GENERATION_STOPPED, so the exact check (which builds the
-// whole getContext() object) only runs while a generation can be streaming. Without those events: always check.
+// whole getContext() object) only runs while a generation can be streaming: it would run per display script
+// otherwise, where the hooks read getContext() a few times per message. Without those events: always check.
 let generating = !(event_types.GENERATION_STARTED && event_types.GENERATION_ENDED && event_types.GENERATION_STOPPED);
 
 /** The streaming processor while a stream is live, else null. */
@@ -1216,6 +1217,7 @@ function getStat(key, re) {
             tripped: false, // ⑧ turned off for the session
             tripId: ++tripSeq, // for the Undo controls
             ids: [], // scripts with this pattern
+            replaceSig: undefined, // the replacement the stat was last linked to, to notice an edit of this script (⑧)
         };
         stats.set(key, st);
     }
@@ -1348,7 +1350,10 @@ class PerfRegExp extends RegExp {
                     if (postHoc && !macroSeen && MACRO.test(arguments[0])) macroSeen = true;
                     if (fastAlive) {
                         const mine = fast.template !== null ? expandTemplate(fast.template, arguments) : fast.replacer.apply(this, arguments);
-                        if (MACRO.test(mine)) return r; // the fast path would have fallen back here: nothing to compare
+                        if (MACRO.test(mine)) { // the fast path would have fallen back here: nothing to compare
+                            macroSeen = true; // and SillyTavern substituted the assembled macro: not memoizable either
+                            return r;
+                        }
                         checked = true;
                         if (mine !== r) {
                             fastAlive = false;
@@ -1364,6 +1369,7 @@ class PerfRegExp extends RegExp {
             out = RegExp.prototype[Symbol.replace].call(native, incIn, fn);
             if (checked && fastAlive) fast.verify--;
         }
+        const lastIndex = native.lastIndex; // what a native replace leaves (0 with g, the match end with y): the checks below move it
         if (inc) {
             const tail = out;
             out = inc.out + tail;
@@ -1417,7 +1423,7 @@ class PerfRegExp extends RegExp {
             if (out !== str || native.test(incIn)) passVolatile = true;
             native.lastIndex = 0;
         }
-        this.lastIndex = native.lastIndex; // leave this regex as a native replace would
+        this.lastIndex = native.lastIndex = lastIndex; // leave this regex as a native replace would
 
         if (bucket && !macroSeen) {
             // an unchanged output is kept as a marker: V8 shares the string anyway, and counting it twice evicts early
@@ -1515,8 +1521,9 @@ function patchProvider() {
             for (const id of stat.ids) statById.set(id, stat);
             stat.needle = info?.needle ?? needleOf(base);
             stat.redos = info?.redos ?? redosOf(base);
-            stat.tripped = false; // ⑧ an edit resets the breaker
-            stat.slowRuns = 0;
+            const replaceSig = info?.replaceSig ?? null;
+            if (stat.tripped && stat.replaceSig !== undefined && stat.replaceSig !== replaceSig) untrip(stat); // ⑧ an edit of this script resets its breaker (a changed pattern is another stat anyway); other scripts' edits do not
+            stat.replaceSig = replaceSig;
             w._meta = {
                 stat,
                 re: base,
@@ -1815,7 +1822,7 @@ function pipeVersion() {
 // and DOMPurify run on the paragraph being written. showdown converts the two parts as it would the whole, joined by a
 // line break. A message's first split renders are compared with whole ones; on any difference it goes back to whole
 // renders (the self-check ⑥ and ④ incremental use too). Dropped when the generation ends.
-const paraViews = new Map(); // stream key -> {sep, tailStart, head, html, pre, san, checks, sanChecks, off}
+const paraViews = new Map(); // stream key -> {messageId, sep, tailStart, head, html, pre, san, checks, sanChecks, off}
 const PARA_MARK = '\uE000'; // put between the two HTML parts by makeHtml, taken out again by our AFTER_MARKDOWN hook (the first)
 const PARA_VERIFY = 3;
 let streamKey = null; // the ④ compromise key of the message this pass formats (null outside a compromise pass)
@@ -1889,7 +1896,7 @@ function paragraphPass(conv, orig, text) {
     }
     if (!cut || cut.tailStart >= text.length) return null;
     if (!view) {
-        view = { sep: '', tailStart: 0, head: null, html: null, pre: null, san: null, checks: PARA_VERIFY, sanChecks: PARA_VERIFY, off: false };
+        view = { messageId: passMessageId, sep: '', tailStart: 0, head: null, html: null, pre: null, san: null, checks: PARA_VERIFY, sanChecks: PARA_VERIFY, off: false };
         paraViews.set(streamKey, view);
     }
     const head = text.slice(0, cut.headEnd);
@@ -1935,7 +1942,7 @@ function paragraphSanitize(purify, orig, view, dirty, config) {
 function paraOff(view, stage, whole, got) {
     view.off = true;
     pipe.paraFallbacks++;
-    console.warn(`[RegexPerf] ④ paragraph cache: the split ${stage} differed from the whole one for message #${passMessageId}: whole renders for this message`, { expected: whole.slice(-200), got: got.slice(-200) });
+    console.warn(`[RegexPerf] ④ paragraph cache: the split ${stage} differed from the whole one for message #${view.messageId}: whole renders for this message`, { expected: whole.slice(-200), got: got.slice(-200) });
     return whole;
 }
 
@@ -2316,6 +2323,7 @@ let persistFlushTimer = 0;
 let persistInFlight = 0; // rows of the flush that is running (the JSON's `pending` counts them, so a test can wait for the write)
 let persistLoaded = true; // this chat's rows have been read (or there is nothing to read)
 let persistLastAt = 0; // `at` is strictly increasing, so rows stored in the same millisecond still age in order
+let persistLoadGen = 0; // bumped by every read and by "Clear saved results", so a read that a clear overtook puts nothing back
 
 const idbDone = (req) => new Promise((ok, no) => { req.onsuccess = () => ok(req.result); req.onerror = () => no(req.error); });
 /** Walks a key cursor request; each(cursor) returning false stops the walk. */
@@ -2399,13 +2407,15 @@ function loadPersisted() {
     persistAcct.entries = persistAcct.bytes = 0;
     persistLoaded = chatKey === null;
     if (chatKey === null) return;
+    const gen = ++persistLoadGen;
+    const stale = () => persistChatKey !== chatKey || gen !== persistLoadGen; // another chat opened, or the rows were cleared meanwhile
     (async () => {
         const db = await openPersistDb();
-        if (persistChatKey !== chatKey) return; // another chat opened meanwhile
+        if (stale()) return;
         if (db) {
             try {
                 const rows = await idbDone(db.transaction(DB_STORE).objectStore(DB_STORE).index('chat').getAll(chatKey));
-                if (persistChatKey !== chatKey) return;
+                if (stale()) return;
                 for (const row of rows) {
                     if (persistMem.has(row.id)) { // stored again while the read ran: the new row replaced this one in the database too
                         persistDbBytes -= row.n;
@@ -2442,14 +2452,18 @@ function storePersisted(id, fields) {
     if (old) {
         persistAcct.entries--;
         persistAcct.bytes -= old.n;
-        persistDbBytes -= old.n;
-        persistDbRows--;
     }
     persistMem.set(id, row);
     persistAcct.entries++;
     persistAcct.bytes += row.n;
-    persistDbBytes += row.n;
-    persistDbRows++;
+    if (!persistDbFailed) { // without IndexedDB the row stays in memory for the session and is never stored: not storage
+        if (old) {
+            persistDbBytes -= old.n;
+            persistDbRows--;
+        }
+        persistDbBytes += row.n;
+        persistDbRows++;
+    }
     persistPending.set(id, row);
     if (!persistFlushTimer) persistFlushTimer = setTimeout(flushPersisted, FLUSH_MS);
 }
@@ -2458,8 +2472,13 @@ function storePersisted(id, fields) {
 async function flushPersisted() {
     persistFlushTimer = 0;
     const db = await openPersistDb();
-    if (!db) {
+    if (!db) { // the rows were counted as storage before the open failed: they will never be written
+        for (const row of persistPending.values()) {
+            persistDbBytes -= row.n;
+            persistDbRows--;
+        }
         persistPending.clear();
+        statsDirty = true;
         return;
     }
     const rows = [...persistPending.values()];
@@ -2507,9 +2526,14 @@ async function evictPersisted(db) {
 async function clearPersistedDb() {
     const chatKey = persistChatKey;
     const removed = persistMem.size;
+    const wasLoaded = persistLoaded;
+    persistLoadGen++; // a read still running puts nothing back
+    persistLoaded = true;
     for (const [id, row] of persistPending) if (row.chat === chatKey) persistPending.delete(id); // another chat's last rows may still be pending
-    persistDbBytes -= persistAcct.bytes;
-    persistDbRows -= persistMem.size;
+    if (!persistDbFailed) {
+        persistDbBytes -= persistAcct.bytes;
+        persistDbRows -= persistMem.size;
+    }
     persistMem.clear();
     persistAcct.entries = persistAcct.bytes = 0;
     if (chatKey === null) return removed;
@@ -2520,6 +2544,7 @@ async function clearPersistedDb() {
         const store = tx.objectStore(DB_STORE);
         await eachKey(store.index('chat').openKeyCursor(IDBKeyRange.only(chatKey)), (cur) => { store.delete(cur.primaryKey); });
         await txDone(tx);
+        if (!wasLoaded) await measurePersistDb(db); // rows not read yet were deleted too: the estimate is re-measured
     } catch (e) { console.warn('[RegexPerf] ⑤ could not clear the stored results', e); }
     statsDirty = true;
     return removed;
@@ -2867,20 +2892,30 @@ export function measureVerdict(m) {
     const share = m.off > 0 ? savedMs / m.off : 0;
     const perMsg = m.messages ? m.on / m.messages : 0;
     const lines = [];
+    let regexShare = null; // the regex stage's share of the render with the features off (what ②③④⑥ can save at most)
     if (m.stages) {
         const s = m.stages.off;
         const total = s.regex + s.markdown + s.sanitize + s.hook;
-        if (total > 0) lines.push(t`Of the render with the features off, the regex stage was ${Math.round(s.regex / total * 100)}%, markdown ${Math.round(s.markdown / total * 100)}%, sanitizing ${Math.round(s.sanitize / total * 100)}%.`);
+        if (total > 0) {
+            regexShare = s.regex / total;
+            lines.push(t`Of the render with the features off, the regex stage was ${Math.round(s.regex / total * 100)}%, markdown ${Math.round(s.markdown / total * 100)}%, sanitizing ${Math.round(s.sanitize / total * 100)}%.`);
+        }
     }
     if (m.over16) lines.push(t`Messages over a frame (${Math.round(FRAME_BUDGET_MS)} ms) on their own: ${m.over16.off} → ${m.over16.on}.`);
-    const unfelt = savedMs < FRAME_BUDGET_MS && m.over16?.on === m.over16?.off;
+    const sameOver16 = m.over16?.on === m.over16?.off;
+    const unfelt = savedMs < FRAME_BUDGET_MS && sameOver16;
+    // The saved time of two renders a few ms apart is noise; the stage split is not: when the regex stage was a
+    // negligible share and no message crossed a frame either way, the saving (if any) came from ⑨, not from regex.
+    const negligible = regexShare !== null && regexShare < ADAPTIVE_SHARE && sameOver16;
     if (unfelt) {
         lines.push(t`The saving is under one frame for the whole chat: nothing a user can feel here. The extension costs nothing either; the profiler is what remains useful.`);
     } else if (share < 0.1 && perMsg > FRAME_BUDGET_MS) {
         lines.push(t`The regex stage is not the cost in this chat: each message still takes over a frame to render with every feature on.`);
+    } else if (negligible) {
+        lines.push(t`The regex stage was under 2% of the render with the features off: ②③④⑥ have little to save here; what was saved came from ⑨.`);
     }
     // With an unfelt saving the share is noise on a fast machine (a few ms either way), so the settings hint goes with it.
-    if (unfelt || perMsg > FRAME_BUDGET_MS || share < 0.1) {
+    if (unfelt || negligible || perMsg > FRAME_BUDGET_MS || share < 0.1) {
         lines.push(t`What helps more: User Settings → "# Messages to Load" at 50–100 (fewer renders when a chat opens) and "Streaming FPS" at 10–15 (fewer renders while streaming).`);
     }
     return lines;
@@ -2939,7 +2974,7 @@ let sortBy = null;
 let sortDesc = true;
 let nameFilter = '';
 
-// Table cells carry a column class so the narrow layout can hide columns; headers explain themselves on hover.
+// Table cells carry a column class (the narrow layout pins the Script column, the tests read cells by it); headers explain themselves on hover.
 const th = (col, text, title) => `<th class="rpk-col-${col}${SORT_KEYS[col] ? ' rpk-sortable' : ''}${sortBy === col ? ' rpk-sorted' : ''}" data-col="${col}"${title ? ` title="${esc(title)}"` : ''}>${text}${sortBy === col ? (sortDesc ? ' ▾' : ' ▴') : ''}</th>`;
 const td = (col, value, cls = '', title = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}"${title ? ` title="${esc(title)}"` : ''}>${value}</td>`;
 
@@ -3225,6 +3260,7 @@ function bindUi() {
             if (key === 'htmlMemo' && !el.checked) htmlMemo.clear();
             if (key === 'breaker' && !el.checked) for (const s of stats.values()) if (s.tripped) untrip(s); // off: nothing stays skipped
             if (key === 'frameStats' && !el.checked) resetFeel(); // off: the figures leave the summary instead of standing still
+            if (key === 'listBadges') updateListBadges(); // off: the chips leave the Regex list at once, not at its next rebuild
             renderPanel();
         });
     }
