@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.1 — 2026-11-07
+
+Why this release: an audit of 0.5.0 against SillyTavern's own source found that two of its features never ran in the real app (the showdown wrapper, and with it the paragraph cache; ⑤'s rows read after the first render) and that a measurement could stop a message from rendering. Every finding of that audit is fixed here, with a regression test for each.
 
 ### Fixes
 
