@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.3 — 2026-11-07
+
+Why this release: the leftovers of the 0.5.2 audit, each small.
+
+### Fixes
+
+- Settings saved by a version before 0.5.2 get the stutter option (`frameStats`) turned off once, as the new default intends; the settings carry a `schema` (1) from now on, so a choice made afterwards is kept.
+- ③'s memo drops a bucket once its last entry is evicted: a find pattern with a volatile macro compiles to a new bucket on every run, and the empty ones stayed.
+- The display passes kept for the long-task split are bounded in entries (1024) as well as in time (10 s): a burst of thousands of passes in ten seconds no longer grows the list.
+- ⑤ flushes its pending rows when the tab goes to the background (`visibilitychange`) as well as on `pagehide`.
+
+### Wording
+
+- READMEs: the MessageFormatter features need SillyTavern 1.19.0 (where the hooks arrived; `RegexProvider` is 1.15.0); the measurement drops the long tasks that overlap it, other causes included; the double-escape lint can flag a `\\n` meant literally; ⑤'s flush on close is best effort; the one-time migration of the stutter option.
+
+### Tests
+
+- A case loads settings saved without a schema (the option turns off once), with the schema (a choice stays) and none (the default). The measurement scenario renders a heavier chat, so every chunk is a long task on a fast runner too (94 cases).
+
 ## 0.5.2 — 2026-11-07
 
 Why this release: an audit of 0.5.1 found that the stutter figures counted the extension's own measurement, and that the option behind them was named vaguely and on by default although its numbers change on their own.

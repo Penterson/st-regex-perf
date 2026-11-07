@@ -45,7 +45,7 @@ Numbers from the test harness (SillyTavern's real regex engine, a converter stan
 | Sampling (an option of ①) | per device | Past 1000 runs of a script, 1 run in 8 is timed and the totals are scaled. On by default on devices reporting 4 GB or less (only Chromium-based browsers report it). |
 | Time the replacer separately (an option of ①) | ON | The Replacer column. Two more clock reads per match. |
 | Adaptive (an option of ①) | ON | Once regex is under 2% of the renders, 1 run in 64 is timed and the summary says so. |
-| Stutter (an option of ①) | OFF | Frames late during a generation and freezes over 100 ms, tasks over 50 ms (Chromium) and the share of those that was display rendering. The figures keep changing while the page runs, so it is off by default, and turning it off clears them. Long tasks of "Measure on this chat" itself are not counted. The frame sampler runs only during a generation, so idle pages pay nothing. |
+| Stutter (an option of ①) | OFF | Frames late during a generation and freezes over 100 ms, tasks over 50 ms (Chromium) and the share of those that was display rendering. The figures keep changing while the page runs, so it is off by default, and turning it off clears them. Long tasks overlapping "Measure on this chat" are not counted (a stutter from another cause during the measurement is dropped with them). The frame sampler runs only during a generation, so idle pages pay nothing. |
 | ② Skip runs that cannot match (literal prefilter) | ON | If the message does not even contain the fixed text a script looks for (e.g. both `<status>` and `</status>`, `abc` inside `(?:abc)`, either of `foo\|bar`), or is shorter than the pattern's least possible match, the regex is not run. Results are 100% identical; with the `i` flag the check folds case exactly like the regex engine. |
 | ③ Reuse results (memory cache) | ON | When the same script runs on the same message again (swipes, re-renders, reloads), the previous result is reused. Scripts and text with `{{macros}}` are left out. An unchanged output is stored as a marker, not a copy. Limits: 3000 entries, 64 MB (16 / 32 MB on devices reporting 2 / 4 GB); the oldest entries go first. |
 | Name macros (an option of ③) | ON | Scripts whose only macros are `{{user}}`, `{{char}}`, `{{persona}}` or `{{group}}` are cached too, per value set, since the values hold while a message is rendered. Needs the MessageFormatter hooks, like ⑤. |
@@ -69,7 +69,7 @@ Numbers from the test harness (SillyTavern's real regex engine, a converter stan
 2. Reload SillyTavern in the browser.
 3. A **Regex Perf Kit** drawer appears at the bottom of the Extensions panel (🧩).
 
-Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The UI is in Korean when SillyTavern's language is Korean, and in English otherwise; translations are one `locales/<locale>.json` file each, so another language is just another file.
+Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`); the features that use the MessageFormatter hooks (⑤, ⑨, ④'s compromise mode, the name-macro options of ③ and ⑥) are available from 1.19.0, which introduced them, and their checkboxes are disabled below that. The UI is in Korean when SillyTavern's language is Korean, and in English otherwise; translations are one `locales/<locale>.json` file each, so another language is just another file.
 
 ## Use
 
@@ -116,7 +116,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
 ### Lint and invalid patterns
 
 - **Lint** (a section under the table) finds: missing `g` (the pattern matched again further on in a message, 3 times), group references the pattern cannot fill (`$3` with two groups, `$<name>` without a named group), JSON double escapes such as `\\n`, browser support (on Safari and iOS: lookbehind before 16.4, the `v` flag and duplicate group names before 17, the `d` flag before 15), duplicate patterns.
-- Where a fix is mechanical (Add g, Unescape) the button shows the change and saves it through the regex engine once you confirm. Nothing is changed on its own.
+- Where a fix is mechanical (Add g, Unescape) the button shows the change and saves it through the regex engine once you confirm. Nothing is changed on its own. The double-escape check also flags a `\\n` that really means a backslash and an n; ignore it for such a pattern.
 - **Invalid patterns** (a script whose pattern does not compile does nothing, silently, in SillyTavern) are listed with the engine's error in the summary and the report.
 
 ### Reports and commands
@@ -130,6 +130,7 @@ Requires SillyTavern 1.15.0 or later (a regex engine with `RegexProvider`). The 
 - **Limits** lets you change ③'s entry count, longest cached input and memory (MB), ⑤'s longest saved result and size for all chats (MB), the compromise interval, ⑦'s longest input, ⑧'s threshold and count, and ⑨'s entry count and memory (MB). The lint and the Regex list's cost chips are turned off here too.
 - "③ Key the cache by a hash of the input" (off by default) keeps a 64-bit hash instead of each input, about halving the memory; the cost is hashing every input, and two inputs of the same length and hash (once in billions with 64 bits) would share a result.
 - The line above Limits shows ③'s and ⑨'s usage and ⑤'s (messages stored for this chat; size of all chats against the limit).
+- Settings saved by a version before 0.5.2 get the stutter option turned off once; a choice made after that is kept.
 - **Reset settings** turns every feature and limit back to its default. Whether the Limits, legend and tips sections are open is remembered.
 
 ## SillyTavern settings that help
@@ -165,7 +166,7 @@ No SillyTavern core file is modified.
 ## Caveats
 
 - This extension runs arbitrary JS. All of it is in `index.js`; read it before installing. Nothing is sent anywhere.
-- ⑤ stores in the browser's IndexedDB (site data of this SillyTavern address): chat files do not grow, and nothing is shared with another browser or device. "Clear saved results (this chat)" removes this chat's rows and what older versions wrote into the chat file. Rows of a deleted chat stay until the size limit pushes them out.
+- ⑤ writes the results kept in memory 200 ms later and once more when the tab is hidden or closed; a tab killed at that very moment can lose the last few, which are computed again next time. It stores in the browser's IndexedDB (site data of this SillyTavern address): chat files do not grow, and nothing is shared with another browser or device. "Clear saved results (this chat)" removes this chat's rows and what older versions wrote into the chat file. Rows of a deleted chat stay until the size limit pushes them out.
 - ⑤ and ⑨ do not store a message that a script using `{{random}}`, `{{time}}`, `{{getvar}}` and the like **matched** (its value may differ per render, so it is computed every time). Script changes, name, persona and group changes, message depth (min/max depth) and the markdown-related User Settings are picked up automatically.
 - The HTML ⑨ stores includes what **other extensions' AFTER_REGEX hooks** did to that message (hooks after AFTER_MARKDOWN run again on a hit). After turning such an extension on or off, toggle ⑨ off and on once (which clears the memory cache) or press "Clear saved results".
 - ⑨ wraps `makeHtml` of SillyTavern's own converter instance. The wrapper only acts while this extension is serving a hit and exactly its placeholder comes in, or splits a streamed message for the paragraph cache; every other call (other extensions' converters included) passes through.

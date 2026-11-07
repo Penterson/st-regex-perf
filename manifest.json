@@ -7,7 +7,7 @@
     "js": "index.js",
     "css": "style.css",
     "author": "readyforanothergame",
-    "version": "0.5.2",
+    "version": "0.5.3",
     "homePage": "https://github.com/Penterson/st-regex-perf",
     "auto_update": true
 }
