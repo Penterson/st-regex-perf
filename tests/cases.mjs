@@ -435,7 +435,7 @@ test('reset settings restores the defaults; open sections are remembered across 
     assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, fastPathStatic: true, htmlMemo: true, htmlMemoMaxEntries: 2000, htmlMemoMaxMB: 32, streamingIncremental: true, adaptive: true, frameStats: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
+    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, fastPathStatic: true, htmlMemo: true, htmlMemoMaxEntries: 2000, htmlMemoMaxMB: 32, streamingIncremental: true, streamingParagraphCache: true, adaptive: true, frameStats: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
     assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistMaxMB: '8' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
@@ -565,7 +565,7 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges', 'fastPathStatic', 'htmlMemo', 'htmlMemoMaxEntries', 'htmlMemoMaxMB', 'streamingIncremental', 'adaptive', 'frameStats'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges', 'fastPathStatic', 'htmlMemo', 'htmlMemoMaxEntries', 'htmlMemoMaxMB', 'streamingIncremental', 'adaptive', 'frameStats', 'streamingParagraphCache'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
@@ -890,6 +890,39 @@ test('④ incremental: in compromise mode line-local scripts format the new line
     const tail = on.current.runs.slice(5);
     assert.ok(tail.every(t => t.Bold === 1 && t.Who === 1 && t.Block === 1), JSON.stringify(on.current.runs));
     assert.ok(on.current.runs.slice(1, 4).every(t => t.Bold === 2), 'the first incremental runs are checked against a full run');
+});
+
+test('④ paragraph cache: in compromise mode the converter and the sanitizer see the last paragraph only; every live render equals plain SillyTavern', async ({ each }) => {
+    const on = await each('streamParagraphs', { on: true }, { variants: ['none', 'current'] });
+    const off = (await each('streamParagraphs', { on: false }, { variants: ['current'] })).current;
+    assert.deepEqual(on.current.outs, on.none.outs, 'every live render equals plain SillyTavern on the same text');
+    assert.deepEqual(off.outs, on.none.outs);
+    assert.equal(on.current.finalOut, on.none.finalOut);
+    assert.deepEqual(on.current.warnings, [], 'no split render disagreed with a whole one');
+    const p = on.current.paragraph;
+    // 4 boundaries appear while the reply grows (after the first paragraph, the heading, the paragraph before the fence, the fence): 4 renders convert the finished part anew, the others reuse it
+    assert.ok(p.passes >= 8 && p.hits === p.passes - 4 && p.fallbacks === 0, `split renders: ${JSON.stringify(p)}`);
+    assert.deepEqual(off.paragraph, { passes: 0, hits: 0, fallbacks: 0 });
+    // the last tick: the whole reply is there, the converter and the sanitizer saw the paragraph being written (after the quote block, which is never a boundary)
+    const last = on.current.steps.length - 1;
+    assert.ok(on.current.steps[last].length > 200, `reply length ${on.current.steps[last].length}`);
+    assert.ok(on.current.chars[last] < off.chars[last] / 3, `converted ${on.current.chars[last]} of ${off.chars[last]} characters on the last tick`);
+    assert.ok(on.current.sanChars[last] < off.sanChars[last] / 3, `sanitized ${on.current.sanChars[last]} of ${off.sanChars[last]} characters on the last tick`);
+    // the first three split ticks also convert the whole text (the self-check): about twice the characters
+    const split = on.current.chars.map((n, i) => n !== off.chars[i]).indexOf(true);
+    assert.ok(split > 0 && on.current.chars[split] > off.chars[split] * 1.5, `the first split tick (${split}) converted ${on.current.chars[split]} vs ${off.chars[split]} characters`);
+    assert.match(on.current.text, /^④ paragraph cache: \d+ streaming renders reused the finished paragraphs' HTML and converted the last paragraph only \(\d+ renders were split\)$/m);
+});
+
+test('④ paragraph cache: a conversion that depends on the whole text fails the first self-check, and the message goes back to whole renders', async ({ each }) => {
+    const r = await each('streamParagraphs', { on: true, converter: 'numbered' }, { variants: ['none', 'current'] });
+    assert.deepEqual(r.current.outs, r.none.outs, 'the checked render returned the whole conversion');
+    assert.equal(r.current.finalOut, r.none.finalOut);
+    assert.equal(r.current.warnings.length, 1, JSON.stringify(r.current.warnings));
+    assert.match(r.current.warnings[0], /split markdown differed from the whole one for message #0/);
+    assert.deepEqual(r.current.paragraph, { passes: 0, hits: 0, fallbacks: 1 });
+    assert.deepEqual(r.current.chars, r.current.steps.map((s, i) => r.current.chars[i]), 'sanity');
+    assert.ok(r.current.chars.every((n, i) => n >= r.current.steps[i].length), 'after the fallback every tick converts the whole text');
 });
 
 test('⑥ static-macro fast path: {{char}}/{{user}} templates per name set give SillyTavern\'s output, also with $ in a name and a {{char}} trim string', async ({ each }) => {

@@ -1587,6 +1587,44 @@ export async function streamIncremental(h, { incremental }) {
 }
 
 /**
+ * ④ paragraph cache: in compromise mode the finished paragraphs' HTML is kept tick after tick, so the converter and the
+ * sanitizer see the paragraph being written; every live render equals plain SillyTavern's. With the 'numbered' converter
+ * (whose output depends on the whole text) the first checked render disagrees and the message goes back to whole renders.
+ */
+export async function streamParagraphs(h, { on, converter = 'para' }) {
+    applyProfile(h, { streamingThrottle: true, streamingThrottleMs: 0, streamingParagraphCache: on, htmlMemo: false, memo: false });
+    h.st.setConverter(converter);
+    await useScripts(h, [script({ scriptName: 'Bold', findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true })]);
+    h.st.setState({ chat: [msg('')] });
+    const paras = ['First paragraph **one** line\nsecond line "quoted" here', '# Heading two', '- item a\n- item b\n\n  more of b', 'After the list **three** and `code`.', '```\ncode **not bold**\n\nstill code\n```', '> quoted\n> block', 'Plain **four** again, the paragraph being written.'];
+    const full = paras.join('\n\n');
+    const steps = [];
+    for (let n = 23; n < full.length; n += 23) steps.push(full.slice(0, n)); // the reply grows by 23 characters a tick
+    steps.push(full);
+    const c = h.st.counters;
+    const outs = [];
+    const chars = [];
+    const sanChars = [];
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    const sp = { messageId: 0, isFinished: false, isStopped: false };
+    h.st.setState({ streamingProcessor: sp });
+    for (const text of steps) {
+        h.st.chat[0].mes = text;
+        const chars0 = c.converterChars;
+        const san0 = c.sanitizeChars;
+        outs.push(h.st.messageFormatting(text, 'Char', false, false, 0));
+        chars.push(c.converterChars - chars0);
+        sanChars.push(c.sanitizeChars - san0);
+    }
+    sp.isFinished = true;
+    const finalOut = h.st.messageFormatting(full, 'Char', false, false, 0);
+    h.st.setState({ streamingProcessor: null });
+    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    const j = await json(h);
+    return { steps, outs, chars, sanChars, finalOut, paragraph: j?.pipeline.paragraph ?? null, warnings: h.warnings.filter(w => w.includes('paragraph cache')), text: await report(h) };
+}
+
+/**
  * ⑥ for static-macro replacements: {{char}} / {{user}} templates are finished per name set, verified, and give
  * SillyTavern's own output, also with a $ in a name and with a trim string holding {{char}}.
  */

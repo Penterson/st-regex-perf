@@ -6,6 +6,14 @@
 
 - Each long task (over 50 ms) is split into the display passes it held and the rest. The summary, the text report and the JSON (`felt.longTaskPipeMs`, `felt.lastLongTask`) give "display renders inside those tasks: X ms of Y ms" and the latest task's split, so a stutter can be blamed on the render pipeline (what this extension sees and partly saves) or on SillyTavern's DOM work, layout and other extensions. The passes of the last 10 s are kept as timestamps for this.
 
+### Speed
+
+- ④ paragraph cache (sub-option of the compromise mode, on): while a reply streams, the HTML of its finished paragraphs is kept, so showdown and DOMPurify run on the paragraph being written.
+  - The split point is the last blank line after a plain paragraph, a heading or a closed code fence, outside fences, lists, quotes, tables and open raw HTML, with an even number of backticks before it; a message holding a reference-style link definition is never split. showdown converts the two parts as it would the whole, joined by one line break (checked against showdown 2 with SillyTavern's converter options on 20 samples, DOMPurify included).
+  - Lives in the existing `makeHtml` and `DOMPurify.sanitize` wrappers. A marker between the two HTML parts is taken out again by this extension's own AFTER_MARKDOWN hook (the first one) and tells the sanitizer where to split; when another hook changed the finished part, the whole HTML is sanitized.
+  - A message's first three split renders are compared with a whole conversion and a whole sanitizing; a difference sends that message back to whole renders, with a console warning (the self-check ⑥ and ④ incremental use). The cache is dropped when the generation ends; the final render goes through the whole pipeline.
+  - The summary, the text report and the JSON (`pipeline.paragraph`: `passes`, `hits`, `fallbacks`) count the split renders.
+
 ### Fixes
 
 - The settings panel and Limits list the features in order, ① to ⑨ (⑨ sat between ⑥ and ⑦).
@@ -21,6 +29,7 @@
 
 - The lint scenario measures each fix button's box against its row (81 cases).
 - `measureVerdict` is exported; a case feeds it hand-made results.
+- ④ paragraph cache: a streamed reply with paragraphs, a heading, a list, a code fence and a quote block renders like plain SillyTavern tick by tick while the converter and the sanitizer see the last paragraph only; a converter whose output depends on the whole text fails the first self-check and the message goes back to whole renders (84 cases). The stand-in converter's trailing-space pass is per line now (`\s+$` ate the blank line between paragraphs).
 
 ## 0.4.0 — 2026-11-07
 

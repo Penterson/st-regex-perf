@@ -6,7 +6,7 @@
  * ① profiler, ② literal prefilter, ③ memo cache, ④ streaming skip of display-only scripts, ⑥ replacer fast path,
  * ⑦ input-length fuse and ⑧ circuit breaker. ST's MessageFormatter hooks add ⑤ a persisted display cache, ⑨ a cache
  * of the formatted HTML (regex + markdown skipped together on a re-render), ④'s compromise mode with incremental
- * formatting, and a timing of the whole display pipeline (regex / markdown / sanitize) so the panel can say what share
+ * formatting and a paragraph cache (markdown and sanitizing on the paragraph being written only), and a timing of the whole display pipeline (regex / markdown / sanitize) so the panel can say what share
  * of a render the regex stage is. No ST core file is modified.
  */
 
@@ -39,6 +39,7 @@ const defaultSettings = {
     htmlMemoMaxEntries: 2000,
     htmlMemoMaxMB: deviceMemory && deviceMemory <= 2 ? 8 : deviceMemory && deviceMemory <= 4 ? 16 : 32,
     streamingIncremental: true, // ④ compromise mode: scripts that cannot match across a line run on the new lines only
+    streamingParagraphCache: true, // ④ compromise mode: the finished paragraphs' HTML is kept while the reply streams; markdown and the sanitizer run on the paragraph being written
     adaptive: true, // ① when the regex stage is a negligible share of the render, time 1 run in 64 (the panel says so)
     frameStats: true, // ① count dropped frames while streaming and long tasks (what a user feels), when the browser can
     memoMaxEntries: 3000,
@@ -1553,6 +1554,9 @@ const pipe = {
     htmlHits: 0, // ⑨ passes served from the HTML cache (regex and markdown skipped)
     htmlHitMs: 0, // what those passes still cost (placeholder markdown + sanitize)
     htmlStores: 0,
+    paraPasses: 0, // ④ paragraph cache: streaming renders whose markdown and sanitizing were split at a paragraph boundary
+    paraHits: 0, // of those, renders that reused the finished paragraphs' HTML (the last paragraph alone was converted)
+    paraFallbacks: 0, // messages whose split render differed from a whole one: whole renders for them
     loadMs: 0, // the render burst that ended at the last CHAT_CHANGED: how long opening the chat took
 };
 let passT0 = null; // performance.now() at our BEFORE_REGEX hook (null outside a timed pass)
@@ -1560,7 +1564,7 @@ let passTk = null; // at the end of our BEFORE_REGEX hook
 let passT1 = null; // at our AFTER_REGEX hook
 let passT2 = null; // at our AFTER_MARKDOWN hook
 let passHtmlHit = false; // this pass is a ⑨ hit
-const resetPipe = () => { Object.assign(pipe, { passes: 0, hookMs: 0, regexMs: 0, markdownMs: 0, sanitizeMs: 0, htmlHits: 0, htmlHitMs: 0, htmlStores: 0 }); };
+const resetPipe = () => { Object.assign(pipe, { passes: 0, hookMs: 0, regexMs: 0, markdownMs: 0, sanitizeMs: 0, htmlHits: 0, htmlHitMs: 0, htmlStores: 0, paraPasses: 0, paraHits: 0, paraFallbacks: 0 }); };
 const pipeTotal = () => pipe.hookMs + pipe.regexMs + pipe.markdownMs + pipe.sanitizeMs;
 /** Regex time as a share of the timed display renders (0..1), null before anything was timed. */
 const regexShare = () => {
@@ -1584,7 +1588,10 @@ function wrapSanitize() {
         const t2 = passT2;
         passT2 = null; // one sanitize per pass; a second call (another caller) is not ours
         const t3 = performance.now();
+        const view = paraSplit; // a ④ paragraph-cache pass: the finished paragraphs' HTML is sanitized once per generation
+        paraSplit = null;
         try {
+            if (view !== null && paraHeadPre !== null && dirty.startsWith(paraHeadPre) && dirty.charCodeAt(paraHeadPre.length) === 10) return paragraphSanitize(this, orig, view, dirty, config);
             return orig.apply(this, arguments);
         } finally {
             const t4 = performance.now();
@@ -1618,7 +1625,8 @@ let showdownWrapped = false;
 /**
  * Wraps showdown's makeHtml(): on a ⑨ hit the converter receives the placeholder, whose conversion is thrown away at
  * AFTER_MARKDOWN anyway, so it is returned as it is. showdown's cost is largely per call (dozens of sub-parsers), not
- * per character, so without this a hit would still pay most of the markdown stage. Anything else passes through.
+ * per character, so without this a hit would still pay most of the markdown stage. In a ④ compromise pass the
+ * paragraph cache converts the paragraph being written only (paragraphPass). Anything else passes through.
  */
 function wrapShowdown() {
     const proto = globalThis.SillyTavern?.libs?.showdown?.Converter?.prototype;
@@ -1626,6 +1634,10 @@ function wrapShowdown() {
     const orig = proto.makeHtml;
     proto.makeHtml = function (text) {
         if (htmlHit !== null && text === HTML_PLACEHOLDER) return text;
+        if (streamKey !== null && paraSplit === null && passT1 !== null && passT2 === null && cfg.streamingParagraphCache && sanitizeWrapped) {
+            const out = paragraphPass(this, orig, text);
+            if (out !== null) return out;
+        }
         return orig.apply(this, arguments);
     };
     showdownWrapped = true;
@@ -1751,6 +1763,136 @@ function pipeVersion() {
     return fnv1a([pu.auto_fix_generated_markdown, pu.encode_tags, pu.reasoning?.prefix, pu.reasoning?.suffix, pu.markdown_escape_strings, pu.allow_name2_display].map(String).join('\u0000'));
 }
 
+// ④ paragraph cache (compromise mode): while a reply streams, the HTML of its finished paragraphs is kept, so showdown
+// and DOMPurify run on the paragraph being written. The split point is a blank line after a plain paragraph, a heading
+// or a closed code fence, outside fences, lists, quotes, tables and open raw HTML (paragraphCut); showdown converts the
+// two parts as it would the whole, joined by a line break. The first renders that split are compared with a conversion
+// of the whole text and a sanitizing of the whole HTML; on any difference the message goes back to whole renders (the
+// self-check ⑥ and ④ incremental use too). Dropped when the generation ends.
+const paraViews = new Map(); // stream key -> {sep, tailStart, head, html, pre, san, checks, sanChecks, off}
+const PARA_MARK = '\uE000'; // put between the two HTML parts by makeHtml, taken out again by our AFTER_MARKDOWN hook (the first)
+const PARA_VERIFY = 3;
+let streamKey = null; // the ④ compromise key of the message this pass formats (null outside a compromise pass)
+let paraSplit = null; // the paragraph-cache entry this pass split its markdown with, until the sanitizer
+let paraHeadPre = null; // the finished paragraphs' HTML as it left our AFTER_MARKDOWN hook: where the sanitizer splits
+const VOID_TAGS = new Set(['br', 'hr', 'img', 'input', 'meta', 'link', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr', 'param']);
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const LIST_ITEM = /^ {0,3}(?:[-*+]|\d+[.)])(?:\s|$)/;
+const INDENTED = /^[ \t]/; // a line starting with whitespace continues the block above it (a list item's paragraph, indented code)
+const TAG = /<(\/?)([a-zA-Z][\w-]*)[^<>]*?(\/?)>/g;
+const REF_DEF = /^ {0,3}\[[^\]]+\]:\s/; // a reference-style link definition resolves across paragraphs: never split such a text
+
+/**
+ * The last paragraph boundary of a markdown text, scanning from `from` (0, or the start of a tail already known to
+ * follow a boundary): {headEnd, tailStart} with head = text.slice(0, headEnd) and tail = text.slice(tailStart), null
+ * when the scanned part has none, false when the text must not be split.
+ */
+function paragraphCut(text, from = 0) {
+    let inFence = null; // the fence marker that has to close
+    let ticks = 0; // backticks outside fences: an odd count means an inline code span is open
+    let depth = 0; // open raw HTML tags outside fences and inline code
+    let prev = 'blank'; // kind of the last non-blank line: para (also a heading) | list | quote | table | indent | fence
+    let pending = null; // headEnd of a blank line after a para / heading / closed fence, until the next non-blank line is seen
+    let cut = null;
+    const n = text.length;
+    for (let pos = from; pos < n;) {
+        let nl = text.indexOf('\n', pos);
+        if (nl < 0) nl = n;
+        const line = text.slice(pos, nl);
+        if (inFence !== null) {
+            const m = FENCE.exec(line);
+            if (m && m[1][0] === inFence[0] && m[1].length >= inFence.length && line.slice(m[0].length).trim() === '') inFence = null;
+            prev = 'fence';
+        } else if (line.trim() === '') {
+            if (pending === null && (prev === 'para' || prev === 'fence') && ticks % 2 === 0 && depth === 0) pending = pos - 1;
+        } else {
+            if (pending !== null) {
+                if (!INDENTED.test(line) && !/^ {0,3}(?:=+|-+)\s*$/.test(line)) cut = { headEnd: pending, tailStart: pos }; // not a continuation or a setext underline
+                pending = null;
+            }
+            if (REF_DEF.test(line)) return false;
+            const fence = FENCE.exec(line);
+            if (fence) {
+                inFence = fence[1];
+                prev = 'fence';
+            } else {
+                prev = INDENTED.test(line) ? 'indent' : LIST_ITEM.test(line) ? 'list' : line.charCodeAt(line.search(/\S/)) === 62 ? 'quote' : line.includes('|') ? 'table' : 'para';
+                for (let i = line.indexOf('`'); i >= 0; i = line.indexOf('`', i + 1)) ticks++;
+                for (const m of line.replace(/`[^`]*`/g, '').matchAll(TAG)) {
+                    if (m[3] || VOID_TAGS.has(m[2].toLowerCase())) continue;
+                    depth += m[1] ? -1 : 1;
+                }
+                if (depth < 0) depth = 0;
+            }
+        }
+        pos = nl + 1;
+    }
+    return cut; // a blank line at the very end: the tail would be empty, so it is no cut
+}
+
+/** The paragraph-cache split of a compromise pass's makeHtml(): the HTML to return, or null to convert the whole text. */
+function paragraphPass(conv, orig, text) {
+    let view = paraViews.get(streamKey);
+    if (view?.off || text.includes(PARA_MARK)) return null;
+    let cut;
+    if (view && text.startsWith(view.sep)) { // the known boundary still stands: scan the part after it only
+        cut = paragraphCut(text, view.tailStart);
+        if (cut === null) cut = { headEnd: view.head.length, tailStart: view.tailStart };
+    } else {
+        cut = paragraphCut(text);
+    }
+    if (!cut || cut.tailStart >= text.length) return null;
+    if (!view) {
+        view = { sep: '', tailStart: 0, head: null, html: null, pre: null, san: null, checks: PARA_VERIFY, sanChecks: PARA_VERIFY, off: false };
+        paraViews.set(streamKey, view);
+    }
+    const head = text.slice(0, cut.headEnd);
+    const tail = text.slice(cut.tailStart);
+    const hit = view.head === head;
+    if (!hit) {
+        view.head = head;
+        view.sep = text.slice(0, cut.tailStart);
+        view.tailStart = cut.tailStart;
+        view.html = orig.call(conv, head);
+        view.pre = view.san = null;
+    }
+    const tailHtml = orig.call(conv, tail);
+    if (view.checks > 0) { // the first split renders of a message are compared with a conversion of the whole text
+        view.checks--;
+        const whole = orig.call(conv, text);
+        if (whole !== view.html + '\n' + tailHtml) return paraOff(view, 'markdown', whole, view.html + '\n' + tailHtml);
+    }
+    pipe.paraPasses++;
+    if (hit) pipe.paraHits++;
+    paraSplit = view;
+    return view.html + PARA_MARK + '\n' + tailHtml;
+}
+
+/** The sanitizer side of a split pass: the finished paragraphs' HTML is sanitized once, the rest on every render. */
+function paragraphSanitize(purify, orig, view, dirty, config) {
+    const headPre = paraHeadPre;
+    const tailPre = dirty.slice(headPre.length + 1);
+    if (view.pre !== headPre) {
+        view.pre = headPre;
+        view.san = orig.call(purify, headPre, config);
+    }
+    const out = view.san + '\n' + orig.call(purify, tailPre, config);
+    if (view.sanChecks > 0) { // the first split renders are compared with a sanitizing of the whole HTML
+        view.sanChecks--;
+        const whole = orig.call(purify, dirty, config);
+        if (whole !== out) return paraOff(view, 'sanitizing', whole, out);
+    }
+    return out;
+}
+
+/** A split render differed from a whole one: whole renders for this message from now on (with a console warning). */
+function paraOff(view, stage, whole, got) {
+    view.off = true;
+    pipe.paraFallbacks++;
+    console.warn(`[RegexPerf] ④ paragraph cache: the split ${stage} differed from the whole one for message #${passMessageId}: whole renders for this message`, { expected: whole.slice(-200), got: got.slice(-200) });
+    return whole;
+}
+
 // ---- MessageFormatter hooks: ⑤ persisted display cache, ⑨ HTML cache, ④ compromise mode ----
 
 let persistAvailable = false; // the hooks exist (recent SillyTavern)
@@ -1782,11 +1924,12 @@ function resetPass() {
     resetPassKeepTiming();
     passT0 = passTk = passT1 = passT2 = null;
     passHtmlHit = false;
+    paraSplit = paraHeadPre = null;
 }
 /** What the regex stage used, cleared at AFTER_MARKDOWN; the pass timing stays for the sanitize wrapper. */
 function resetPassKeepTiming() {
     bypass = streamApply = displayPass = passVolatile = false;
-    pending = streamView = streamTail = passChName = passStatic = passStaticTrim = passMessageId = htmlHit = null;
+    pending = streamView = streamTail = streamKey = passChName = passStatic = passStaticTrim = passMessageId = htmlHit = null;
 }
 
 /**
@@ -1795,6 +1938,7 @@ function resetPassKeepTiming() {
  */
 function streamPass(mes, c) {
     const key = c.messageId + (c.isReasoning ? 'r' : 'm');
+    streamKey = key;
     const view = streamViews.get(key);
     const now = performance.now();
     // the last line is still being written, along with any ``` / ~~~ fence SillyTavern appends to balance it
@@ -1928,6 +2072,13 @@ function installPersistHooks() {
     // After markdown: serve the ⑨ hit, or store the HTML just made in memory (⑨) and in the chat (⑤).
     mf.addHook((mes) => {
         const now = performance.now();
+        if (paraSplit !== null) { // the paragraph cache's marker comes out before any other hook sees the HTML
+            const i = mes.indexOf(PARA_MARK);
+            if (i >= 0) {
+                paraHeadPre = mes.slice(0, i);
+                mes = paraHeadPre + mes.slice(i + 1);
+            }
+        }
         const hit = htmlHit;
         const p = pending;
         const volatile = passVolatile;
@@ -2067,6 +2218,7 @@ function pipelineSummary() {
         htmlHits: pipe.htmlHits,
         htmlStores: pipe.htmlStores,
         htmlSavedMs: Math.max(0, pipe.htmlHits * avgPassMs() - pipe.htmlHitMs), // a hit still pays the placeholder markdown and the sanitizing
+        paragraph: { passes: pipe.paraPasses, hits: pipe.paraHits, fallbacks: pipe.paraFallbacks },
         avgPassMs: avgPassMs(),
         loadMs: pipe.loadMs,
         light: adaptiveLight && settings.adaptive,
@@ -2075,6 +2227,8 @@ function pipelineSummary() {
 /** "regex 12% · markdown 61% · sanitize 27% of N renders (X ms)". */
 const pipeText = (p) => t`Display renders timed: ${p.full}, ${fmtMs(p.totalMs)} ms: regex ${p.regexPct}%, markdown ${p.markdownPct}%, sanitizing ${p.sanitizePct}%, this extension's own lookups ${p.hookPct}%`;
 const htmlText = (p) => t`⑨ HTML cache: ${p.htmlHits} renders reused, about ${fmtMs(p.htmlSavedMs)} ms saved`;
+const paraText = (p) => t`④ paragraph cache: ${p.paragraph.hits} streaming renders reused the finished paragraphs' HTML and converted the last paragraph only (${p.paragraph.passes} renders were split)`
+    + (p.paragraph.fallbacks ? ' ' + t`(${p.paragraph.fallbacks} messages went back to whole renders)` : '');
 /** What a user feels, in words: dropped frames while streaming, long tasks, the time a chat took to open. */
 function feelText(f) {
     const parts = [];
@@ -2170,6 +2324,7 @@ function buildReportText() {
     if (s.pipe.available && s.pipe.full) {
         lines.push(pipeText(s.pipe));
         if (s.pipe.htmlHits) lines.push(htmlText(s.pipe));
+        if (s.pipe.paragraph.passes) lines.push(paraText(s.pipe));
         if (s.pipe.light) lines.push(t`The regex stage is under 2% of the renders: the profiler times 1 run in 64 (adaptive).`);
     }
     const felt = feelText(s.feel);
@@ -2577,6 +2732,7 @@ const settingsHtml = () => `
         ${feature('rpk_streaming', t`④ Rest display scripts while streaming`, t`While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. This removes most streaming lag.`)}
         ${feature('rpk_stream_throttle', t`Compromise: keep formatting the finished lines`, t`With ④ on, display scripts still format the lines that are already complete, at most once per interval (0.5 s by default, under Limits). The line being written stays raw; the finished reply gets every script.`, { sub: true })}
         ${feature('rpk_streamingIncremental', t`Incremental: run line-local scripts on the new lines only`, t`In compromise mode, a script whose matches cannot cross a line break (no \\n, \\s, [^…] or dotAll) formats only the lines added since its last run and reuses the rest. The first runs are compared with a full run; on any difference the script goes back to full runs.`, { sub: true })}
+        ${feature('rpk_streamingParagraphCache', t`Paragraph cache: convert and sanitize the last paragraph only`, t`In compromise mode, while a reply streams, the HTML of its finished paragraphs (up to the last blank line outside code fences, lists, quotes and tables) is kept, so markdown and the sanitizer run on the paragraph being written. The first renders are compared with a whole conversion; on any difference the message goes back to whole renders, with a console warning. Dropped when the generation ends.`, { sub: true })}
         </div>
         ${feature('rpk_persist', t`⑤ Save results in the chat file (persistent cache)`, t`Stores the display result with the message, so reopening the chat skips the work. The chat file grows; results are recomputed automatically when a script changes. With ⑨ on, the finished HTML is stored, so markdown is skipped too.`, { labelId: 'rpk_persist_label' })}
         <div class="rpk-feature-group">
@@ -2661,7 +2817,7 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_adaptive: 'adaptive', rpk_frameStats: 'frameStats', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_fastPathStatic: 'fastPathStatic', rpk_htmlMemo: 'htmlMemo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_streamingIncremental: 'streamingIncremental', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure', rpk_lint: 'lint', rpk_listBadges: 'listBadges' };
+const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_adaptive: 'adaptive', rpk_frameStats: 'frameStats', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_fastPathStatic: 'fastPathStatic', rpk_htmlMemo: 'htmlMemo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_streamingIncremental: 'streamingIncremental', rpk_streamingParagraphCache: 'streamingParagraphCache', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure', rpk_lint: 'lint', rpk_listBadges: 'listBadges' };
 // editable limits: setting -> [min, max]
 const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], htmlMemoMaxEntries: [0, 1e6], htmlMemoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], fuseLen: [1000, 1e7], breakerMs: [50, 60000], breakerCount: [1, 100], loadHintMs: [100, 600000] };
 
@@ -2713,7 +2869,7 @@ function renderPanel() {
         if (s.fast) lines.push(`<span class="rpk-dim">${fastText(s.fast)}</span>`);
     }
     if (s.pipe.available && s.pipe.full) {
-        lines.push(`<span class="rpk-dim">${esc(pipeText(s.pipe))}.</span>` + (s.pipe.htmlHits ? ` ${esc(htmlText(s.pipe))}.` : ''));
+        lines.push(`<span class="rpk-dim">${esc(pipeText(s.pipe))}.</span>` + (s.pipe.htmlHits ? ` ${esc(htmlText(s.pipe))}.` : '') + (s.pipe.paragraph.passes ? ` <span class="rpk-dim">${esc(paraText(s.pipe))}.</span>` : ''));
         if (s.pipe.light) lines.push(`<span class="rpk-dim">${t`The regex stage is under 2% of the renders here: ②③④ have little to save, so the profiler times 1 run in 64. What helps more is under "What SillyTavern's own settings can do".`}</span>`);
     }
     const felt = feelText(s.feel);
@@ -2822,7 +2978,7 @@ function bindUi() {
         });
     }
     if (!persistAvailable) find('#rpk_persist').disabled = find('#rpk_stream_throttle').disabled = find('#rpk_memoStatic').disabled = find('#rpk_streamingIncremental').disabled = find('#rpk_fastPathStatic').disabled = true;
-    if (!htmlStageAvailable) find('#rpk_htmlMemo').disabled = find('#rpk_adaptive').disabled = true;
+    if (!htmlStageAvailable) find('#rpk_htmlMemo').disabled = find('#rpk_adaptive').disabled = find('#rpk_streamingParagraphCache').disabled = true;
 
     for (const [key, [min, max]] of Object.entries(LIMITS)) {
         const el = find('#rpk_' + key);
@@ -3000,12 +3156,14 @@ eventSource.on(event_types.GENERATION_STARTED, (_type, _params, dryRun) => {
     checkWrapper();
     generating = true;
     streamViews.clear();
+    paraViews.clear();
     startFrames();
 });
 for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPED]) {
     eventSource.on(event, () => {
         generating = false;
         streamViews.clear();
+        paraViews.clear(); // the paragraph cache holds the streamed message's HTML
         for (const w of wrapped.values()) if (w._meta) w._meta.inc = null; // ④ incremental state holds the streamed text
     });
 }
@@ -3017,6 +3175,7 @@ for (const event of [event_types.CHARACTER_MESSAGE_RENDERED, event_types.USER_ME
 eventSource.on(event_types.CHAT_CHANGED, () => {
     markDirty();
     streamViews.clear();
+    paraViews.clear();
     forgetPersistAcct();
     chatLen = ctx().chat?.length ?? 0;
     const now = performance.now();

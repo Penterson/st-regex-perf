@@ -23,17 +23,18 @@ const systemUserName = 'SillyTavern System';
 export let mesForShowdownParse; // written by the spliced code
 
 // ---- The rest of the display pipeline, as stand-ins ----
-export const counters = { saveSettings: 0, saveChat: 0, makeHtml: 0, sanitize: 0, converterChars: 0 };
+export const counters = { saveSettings: 0, saveChat: 0, makeHtml: 0, sanitize: 0, converterChars: 0, sanitizeChars: 0 };
 /**
  * The markdown converter: the identity by default (so tests can assert on the text), or, with setConverter('para'),
- * a small paragraph/bold converter whose cost grows with the input, for the benchmarks.
+ * a small paragraph/bold converter whose cost grows with the input, for the benchmarks; 'numbered' is 'para' with each
+ * paragraph numbered, so a conversion depends on the whole text (what the ④ paragraph cache's self-check must catch).
  */
 let converterMode = 'identity';
 const PARA_PASSES = [
     [/\*\*(.+?)\*\*/g, '<b>$1</b>'], [/(^|\W)\*(?!\s)(.+?)\*(?=\W|$)/g, '$1<i>$2</i>'], [/`([^`]+)`/g, '<code>$1</code>'],
     [/^#{1,6} (.*)$/gm, '<h4>$1</h4>'], [/^> (.*)$/gm, '<blockquote>$1</blockquote>'], [/^[-*] (.*)$/gm, '<li>$1</li>'],
     [/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2">$1</a>'], [/~~(.+?)~~/g, '<s>$1</s>'], [/__(.+?)__/g, '<u>$1</u>'],
-    [/(https?:\/\/\S+)/g, '<a href="$1">$1</a>'], [/:\w+:/g, '☺'], [/\s+$/gm, ''],
+    [/(https?:\/\/\S+)/g, '<a href="$1">$1</a>'], [/:\w+:/g, '☺'], [/[ \t]+$/gm, ''], // trailing spaces per line (\s would eat the blank line between paragraphs)
 ];
 export function setConverter(mode) { converterMode = mode; }
 /** The shape of showdown: a Converter class whose prototype carries makeHtml(), reachable as SillyTavern.libs.showdown. */
@@ -45,7 +46,7 @@ export class Converter {
         // a handful of passes over the text, as a markdown converter makes (showdown runs dozens)
         let out = s;
         for (let k = 0; k < 64; k++) for (const [re, rep] of PARA_PASSES) out = out.replace(re, rep);
-        return out.split(/\n{2,}/).map(p => '<p>' + p.replace(/\n/g, '<br>') + '</p>').join('\n');
+        return out.split(/\n{2,}/).map((p, i) => `<p${converterMode === 'numbered' ? ` data-n="${i}"` : ''}>` + p.replace(/\n/g, '<br>') + '</p>').join('\n');
     }
 }
 export const showdown = { Converter };
@@ -54,6 +55,7 @@ const converter = new Converter();
 export const DOMPurify = {
     sanitize(s, config) {
         counters.sanitize++;
+        counters.sanitizeChars += String(s).length;
         return String(s).replace(/<script[\s\S]*?<\/script>/gi, '');
     },
 };
