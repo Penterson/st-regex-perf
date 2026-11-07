@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 — 2026-11-07
+
+Why this release: 0.4.0 measured the whole render; this one acts on what the measurement showed. While a reply streams, markdown and sanitizing run on the paragraph being written only (④'s paragraph cache), ⑤ moves out of the chat file into IndexedDB and is on by default, and each long task says how much of it was display rendering, so the effect of the paragraph cache can be read off the same number before and after.
 
 ### Measurements
 

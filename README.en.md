@@ -33,9 +33,9 @@ Numbers from the test harness (SillyTavern's real regex engine, a converter stan
 
 | Scenario | No extension | This extension |
 |---|---|---|
-| First render of the chat (cold) | 54.7 ms | 48.9 ms |
-| Re-render of the same chat (warm) | 51.1 ms | **34.2 ms** (−33%) |
-| Save path, 1500 distinct inputs | 0.8 ms | 1.6 ms (+0.5 µs per input) |
+| First render of the chat (cold) | 58.6 ms | 31.8 ms |
+| Re-render of the same chat (warm) | 53.6 ms | **25.7 ms** (−52%) |
+| Save path, 1500 distinct inputs | 1.3 ms | 2.4 ms (+0.7 µs per input) |
 
 ## Features
 
