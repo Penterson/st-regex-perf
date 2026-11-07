@@ -14,6 +14,9 @@
 // Namespace import: older engines lack getScriptsByType / SCRIPT_TYPES, and a missing named import fails to load.
 import * as engine from '../../regex/engine.js';
 import { regexFromString } from '../../../utils.js';
+// script.js exports what the hooks cannot reach through getContext(): the showdown converter instance (its makeHtml is
+// an own property, not a prototype method) and updateMessageBlock(); a namespace import survives an older export list.
+import * as st from '../../../../script.js';
 
 const { RegexProvider, getRegexScripts, getScriptsByType, SCRIPT_TYPES } = engine;
 const EXTRA_KEY = 'regex_perf_cache';
@@ -1012,7 +1015,7 @@ function buildInfo(groups) {
                         replacer: trims.length ? buildTrimReplacer(replaceString, trims, tpl.named) : null,
                         verify: VERIFY_RUNS,
                         // can a match be replaced by itself? If not, an unchanged output means the pattern did not match
-                        identity: tpl.refs.length > 0 || matchesWhole(re, tpl.template.replace(/\$\$/g, '$')),
+                        identity: tpl.refs.length > 0 || tpl.template.includes('$&') || matchesWhole(re, tpl.template.replace(/\$\$/g, '$')),
                     };
                 }
             }
@@ -1091,6 +1094,7 @@ let prevIn = null;
 let prevOut = null;
 const conflicts = new Map(); // "earlierKey\0laterKey" -> {earlier, later, count, confirmed, sample}
 let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
+let streamSkippedMsg = null; // ④: the message whose display scripts were last skipped while it streamed, until its final render
 let displayPass = false; // set by the formatter hooks while a message is being formatted for display
 let passVolatile = false; // a volatile script ({{random}}, {{getvar}}, a macro in the find pattern) matched in this pass
 
@@ -1110,9 +1114,11 @@ function staticKeyFor(level) {
     return level === 2 ? passStaticTrim : passStatic;
 }
 function setPassStatic(chName) {
-    const { name1, name2, groupId, groups, powerUserSettings, substituteParams } = ctx();
+    const { name1, name2, groupId, groups, characters, powerUserSettings, substituteParams } = ctx();
     const group = groupId ? groups?.find?.(g => g.id === groupId) : null;
-    const fp = [name1, name2, chName, groupId, group?.members?.join(), group?.disabled_members?.join(), powerUserSettings?.persona_description].join('\u0000');
+    // {{group}} resolves to the members' names, so a renamed member changes the values while the avatars stay
+    const memberNames = group?.members?.map(avatar => characters?.find?.(c => c?.avatar === avatar)?.name ?? avatar).join();
+    const fp = [name1, name2, chName, groupId, group?.members?.join(), memberNames, group?.disabled_members?.join(), powerUserSettings?.persona_description].join('\u0000');
     if (fp !== staticFp) {
         staticFp = fp;
         staticVals = staticByFp.get(fp);
@@ -1152,7 +1158,7 @@ function staticFastFor(meta) {
             template: trims.length ? null : template,
             replacer: trims.length ? buildTrimReplacer(replacement, trims, fs.named) : null,
             verify: VERIFY_RUNS,
-            identity: fs.refs.length > 0 || matchesWhole(meta.re, template.replace(/\$\$/g, '$')),
+            identity: fs.refs.length > 0 || template.includes('$&') || matchesWhole(meta.re, template.replace(/\$\$/g, '$')),
         };
         if (fs.byKey.size >= 8) fs.byKey.delete(fs.byKey.keys().next().value);
         fs.byKey.set(key, f);
@@ -1232,15 +1238,23 @@ class PerfRegExp extends RegExp {
         }
         if (stat.tripped) { // ⑧ turned off by the circuit breaker for this session
             stat.broken++;
+            passVolatile = true; // ⑨ ⑤: a pass with a skipped script is not the message's result
             return unchanged(stat, str);
         }
         if (cfg.fuse && stat.redos.severity && str.length > cfg.fuseLen) { // ⑦ a risky pattern on a very long input
             stat.fused++;
+            passVolatile = true;
             return unchanged(stat, str);
         }
-        if (cfg.streamingSkip && markdownOnly && !streamApply && liveStream()) {
-            stat.streamSkipped++;
-            return unchanged(stat, str);
+        if (cfg.streamingSkip && markdownOnly && !streamApply) {
+            // the streamed message only, where the hooks say which message is being formatted (passMessageId); without
+            // them (older SillyTavern, transient previews) every display pass during a stream
+            const sp = liveStream();
+            if (sp && (passMessageId === null || sp.messageId === passMessageId)) {
+                stat.streamSkipped++;
+                if (passMessageId !== null) streamSkippedMsg = passMessageId; // rendered again should the stream end without its final render
+                return unchanged(stat, str);
+            }
         }
         if (displayPass && meta.dynamic) passVolatile = true; // ⑨ ⑤: another render may compile another pattern
         // ④ incremental formatting (compromise mode): a line-local script that already formatted a prefix of this
@@ -1251,14 +1265,14 @@ class PerfRegExp extends RegExp {
         if (cfg.prefilter && test && !test(str, keep)) {
             stat.skipped++;
             if (prevOut === str && prevIn !== str && prevStat !== stat) noteConflict(prevStat, stat, prevIn, test, this._native, keep);
-            if (incremental) meta.inc = { msg: passMessageId, in: str, out: str };
+            if (incremental) meta.inc = { msg: streamKey, in: str, out: str };
             return unchanged(stat, str);
         }
         let inc = null; // the prefix already formatted, when the new text continues it after a line break
         let incIn = str; // what the regex really runs on
         if (incremental) {
             const prev = meta.inc;
-            if (prev && prev.msg === passMessageId && str.length > prev.in.length && prev.in.endsWith('\n') && str.startsWith(prev.in)) {
+            if (prev && prev.msg === streamKey && str.length > prev.in.length && prev.in.endsWith('\n') && str.startsWith(prev.in)) {
                 inc = prev;
                 incIn = str.slice(prev.in.length);
             }
@@ -1361,7 +1375,7 @@ class PerfRegExp extends RegExp {
                 }
             }
         }
-        if (incremental) meta.inc = { msg: passMessageId, in: str, out };
+        if (incremental) meta.inc = { msg: streamKey, in: str, out };
         const dt = t0 ? performance.now() - t0 : 0;
         if (cfg.breaker && dt > cfg.breakerMs && ++stat.slowRuns >= cfg.breakerCount) trip(stat); // ⑧
         if (profile) {
@@ -1621,18 +1635,20 @@ const ADAPTIVE_EVERY_PASSES = 64;
 const LIGHT_EVERY = 64;
 let adaptiveLight = false;
 
-let showdownWrapped = false;
+const MAKE_HTML_WRAPPED = Symbol('rpk.makeHtml'); // set on a wrapped makeHtml, so a converter is wrapped once
 /**
- * Wraps showdown's makeHtml(): on a ⑨ hit the converter receives the placeholder, whose conversion is thrown away at
+ * Wraps a converter's makeHtml(): on a ⑨ hit the converter receives the placeholder, whose conversion is thrown away at
  * AFTER_MARKDOWN anyway, so it is returned as it is. showdown's cost is largely per call (dozens of sub-parsers), not
  * per character, so without this a hit would still pay most of the markdown stage. In a ④ compromise pass the
  * paragraph cache converts the paragraph being written only (paragraphPass). Anything else passes through.
+ * showdown defines makeHtml as an own property inside the Converter constructor (nothing on the prototype), so the
+ * instance messageFormatting() uses, script.js's `converter`, is wrapped; SillyTavern makes a new one in
+ * reloadMarkdownProcessor(), so the hooks check it before every markdown stage (ensureShowdownWrapped).
  */
-function wrapShowdown() {
-    const proto = globalThis.SillyTavern?.libs?.showdown?.Converter?.prototype;
-    if (!proto || typeof proto.makeHtml !== 'function' || showdownWrapped) return;
-    const orig = proto.makeHtml;
-    proto.makeHtml = function (text) {
+function wrapMakeHtml(conv) {
+    if (!conv || typeof conv.makeHtml !== 'function' || conv.makeHtml[MAKE_HTML_WRAPPED]) return false;
+    const orig = conv.makeHtml;
+    const wrapped = function (text) {
         if (htmlHit !== null && text === HTML_PLACEHOLDER) return text;
         if (streamKey !== null && paraSplit === null && passT1 !== null && passT2 === null && cfg.streamingParagraphCache && sanitizeWrapped) {
             const out = paragraphPass(this, orig, text);
@@ -1640,7 +1656,16 @@ function wrapShowdown() {
         }
         return orig.apply(this, arguments);
     };
-    showdownWrapped = true;
+    wrapped[MAKE_HTML_WRAPPED] = true;
+    conv.makeHtml = wrapped;
+    return true;
+}
+let showdownWrapped = false; // the converter in use is wrapped (the panel's ⑨ / ④ notes depend on it)
+/** The converter messageFormatting() is about to call: wrapped now if it is new or was never wrapped. */
+function ensureShowdownWrapped() {
+    const conv = st.converter;
+    if (conv && !conv.makeHtml?.[MAKE_HTML_WRAPPED]) wrapMakeHtml(conv);
+    showdownWrapped = !!conv?.makeHtml?.[MAKE_HTML_WRAPPED];
 }
 
 // What a user feels: frames the page could not paint in time while a reply streams, and tasks long enough to
@@ -1655,7 +1680,13 @@ const resetFeel = () => { Object.assign(feel, FEEL_ZERO); };
 // layout, other extensions): a stutter whose task holds little pipeline time is not this extension's to fix.
 const recentPasses = [];
 const RECENT_PASSES_MS = 10000;
+// The burst of display passes that ends at CHAT_CHANGED is the chat's first render (see BURST_GAP_MS): counted from
+// every closed pass, ⑨/⑤ hits included, so a cached chat's opening is measured too.
+let passBurstStart = 0;
+let passLastEnd = -Infinity;
 function notePass(start, end) {
+    if (start - passLastEnd > BURST_GAP_MS) passBurstStart = start;
+    passLastEnd = end;
     recentPasses.push(start, end);
     if (recentPasses.length > 1024 || (recentPasses.length && end - recentPasses[0] > RECENT_PASSES_MS)) {
         let i = 0;
@@ -1761,7 +1792,8 @@ let htmlHit = null; // the HTML to return at AFTER_MARKDOWN for this pass (null:
 function pipeVersion() {
     const pu = ctx().powerUserSettings;
     if (!pu) return '';
-    return fnv1a([pu.auto_fix_generated_markdown, pu.encode_tags, pu.reasoning?.prefix, pu.reasoning?.suffix, pu.markdown_escape_strings, pu.allow_name2_display].map(String).join('\u0000'));
+    const regexOff = extensionSettings.disabledExtensions?.includes?.('regex') ? 1 : 0; // getRegexedString() returns its input then
+    return fnv1a([pu.auto_fix_generated_markdown, pu.encode_tags, pu.reasoning?.prefix, pu.reasoning?.suffix, pu.markdown_escape_strings, pu.allow_name2_display, regexOff].map(String).join('\u0000'));
 }
 
 // ④ paragraph cache (compromise mode): while a reply streams, the HTML of its finished paragraphs is kept, so showdown
@@ -1970,7 +2002,9 @@ function keyFor(mes, c, chat, msg) {
     // Entries keyed the old way simply miss and are recomputed.
     // the static macro values ({{user}} {{char}} {{persona}} {{group}}) that find patterns, replacements and trim strings can hold
     const statics = staticKeyFor(2);
-    return hash64(mes) + ':' + mes.length + ':' + displayVersion + ':' + names + depths + ':' + statics + (c.isReasoning ? ':r' : '') + ':' + pipeVersion();
+    // the placement decides which scripts run: USER_INPUT for the user's messages, SLASH_COMMAND for narrator messages, else AI_OUTPUT
+    const placement = c.isReasoning ? ':r' : c.isUser ? ':u' : msg.extra?.type === 'narrator' ? ':n' : '';
+    return hash64(mes) + ':' + mes.length + ':' + displayVersion + ':' + names + depths + ':' + statics + placement + ':' + pipeVersion();
 }
 
 /** A ⑨ hit: the regex stage is bypassed and the stored HTML takes over at AFTER_MARKDOWN. */
@@ -2007,12 +2041,16 @@ function installPersistHooks() {
         passMessageId = c.messageId;
         const wantHtml = cfg.htmlMemo && htmlStageAvailable;
         const wantPersist = cfg.persist && !c.isReasoning;
-        const sp = wantPersist || wantHtml || cfg.streamingThrottle ? liveStream() : null;
+        const sp = liveStream();
+        if (!sp && c.messageId === streamSkippedMsg) streamSkippedMsg = null; // the streamed message's final render
         if (sp) return cfg.streamingSkip && cfg.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;
         if (!wantHtml && !wantPersist) return mes;
         const chat = ctx().chat;
         const msg = chat?.[c.messageId];
         if (!msg) return mes;
+        // SillyTavern prints a chat before it emits CHAT_CHANGED: the chat this pass belongs to is read here, so the
+        // rows go to the right chat and a chat not yet read starts loading at its first pass
+        if (wantPersist) loadPersisted();
         const key = keyFor(mes, c, chat, msg);
         const id = wantPersist && persistChatKey !== null ? persistIdOf(key) : null;
         if (wantHtml) {
@@ -2048,6 +2086,7 @@ function installPersistHooks() {
     // After regex: append ④'s raw tail, or store the freshly computed text for ⑤ (the HTML is stored a stage later).
     mf.addHook((mes) => {
         if (passT0 !== null) passT1 = performance.now();
+        if (htmlStageAvailable) ensureShowdownWrapped(); // the markdown stage comes next: a converter remade by SillyTavern is wrapped here
         const tail = streamTail;
         const view = streamView;
         const p = pending; // null after a hit (bypass)
@@ -2103,7 +2142,7 @@ function installPersistHooks() {
         return mes;
     }, { stage: mf.stage.AFTER_MARKDOWN, order: mf.order?.EARLIEST ?? 0 });
     wrapSanitize();
-    wrapShowdown();
+    ensureShowdownWrapped();
 }
 
 /** "Clear saved results (this chat)": this chat's rows in IndexedDB, and what an older version wrote into the chat file. */
@@ -2217,6 +2256,7 @@ function pipelineSummary() {
         htmlStores: pipe.htmlStores,
         htmlSavedMs: Math.max(0, pipe.htmlHits * avgPassMs() - pipe.htmlHitMs), // a hit still pays the placeholder markdown and the sanitizing
         paragraph: { passes: pipe.paraPasses, hits: pipe.paraHits, fallbacks: pipe.paraFallbacks },
+        converterWrapped: showdownWrapped, // the ⑨ placeholder and the ④ paragraph cache need the converter's makeHtml wrapped
         avgPassMs: avgPassMs(),
         loadMs: pipe.loadMs,
         light: adaptiveLight && settings.adaptive,
@@ -2257,7 +2297,7 @@ const persistAcct = { entries: 0, bytes: 0 }; // this chat
 const persistPending = new Map(); // rows waiting for the next flush, by id
 let persistFlushTimer = 0;
 let persistInFlight = 0; // rows of the flush that is running (the JSON's `pending` counts them, so a test can wait for the write)
-let persistLoaded = false; // this chat's rows have been read (or there is nothing to read)
+let persistLoaded = true; // this chat's rows have been read (or there is nothing to read)
 let persistLastAt = 0; // `at` is strictly increasing, so rows stored in the same millisecond still age in order
 
 const idbDone = (req) => new Promise((ok, no) => { req.onsuccess = () => ok(req.result); req.onerror = () => no(req.error); });
@@ -2285,7 +2325,7 @@ function openPersistDb() {
                 store.createIndex('age', ['at', 'n']); // a key cursor over it gives sizes oldest first without reading the rows
             };
             const db = await idbDone(req);
-            db.onversionchange = () => { db.close(); persistDb = null; };
+            db.onversionchange = () => { db.close(); persistDb = persistDbOpening = null; }; // opened again on the next use
             persistDb = db;
             await measurePersistDb(db);
             return db;
@@ -2298,10 +2338,11 @@ function openPersistDb() {
     return persistDbOpening;
 }
 
-/** Sums the stored rows' sizes (from the index keys, not the rows) into persistDbBytes / persistDbRows. */
+/**
+ * Sums the stored rows' sizes (from the index keys, not the rows) into persistDbBytes / persistDbRows. Rows stored but
+ * not written yet (pending: the flush waits for this open) are added, since the scan cannot see them.
+ */
 async function measurePersistDb(db) {
-    const added = persistDbBytes; // rows stored before the measurement finished are already counted
-    const addedRows = persistDbRows;
     let bytes = 0;
     let rows = 0;
     try {
@@ -2310,8 +2351,9 @@ async function measurePersistDb(db) {
             rows++;
         });
     } catch { /* an unreadable store counts as empty */ }
-    persistDbBytes = bytes + (persistDbBytes - added);
-    persistDbRows = rows + (persistDbRows - addedRows);
+    for (const row of persistPending.values()) bytes += row.n;
+    persistDbBytes = bytes;
+    persistDbRows = rows + persistPending.size;
     statsDirty = true;
 }
 
@@ -2327,10 +2369,14 @@ function persistIdOf(key) {
     return persistChatKey + '\u0000' + key.slice(0, key.indexOf(':', key.indexOf(':') + 1));
 }
 
-/** Reads the current chat's rows into persistMem (CHAT_CHANGED, and once at start); nothing to do for the same chat. */
+/**
+ * Reads the current chat's rows into persistMem; nothing to do while the chat is the one already read or being read.
+ * Called at the first display pass of a chat (SillyTavern prints a chat before CHAT_CHANGED), when #chat is emptied for
+ * the next chat (the rows are read while the chat file is fetched), at CHAT_CHANGED and once at start.
+ */
 function loadPersisted() {
     const chatKey = persistChatKeyNow();
-    if (chatKey === persistChatKey && (persistLoaded || chatKey === null)) return;
+    if (chatKey === persistChatKey) return;
     persistChatKey = chatKey;
     persistMem.clear();
     persistAcct.entries = persistAcct.bytes = 0;
@@ -2344,7 +2390,11 @@ function loadPersisted() {
                 const rows = await idbDone(db.transaction(DB_STORE).objectStore(DB_STORE).index('chat').getAll(chatKey));
                 if (persistChatKey !== chatKey) return;
                 for (const row of rows) {
-                    if (persistMem.has(row.id)) continue; // stored again while the read ran: the new row wins
+                    if (persistMem.has(row.id)) { // stored again while the read ran: the new row replaced this one in the database too
+                        persistDbBytes -= row.n;
+                        persistDbRows--;
+                        continue;
+                    }
                     persistMem.set(row.id, row);
                     persistAcct.entries++;
                     persistAcct.bytes += row.n;
@@ -2354,6 +2404,16 @@ function loadPersisted() {
         persistLoaded = true;
         statsDirty = true;
     })();
+}
+
+/**
+ * SillyTavern empties #chat (clearChat) and sets the next chat's id before it fetches and prints that chat: reading the
+ * rows then lets them serve the first render, as far as IndexedDB answers before the chat file arrives.
+ */
+function watchChatClear() {
+    const el = globalThis.document?.getElementById('chat');
+    if (!el || typeof MutationObserver !== 'function') return;
+    new MutationObserver(() => { if (!el.firstElementChild) setTimeout(loadPersisted, 0); }).observe(el, { childList: true });
 }
 
 /** Keeps a message's result: in the memory copy at once, in IndexedDB at the next flush. */
@@ -2416,7 +2476,7 @@ async function evictPersisted(db) {
             persistDbBytes -= cur.key[1];
             persistDbRows--;
             const mine = persistMem.get(cur.primaryKey);
-            if (mine) {
+            if (mine && mine.at === cur.key[0]) { // a newer row in memory is pending and will be written again
                 persistMem.delete(cur.primaryKey);
                 persistAcct.entries--;
                 persistAcct.bytes -= mine.n;
@@ -2430,7 +2490,7 @@ async function evictPersisted(db) {
 async function clearPersistedDb() {
     const chatKey = persistChatKey;
     const removed = persistMem.size;
-    persistPending.clear(); // only this chat's rows are ever pending
+    for (const [id, row] of persistPending) if (row.chat === chatKey) persistPending.delete(id); // another chat's last rows may still be pending
     persistDbBytes -= persistAcct.bytes;
     persistDbRows -= persistMem.size;
     persistMem.clear();
@@ -2656,7 +2716,10 @@ function chipText(r, total) {
     if (total > 0 && r.calls) parts.push(`${Math.round(r.totalMs / total * 100)}%`);
     if (ineffective(r)) parts.push('∅');
     if (r.redos.severity === 'exp') parts.push('(a+)+');
+    if (r.redos.severity === 'poly') parts.push('a*a*');
     if (r.maxMs > SPIKE_MS) parts.push('⚡');
+    if (conflictsOf(r).length) parts.push('⇅');
+    if (r.fused > 0) parts.push('fuse');
     if (r.tripped) parts.push('off');
     return parts.join(' · ');
 }
@@ -2720,11 +2783,12 @@ async function measureChat(without = null) {
         let over16 = 0; // messages that took more than a frame on their own
         for (let i = 0; i < chat.length; i++) {
             const m = chat[i];
+            const text = m?.extra?.display_text ?? m?.mes; // what SillyTavern shows (a translation, for one)
             cfg = config;
             skipStat = skip;
             const t1 = performance.now();
             try {
-                if (m?.mes) messageFormatting(m.mes, m.name, m.is_system, m.is_user, i);
+                if (text) messageFormatting(text, m.name, m.is_system, m.is_user, i);
                 if (m?.extra?.reasoning) messageFormatting(m.extra.reasoning, '', false, false, i, {}, true);
             } finally {
                 cfg = settings;
@@ -2733,7 +2797,7 @@ async function measureChat(without = null) {
             const ms = performance.now() - t1;
             total += ms;
             if (ms > FRAME_BUDGET_MS) over16++;
-            if (times) times.push({ i, len: (m?.mes?.length ?? 0) + (m?.extra?.reasoning?.length ?? 0), ms });
+            if (times) times.push({ i, len: (text?.length ?? 0) + (m?.extra?.reasoning?.length ?? 0), ms });
             if (i % MEASURE_CHUNK === MEASURE_CHUNK - 1) await pause();
         }
         const after = stageSnap();
@@ -2741,8 +2805,11 @@ async function measureChat(without = null) {
         return { total, over16, stages: htmlStageAvailable ? { regex, markdown, sanitize, hitMs, hits, hook } : null };
     };
     const saved = new Map([...stats].map(([k, st]) => [k, COUNTERS.map(c => (Array.isArray(st[c]) ? [...st[c]] : st[c]))]));
+    const zero = (c) => (c === 'spikes' ? [] : c === 'spike' ? null : 0); // a stat first seen during the measurement
     const savedPersist = { ...persistStats };
     const savedPipe = { ...pipe };
+    const savedFeel = { ...feel };
+    const savedPasses = recentPasses.slice();
     const savedConflicts = new Map([...conflicts].map(([k, c]) => [k, { ...c }]));
     const savedLight = adaptiveLight;
     const times = [];
@@ -2752,9 +2819,11 @@ async function measureChat(without = null) {
         second = await render(null, without, over(without ? CACHES_OFF : { profiler: false, adaptive: false }));
     } finally {
         measureBusy = false;
-        for (const [k, st] of stats) COUNTERS.forEach((c, i) => { st[c] = saved.get(k)?.[i] ?? 0; });
+        for (const [k, st] of stats) COUNTERS.forEach((c, i) => { st[c] = saved.get(k)?.[i] ?? zero(c); });
         Object.assign(persistStats, savedPersist);
         Object.assign(pipe, savedPipe);
+        Object.assign(feel, savedFeel);
+        recentPasses.splice(0, recentPasses.length, ...savedPasses);
         adaptiveLight = savedLight;
         conflicts.clear();
         for (const [k, c] of savedConflicts) conflicts.set(k, c);
@@ -2838,7 +2907,7 @@ const feature = (id, name, desc, { labelId = '', sub = false } = {}) => `
         </label>`;
 
 /** A row of the Limits grid: a number field for LIMITS[key] or a checkbox for TOGGLES; bindUi() finds it as #rpk_<key>. */
-const limit = (key, name, title, type = 'number') => `<label${title ? ` title="${title}"` : ''}><span>${name}</span><input type="${type}"${type === 'number' ? ' class="text_pole"' : ''} id="rpk_${key}"></label>`;
+const limit = (key, name, title, type = 'number') => `<label${title ? ` title="${esc(title)}"` : ''}><span>${name}</span><input type="${type}"${type === 'number' ? ' class="text_pole"' : ''} id="rpk_${key}"></label>`;
 
 // Sorting and the name filter are per session (not saved). Clicking a header sorts by it, again flips the direction.
 const SORT_KEYS = {
@@ -2889,7 +2958,7 @@ const settingsHtml = () => `
         <div class="rpk-feature-group">
         ${feature('rpk_streaming', t`④ Rest display scripts while streaming`, t`While a reply is being generated, "Only Format Display" scripts are skipped and applied once when it finishes. This removes most streaming lag.`)}
         ${feature('rpk_stream_throttle', t`Compromise: keep formatting the finished lines`, t`With ④ on, display scripts still format the lines that are already complete, at most once per interval (0.5 s by default, under Limits). The line being written stays raw; the finished reply gets every script.`, { sub: true })}
-        ${feature('rpk_streamingIncremental', t`Incremental: run line-local scripts on the new lines only`, t`In compromise mode, a script whose matches cannot cross a line break (no \\n, \\s, [^…] or dotAll) formats only the lines added since its last run and reuses the rest. The first runs are compared with a full run; on any difference the script goes back to full runs.`, { sub: true })}
+        ${feature('rpk_streamingIncremental', t`Incremental: run line-local scripts on the new lines only`, t`In compromise mode, a script whose matches cannot cross a line break (no \\n, \\s, [^…] or dotAll, no ^ or $ without the m flag; the g flag is required) formats only the lines added since its last run and reuses the rest. The first runs are compared with a full run; on any difference the script goes back to full runs.`, { sub: true })}
         ${feature('rpk_streamingParagraphCache', t`Paragraph cache: convert and sanitize the last paragraph only`, t`In compromise mode, while a reply streams, the HTML of its finished paragraphs (up to the last blank line outside code fences, lists, quotes and tables) is kept, so markdown and the sanitizer run on the paragraph being written. The first renders are compared with a whole conversion; on any difference the message goes back to whole renders, with a console warning. Dropped when the generation ends.`, { sub: true })}
         </div>
         ${feature('rpk_persist', t`⑤ Save results in the browser (persistent cache)`, t`Stores each displayed message's result in the browser's IndexedDB (not in the chat file any more), so reopening the chat skips the work. Keyed by the chat and a hash of the message; recomputed automatically when a script, a name or a markdown setting changes. Beyond the size under Limits the results stored longest ago are dropped first. With ⑨ on, the finished HTML is stored, so markdown is skipped too. Results an older version wrote into the chat file are still read, never written.`, { labelId: 'rpk_persist_label' })}
@@ -2899,7 +2968,7 @@ const settingsHtml = () => `
         </div>
         ${feature('rpk_fuse', t`⑦ Fuse: skip very long inputs for risky patterns`, t`A pattern the analyzer flags for catastrophic backtracking is not run on inputs longer than the limit under Limits (20,000 characters by default): that text is shown as it is. Off by default, as it changes the result.`)}
         ${feature('rpk_breaker', t`⑧ Circuit breaker: turn off a script that keeps running long`, t`After the set number of runs over the set time (3 runs over 500 ms by default), the script is skipped for the rest of the session, with an Undo in the toast and in the table. The script itself is never changed. Off by default.`)}
-        ${feature('rpk_htmlMemo', t`⑨ Reuse the formatted HTML (HTML cache)`, t`When a message is rendered again unchanged (swipes, re-renders, scrolling back), the HTML made last time is reused: regex scripts and markdown are both skipped, only the sanitizer runs. Memory-only, limited under Limits; stored in the chat too when ⑤ is on. A message whose text, scripts, names or markdown settings changed is formatted again.`, { labelId: 'rpk_htmlMemo_label' })}
+        ${feature('rpk_htmlMemo', t`⑨ Reuse the formatted HTML (HTML cache)`, t`When a message is rendered again unchanged (swipes, re-renders, scrolling back), the HTML made last time is reused: regex scripts and markdown are both skipped, only the sanitizer runs. Memory-only, limited under Limits; with ⑤ on, the HTML is saved in the browser's IndexedDB too. A message whose text, scripts, names or markdown settings changed is formatted again.`, { labelId: 'rpk_htmlMemo_label' })}
       </div>
       <div class="rpk-note" id="rpk_persist_note"></div>
       <div class="rpk-note" id="rpk_usage"></div>
@@ -3066,7 +3135,7 @@ function renderPanel() {
         const cls = s.total > 0 && r.totalMs / s.total >= 0.5 ? 'rpk-hot' : '';
         const lit = fmtNeedles(r);
         const m = rowMeasures.get(r);
-        const actions = (m ? `<span class="rpk-row-ms" title="${esc(t`Without this script the chat renders in ${fmtMs(m.without)} ms instead of ${fmtMs(m.with)} ms (③ and ⑤ off)`)}">${m.with >= m.without ? '−' : '+'}${fmtMs(Math.abs(m.with - m.without))} ms</span>` : '')
+        const actions = (m ? `<span class="rpk-row-ms" title="${esc(t`Without this script the chat renders in ${fmtMs(m.without)} ms instead of ${fmtMs(m.with)} ms (③, ⑤ and ⑨ off)`)}">${m.with >= m.without ? '−' : '+'}${fmtMs(Math.abs(m.with - m.without))} ms</span>` : '')
             + `<span class="rpk-measure-row fa-solid fa-stopwatch" title="${t`Measure this chat without this script`}"></span>`
             + (r.spike ? ` <span class="rpk-repro fa-solid fa-copy" title="${t`Copy a repro of the newest spike (pattern, input length and head) for a bug report`}"></span>` : '')
             + (r.ids.length ? ` <span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span> <span class="rpk-off fa-solid fa-power-off" title="${t`Turn this script off`}"></span>` : '');
@@ -3080,7 +3149,7 @@ function renderPanel() {
     }).join('') || `<tr><td colspan="13" class="rpk-dim rpk-empty">${nameFilter && s.rows.length ? t`No script name contains "${nameFilter}".` : t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
 
     setContent(ui.note, !persistAvailable
-        ? t`⑤, the compromise mode and ③'s name-macro option need a newer SillyTavern (staging with MessageFormatter hooks).`
+        ? t`⑤, the compromise mode and the name-macro options of ③ and ⑥ need a SillyTavern with the MessageFormatter hooks.`
         : settings.persist && persistDbFailed ? t`⑤: IndexedDB is not available in this browser; only results an older version wrote into chat files are read.`
             : settings.persist ? t`⑤ is on: display results are saved in the browser (IndexedDB) and served when the chat opens again. Changing a script invalidates them automatically.` : '', 'textContent');
     setContent(ui.usage, s.usage, 'textContent');
@@ -3133,6 +3202,7 @@ function bindUi() {
             ctx().saveSettingsDebounced();
             if ((key === 'memo' && !el.checked) || key === 'memoHashKeys') clearMemo(); // entries keyed the other way are useless
             if (key === 'htmlMemo' && !el.checked) htmlMemo.clear();
+            if (key === 'breaker' && !el.checked) for (const s of stats.values()) if (s.tripped) untrip(s); // off: nothing stays skipped
             renderPanel();
         });
     }
@@ -3149,6 +3219,7 @@ function bindUi() {
             ctx().saveSettingsDebounced();
             trimMemo();
             htmlMemo.trim(settings.htmlMemoMaxEntries, settings.htmlMemoMaxMB * 1048576);
+            if (key === 'persistDbMaxMB' && !persistFlushTimer) persistFlushTimer = setTimeout(flushPersisted, 0); // evicts beyond the new limit
             renderPanel();
         });
     }
@@ -3307,7 +3378,7 @@ function registerSlash() {
 // ---- Init ----
 
 if (extensionSettings.disabledExtensions?.includes('regex')) {
-    console.log('[RegexPerf] built-in regex extension is disabled; nothing to do.');
+    console.log('[RegexPerf] the built-in Regex extension is disabled: its scripts do not run until it is turned on; the panel and the caches stay ready.');
 }
 patchProvider();
 eventSource.on(event_types.GENERATION_STARTED, (_type, _params, dryRun) => {
@@ -3322,7 +3393,25 @@ for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPE
         generating = false;
         clearStreamCaches();
         for (const w of wrapped.values()) if (w._meta) w._meta.inc = null; // ④ incremental state holds the streamed text
+        rerenderSkipped();
     });
+}
+/**
+ * ④: a stream that ended in an error has no final render (onErrorStreaming only stops it), so the message would keep
+ * the raw text its live renders showed. Rendered once more, after the generation's own clean-up.
+ */
+function rerenderSkipped() {
+    const id = streamSkippedMsg;
+    if (id === null) return;
+    setTimeout(() => {
+        if (streamSkippedMsg !== id) return; // its final render came after all
+        streamSkippedMsg = null;
+        const { chat } = ctx();
+        const update = ctx().updateMessageBlock ?? st.updateMessageBlock;
+        if (chat?.[id] && typeof update === 'function') {
+            try { update(id, chat[id]); } catch (e) { console.warn('[RegexPerf] ④ could not render the stopped message again', e); }
+        }
+    }, 0);
 }
 observeLongTasks();
 let loadHintShown = false; // once per session
@@ -3335,7 +3424,9 @@ eventSource.on(event_types.CHAT_CHANGED, () => {
     loadPersisted();
     chatLen = ctx().chat?.length ?? 0;
     const now = performance.now();
-    const loadMs = now - lastCall < BURST_GAP_MS ? lastCall - burstStart : 0; // the render burst that just ended
+    // the render burst that just ended: display passes where the hooks time them, else the profiled regex calls
+    const [burstEnd, burstFrom] = htmlStageAvailable ? [passLastEnd, passBurstStart] : [lastCall, burstStart];
+    const loadMs = now - burstEnd < BURST_GAP_MS ? burstEnd - burstFrom : 0;
     pipe.loadMs = loadMs;
     if (!loadHintShown && loadMs > settings.loadHintMs) {
         loadHintShown = true;
@@ -3352,7 +3443,10 @@ eventSource.on(event_types.SETTINGS_UPDATED, markDirty);
 if (event_types.PRESET_CHANGED) eventSource.on(event_types.PRESET_CHANGED, markDirty);
 eventSource.on(event_types.APP_READY, () => {
     try { installPersistHooks(); } catch (e) { console.warn('[RegexPerf] persist hooks failed', e); }
-    if (persistAvailable) loadPersisted(); // a chat may be open already
+    if (persistAvailable) {
+        loadPersisted(); // a chat may be open already
+        watchChatClear();
+    }
     try {
         const container = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
         if (container) {

@@ -14,18 +14,20 @@ export let name2 = 'Char';
 export let streamingProcessor = null;
 export let chatId = 'harness-' + Math.random().toString(36).slice(2); // a chat of its own per page, so ⑤'s IndexedDB rows never cross between tests
 export let groupId;
+export let groups = [];
 export const power_user = {
     user_prompt_bias: '', show_user_prompt_bias: true,
     auto_fix_generated_markdown: false, encode_tags: false, allow_name2_display: true,
     reasoning: { prefix: '', suffix: '' },
     markdown_escape_strings: '',
+    persona_description: '',
 };
 const COMMENT_NAME_DEFAULT = 'Note';
 const systemUserName = 'SillyTavern System';
 export let mesForShowdownParse; // written by the spliced code
 
 // ---- The rest of the display pipeline, as stand-ins ----
-export const counters = { saveSettings: 0, saveChat: 0, makeHtml: 0, sanitize: 0, converterChars: 0, sanitizeChars: 0 };
+export const counters = { saveSettings: 0, saveChat: 0, makeHtml: 0, sanitize: 0, converterChars: 0, sanitizeChars: 0, updateMessageBlock: 0 };
 /**
  * The markdown converter: the identity by default (so tests can assert on the text), or, with setConverter('para'),
  * a small paragraph/bold converter whose cost grows with the input, for the benchmarks; 'numbered' is 'para' with each
@@ -39,9 +41,13 @@ const PARA_PASSES = [
     [/(https?:\/\/\S+)/g, '<a href="$1">$1</a>'], [/:\w+:/g, '☺'], [/[ \t]+$/gm, ''], // trailing spaces per line (\s would eat the blank line between paragraphs)
 ];
 export function setConverter(mode) { converterMode = mode; }
-/** The shape of showdown: a Converter class whose prototype carries makeHtml(), reachable as SillyTavern.libs.showdown. */
-export class Converter {
-    makeHtml(s) {
+/**
+ * The shape of showdown 2: a Converter whose makeHtml() is an own property set in the constructor (nothing on the
+ * prototype), reachable as SillyTavern.libs.showdown; script.js keeps one instance in `converter` and makes a new one in
+ * reloadMarkdownProcessor().
+ */
+export function Converter() {
+    this.makeHtml = function (s) {
         counters.makeHtml++;
         counters.converterChars += s.length;
         if (converterMode === 'identity') return s;
@@ -49,10 +55,17 @@ export class Converter {
         let out = s;
         for (let k = 0; k < 64; k++) for (const [re, rep] of PARA_PASSES) out = out.replace(re, rep);
         return out.split(/\n{2,}/).map((p, i) => `<p${converterMode === 'numbered' ? ` data-n="${i}"` : ''}>` + p.replace(/\n/g, '<br>') + '</p>').join('\n');
-    }
+    };
 }
 export const showdown = { Converter };
-const converter = new Converter();
+export let converter = new Converter();
+export function reloadMarkdownProcessor() { converter = new Converter(); }
+/** Re-renders one message as SillyTavern's updateMessageBlock() does (display_text when present); counted for the tests. */
+export function updateMessageBlock(messageId, message) {
+    counters.updateMessageBlock++;
+    // eslint-disable-next-line no-undef -- spliced in by tests/server.mjs at the marker below
+    return messageFormatting(message?.extra?.display_text ?? message.mes, message.name, message.is_system, message.is_user, messageId);
+}
 /** DOMPurify stand-in: the same object SillyTavern.libs.DOMPurify points at, so the extension can wrap sanitize(). */
 export const DOMPurify = {
     sanitize(s, config) {
@@ -78,6 +91,7 @@ export function setState(patch) {
     if ('streamingProcessor' in patch) streamingProcessor = patch.streamingProcessor;
     if ('chatId' in patch) chatId = patch.chatId;
     if ('groupId' in patch) groupId = patch.groupId;
+    if ('groups' in patch) groups = patch.groups;
 }
 
 export function saveSettingsDebounced() { counters.saveSettings++; }
@@ -97,7 +111,9 @@ const LEGACY = { user: 'user', bot: 'char', char: 'char', group: 'char', charifn
 export function substituteParams(content, options = {}) {
     if (!content) return '';
     const o = options && typeof options === 'object' ? options : { name1Override: arguments[1], name2Override: arguments[2] };
-    const env = { user: o.name1Override ?? name1, char: o.name2Override ?? name2, ...o.dynamicMacros };
+    // {{group}} is the members' names (the current group's), {{persona}} the persona description, as SillyTavern resolves them
+    const groupNames = () => (groups.find(g => g.id === groupId)?.members ?? []).map(a => characters.find(c => c.avatar === a)?.name ?? a).join(', ');
+    const env = { user: o.name1Override ?? name1, char: o.name2Override ?? name2, persona: power_user.persona_description, group: groupNames, ...o.dynamicMacros };
     const post = typeof o.postProcessFn === 'function' ? o.postProcessFn : (x) => x;
     return String(content).replace(/<(USER|BOT|CHAR|GROUP|CHARIFNOTGROUP)>|{{([^{}]*)}}/gi, (m, legacy, body) => {
         if (legacy) return post(String(env[LEGACY[legacy.toLowerCase()]]));

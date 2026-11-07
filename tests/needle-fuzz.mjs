@@ -9,6 +9,7 @@ const stub = (code) => ({ url: 'data:text/javascript,' + encodeURIComponent(code
 export async function resolve(specifier, context, next) {
     if (specifier.endsWith('/regex/engine.js')) return stub('export const RegexProvider = { instance: { get() {}, clear() {} } }; export const getRegexScripts = () => [];');
     if (specifier.endsWith('/utils.js')) return stub('export const regexFromString = () => undefined;');
+    if (specifier.endsWith('/script.js')) return stub('export let converter; export function updateMessageBlock() {}');
     return next(specifier, context);
 }`));
 globalThis.SillyTavern = {

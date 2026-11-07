@@ -63,4 +63,5 @@ for (const [name, fn] of tests) {
 }
 await close();
 console.log(`\n${passed} passed, ${failed} failed`);
-process.exit(failed ? 1 : 0);
+if (!passed && !failed) console.log(`FAIL  no test matches ${filter}`);
+process.exit(failed || !passed ? 1 : 0);

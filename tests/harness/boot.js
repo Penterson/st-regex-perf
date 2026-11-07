@@ -37,6 +37,7 @@ globalThis.SillyTavern = {
             characters: st.characters,
             characterId: st.this_chid,
             groupId: st.groupId,
+            groups: st.groups,
             chatId: st.chatId,
             name1: st.name1,
             name2: st.name2,

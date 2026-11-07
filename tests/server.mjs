@@ -13,7 +13,7 @@ import { fetchSt, ST_DIR } from './fetch-st.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 
-/** main before the item 1–17 work (merged in PR #2); the tests compare the working tree against it. */
+/** The 0.1.0-era main the tests compare the working tree against (the first merge into main). */
 export const BASELINE = process.env.BASELINE_COMMIT || '3f3d4027692ef666bc7a64bd93b0f6043b8274fd'; // BASELINE_COMMIT: compare the bench against another commit
 
 const real = (p) => join(ST_DIR, 'public', p);

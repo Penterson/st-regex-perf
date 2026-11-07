@@ -1218,6 +1218,9 @@ export async function measureAsync(h) {
 /** Feature list 1.3. ⑤ usage is kept incrementally and matches a full scan of the chat. */
 export async function persistAccounting(h) {
     applyProfile(h, { persist: true, persistDbMaxMB: 1 });
+    // rows other pages of this run left behind would be counted in "all chats": start from an empty database (the
+    // extension closes its connection on versionchange and opens the new database on its next use)
+    await new Promise(ok => { const req = indexedDB.deleteDatabase('regex_perf_kit'); req.onsuccess = req.onerror = req.onblocked = () => ok(); });
     await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
     h.st.setState({ chat: Array.from({ length: 30 }, (_, i) => msg(`${i} x ` + 'x'.repeat(50000))) }); // ~100 KB a row
     const render = (i) => h.st.messageFormatting(h.st.chat[i].mes, h.st.chat[i].name, false, false, i);
@@ -1752,7 +1755,7 @@ export async function adaptive(h) {
     h.st.setConverter('para');
     await useScripts(h, [script({ scriptName: 'Never', findRegex: '/zzz-never/g', replaceString: 'y', markdownOnly: true })]);
     applyProfile(h, { prefilter: false, htmlMemo: false, memo: false, persist: false }); // every pass runs the regex for real
-    const body = ('**bold** and more text, "quoted" too.\n\n').repeat(120); // ≈4.5 KB: the converter's cost grows with it, the regex stage's fixed part does not
+    const body = ('**bold** and more text, "quoted" too.\n\n').repeat(240); // ≈9 KB: the converter's cost grows with it, the regex stage's fixed part does not (a share near 1%, so a busy machine cannot push it over 2%)
     h.st.setState({ chat: Array.from({ length: 70 }, (_, i) => msg(`${i} ${body}`)) });
     const render = () => h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
     render(); // warms the JIT up: the first calls through the extension's replace path cost many times a warm one
@@ -1806,4 +1809,195 @@ export async function longTaskPipe(h) {
     await new Promise(r => setTimeout(r, 150));
     const felt = (await json(h)).felt;
     return { renders, felt, text: await report(h) };
+}
+
+/**
+ * ⑤ in SillyTavern's order: getChatResult() prints the chat and emits CHAT_CHANGED afterwards, and clearChat() empties
+ * #chat before the next chat is fetched. The rows of a chat printed before its CHAT_CHANGED go to that chat; the first
+ * render after a switch is served when the rows were read while #chat was empty (the head start), else from the next.
+ */
+export async function persistChatOrder(h) {
+    applyProfile(h, { persist: true });
+    h.st.setConverter('para');
+    await useScripts(h, [script({ findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true })]);
+    const root = panel();
+    if (!root) return null;
+    const texts = { A: ['A1 **x**', 'A2 **y**'], B: ['B1 **p**', 'B2 **q**', 'B3 **r**'] };
+    const chatA = 'order-a-' + h.st.chatId;
+    const chatB = 'order-b-' + h.st.chatId;
+    const renderAll = () => h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
+    const hits = async () => (await json(h)).totals.persistHits;
+    const clearHtml = () => { setControl(root, 'rpk_htmlMemo', false); setControl(root, 'rpk_htmlMemo', true); }; // ⑨ emptied: only ⑤ can serve
+    const r = {};
+    h.st.setState({ chatId: chatA, chat: texts.A.map(t => msg(t)) });
+    await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+    await settle(h);
+    renderAll();
+    await settle(h);
+    // chat B as SillyTavern opens it: the messages are printed, then CHAT_CHANGED
+    h.st.setState({ chatId: chatB, chat: texts.B.map(t => msg(t)) });
+    renderAll();
+    await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+    await settle(h);
+    const all = await idbRows(h, { all: true });
+    r.rows = { a: all.filter(x => x.chat.endsWith(':' + chatA)).length, b: all.filter(x => x.chat.endsWith(':' + chatB)).length };
+    // back to A without the head start: the first pass starts the read, so the first render misses and the next hits
+    clearHtml();
+    let h0 = await hits();
+    h.st.setState({ chatId: chatA, chat: texts.A.map(t => msg(t)) });
+    renderAll();
+    r.firstRenderHits = (await hits()) - h0;
+    await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+    await settle(h);
+    clearHtml();
+    h0 = await hits();
+    renderAll();
+    r.nextRenderHits = (await hits()) - h0;
+    // to B with the head start: clearChat() empties #chat, the chat id changes, the fetch takes a moment, then the print
+    const chatEl = document.getElementById('chat');
+    chatEl.append(document.createElement('div'));
+    chatEl.replaceChildren();
+    h.st.setState({ chatId: chatB, chat: texts.B.map(t => msg(t)) });
+    await sleep(10); // the observer's timer fires and the read starts
+    await settle(h); // the fetch of the chat file: IndexedDB answers meanwhile
+    clearHtml();
+    h0 = await hits();
+    renderAll();
+    r.headStartHits = (await hits()) - h0;
+    await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+    await settle(h);
+    r.rowsAfter = (await idbRows(h, { all: true })).filter(x => x.chat.endsWith(':' + chatA) || x.chat.endsWith(':' + chatB)).length;
+    return r;
+}
+
+/** ⑦ / ⑧: a pass in which the fuse or the breaker skipped a script is not stored by ⑨ or ⑤; turning ⑧ off lets the script run again. */
+export async function skipNotCached(h) {
+    const rpk = applyProfile(h, { persist: true, prefilter: false, memo: false });
+    await useScripts(h, [script({ scriptName: 'Risky', findRegex: '/(?:ab|a)+c/g', replaceString: 'REPLACED', markdownOnly: true })]);
+    const root = panel();
+    if (!root) return null;
+    const render = (i) => h.st.messageFormatting(h.st.chat[i].mes, h.st.chat[i].name, false, false, i);
+    const clearHtml = () => { setControl(root, 'rpk_htmlMemo', false); setControl(root, 'rpk_htmlMemo', true); };
+    h.st.setState({ chat: [msg('x'.repeat(1200) + ' abc end')] });
+    await settle(h);
+    const r = {};
+    rpk.fuse = true;
+    rpk.fuseLen = 1000;
+    r.fused = render(0).includes('REPLACED');
+    rpk.fuse = false;
+    r.afterFuseOff = render(0).includes('REPLACED'); // ⑨ must not have kept the fused pass
+    clearHtml();
+    await settle(h);
+    r.afterFuseOffFromDb = render(0).includes('REPLACED'); // ⑤ neither
+    // the breaker: a run over 0 ms trips at once (count 1); the tripped passes are not kept either
+    setControl(root, 'rpk_breaker', true);
+    rpk.breakerMs = 0;
+    rpk.breakerCount = 1;
+    h.st.setState({ chat: [msg('one ' + 'a'.repeat(3000) + ' abc'), msg('two abc')] }); // the run of a: a long scan, so the run takes measurable time
+    r.tripRun = render(0).includes('REPLACED'); // this run trips the breaker; its own output is the real one
+    r.trippedPass = render(1).includes('REPLACED'); // skipped
+    setControl(root, 'rpk_breaker', false); // off: the script runs again at once
+    r.afterBreakerOff = render(1).includes('REPLACED');
+    clearHtml();
+    await settle(h);
+    r.afterBreakerOffFromDb = render(1).includes('REPLACED');
+    return r;
+}
+
+/** "Reset stats" then "Measure on this chat": the stats the measurement creates keep their shape, so a later spike is recorded, not thrown. */
+export async function measureAfterReset(h) {
+    applyProfile(h, { htmlMemo: false, persist: false, memo: false, prefilter: false });
+    await useScripts(h, [script({ scriptName: 'Slow', findRegex: '/x/g', replaceString: '{{slow}}y', markdownOnly: true })]); // {{slow}}: 2 ms per match
+    if (!h.commands.regexperf) return null;
+    h.st.setState({ chat: [msg('x x x')] });
+    h.st.messageFormatting(h.st.chat[0].mes, 'Char', false, false, 0);
+    await h.commands.regexperf.callback({}, 'reset');
+    await h.commands.regexperf.callback({}, 'measure');
+    h.st.setState({ chat: [msg('x'.repeat(30))] }); // 30 matches: 60 ms, over the 50 ms spike mark
+    let error = null;
+    try {
+        h.st.messageFormatting(h.st.chat[0].mes, 'Char', false, false, 0);
+    } catch (e) { error = String(e); }
+    const row = (await json(h)).rows.find(x => x.name === 'Slow');
+    return { error, spikes: row?.spikes?.length ?? null, spike: row?.spike?.ms > 50 };
+}
+
+/**
+ * ④ while a reply streams: the display scripts rest for the streamed message only; another message rendered meanwhile
+ * (scrolling up, an edit) gets them. A stream that ends in an error (isStopped, no final render) has its message
+ * rendered once more; a finished stream (isFinished, final render) does not.
+ */
+export async function streamOtherMessage(h) {
+    applyProfile(h, { htmlMemo: false, persist: false, memo: false });
+    await useScripts(h, [script({ findRegex: '/me/g', replaceString: 'YOU', markdownOnly: true })]);
+    const render = (i) => h.st.messageFormatting(h.st.chat[i].mes, h.st.chat[i].name, false, false, i);
+    h.st.setState({ chat: [msg('about me'), msg('me streaming')] });
+    const c = h.st.counters;
+    const r = {};
+    const sp = { messageId: 1, isFinished: false, isStopped: false };
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    h.st.setState({ streamingProcessor: sp });
+    r.other = render(0);
+    r.streamed = render(1);
+    // an error ends the stream: no final render
+    sp.isStopped = true;
+    h.st.setState({ streamingProcessor: null });
+    const before = c.updateMessageBlock;
+    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 2);
+    await sleep(30);
+    r.rerendersAfterError = c.updateMessageBlock - before;
+    // a stream that finishes: the final render comes before GENERATION_ENDED
+    const sp2 = { messageId: 1, isFinished: false, isStopped: false };
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    h.st.setState({ streamingProcessor: sp2 });
+    render(1);
+    sp2.isFinished = true;
+    r.final = render(1);
+    h.st.setState({ streamingProcessor: null });
+    const before2 = c.updateMessageBlock;
+    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 2);
+    await sleep(30);
+    r.rerendersAfterFinish = c.updateMessageBlock - before2;
+    return r;
+}
+
+/** ⑨ with showdown's shape: makeHtml is an own property of the converter; a converter SillyTavern remakes is wrapped again. */
+export async function showdownInstance(h) {
+    applyProfile(h, { persist: false });
+    h.st.setConverter('para');
+    await useScripts(h, [script({ findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true })]);
+    h.st.setState({ chat: [msg('a **b** c')] });
+    const c = h.st.counters;
+    const render = () => { const calls = c.makeHtml; const out = h.st.messageFormatting(h.st.chat[0].mes, 'Char', false, false, 0); return [out, c.makeHtml - calls]; };
+    const r = { first: render(), second: render() }; // the hit: the placeholder is not converted
+    h.st.reloadMarkdownProcessor(); // SillyTavern made a new converter
+    r.third = render();
+    r.wrapped = (await json(h))?.pipeline?.converterWrapped ?? null;
+    r.ownProperty = Object.hasOwn(h.st.converter, 'makeHtml') && !Object.hasOwn(Object.getPrototypeOf(h.st.converter), 'makeHtml');
+    return r;
+}
+
+/** ③/⑥/⑨ for {{group}}: a renamed group member changes the value, so a cached result is not served with the old name. */
+export async function groupRename(h) {
+    applyProfile(h, { persist: false });
+    h.st.setState({
+        characters: [{ avatar: 'ann.png', name: 'Ann', chat: 'c' }, { avatar: 'bob.png', name: 'Bob', chat: 'c' }],
+        groups: [{ id: 'g1', members: ['ann.png', 'bob.png'], disabled_members: [] }],
+        groupId: 'g1',
+        chat: [msg('hello')],
+    });
+    await useScripts(h, [script({ findRegex: '/hello/g', replaceString: 'hello {{group}}', markdownOnly: true })]);
+    const render = () => h.st.messageFormatting(h.st.chat[0].mes, 'Ann', false, false, 0);
+    const r = { before: render(), again: render() };
+    h.st.characters[1].name = 'Rob'; // renamed in place, as SillyTavern edits the character
+    r.renamed = render();
+    return r;
+}
+
+/** The Limits rows' tooltips survive a double quote in the text. */
+export async function limitTitles(h) {
+    const root = panel();
+    if (!root) return null;
+    const label = root.querySelector('#rpk_autoMeasure').closest('label');
+    return { title: label.getAttribute('title'), extraAttributes: [...label.attributes].map(a => a.name).filter(n => n !== 'title') };
 }

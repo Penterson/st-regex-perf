@@ -11,6 +11,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30 # a hung headless Chrome otherwise holds the runner for the 6 h default
     strategy:
       fail-fast: false
       matrix:

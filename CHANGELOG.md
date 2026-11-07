@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+### Fixes
+
+- ⑨ and the ④ paragraph cache wrap the converter SillyTavern uses. showdown sets `makeHtml` as an own property of each `Converter` (nothing on the prototype), so the prototype wrapper of 0.4.0 and 0.5.0 never installed in SillyTavern: a ⑨ hit paid the whole showdown call and the paragraph cache never ran. The instance (`converter` of script.js) is wrapped, and wrapped again before a markdown stage when SillyTavern remade it (`reloadMarkdownProcessor`). The JSON `pipeline.converterWrapped` says so; the harness converter has showdown's shape now.
+- ⑤ reads a chat's rows as soon as the chat is known. SillyTavern prints a chat before it emits CHAT_CHANGED, so 0.5.0 read the rows after the first render, which stored its results under the previous chat's key. The chat key is now read at every display pass (the rows go to the right chat, a chat not read yet starts loading), and the rows are read when SillyTavern empties the chat view for the next chat, while the chat file is fetched; the first render after a switch is served when that read finished first, else the next one.
+- "Reset stats" followed by "Measure on this chat" no longer breaks the next slow run: the stats the measurement created came back with `spikes = 0`, and the next run over 50 ms threw inside the regex stage, so the message was not rendered.
+- A pass in which ⑦ (fuse) or ⑧ (breaker) skipped a script is not stored by ⑨ or ⑤ any more; before, the skipped result was served after the fuse was turned off or the breaker undone, and ⑤ kept it across sessions. Turning ⑧ off lets tripped scripts run again at once.
+- ④ rests the display scripts of the streamed message only; another message rendered during a stream (scrolling up, an edit) gets them. A stream that ends in an error (no final render) has its message rendered once more.
+- The ⑨/⑤ key includes the Regex extension's own switch (its scripts do nothing while it is off) and the message's placement (user, narrator, character), and the static-macro values follow a renamed group member (`{{group}}` is the members' names, the fingerprint compared their avatars).
+- "Opening this chat rendered for" and the "# Messages to Load" hint come from the display passes, ⑨/⑤ hits included; before they came from the profiled regex calls alone (0 with the profiler off or a cached chat, sampled under adaptive mode).
+- The measurement restores the felt figures and the long-task window, and renders what SillyTavern shows (`extra.display_text` when present).
+- The Limits rows' tooltips are escaped (the "Measure automatically" tooltip broke on its double quotes). A closed IndexedDB connection (`versionchange`) is opened again on the next use instead of failing every later write. Lowering `⑤ Saved results, all chats (MB)` evicts at once. ⑤'s size estimate no longer counts a row twice when it is stored while the chat's rows are being read, counts the rows still waiting for the first write when the database is measured (they made the estimate 0 when a render came before the database had opened, so the size limit was not kept), and the pending rows of another chat survive "Clear saved results". The ④ incremental state is kept per stream (reasoning and body apart). ⑥ counts a match for a `{{match}}`-only replacement. The Regex list's chip shows every mark of the table.
+
+### Wording
+
+- ⑨: "with ⑤ on, the HTML is saved in IndexedDB too" (it said "in the chat"). The hooks-missing note names ⑥'s name-macro option too and no longer says "staging". The incremental option lists its anchor and `g` conditions. The stopwatch tooltip says ⑨ is off as well. The READMEs name the harness's stand-ins, the 60-row table cap and the first render after a chat switch.
+
+### Tests
+
+- Scenarios for each fix: a chat printed before its CHAT_CHANGED (rows, first and next render, the head start), fused and tripped passes against ⑨ and ⑤, reset then measure then a spike, the streaming skip's scope and an error-ended stream, the converter instance (and a remade one), a renamed group member, the Limits tooltips (92 cases). The stand-in converter has showdown's shape, `script.js` exports `converter`, `reloadMarkdownProcessor()` and `updateMessageBlock()`, the macro engine knows `{{persona}}` and `{{group}}`, the page has a `#chat`.
+- Two assertions that compared an array with itself are gone; the long-task split test says when the browser gave it nothing to check; the allowed-keys list no longer names `persistMaxMB`. A test filter that matches nothing fails the run. The bench baseline marks a dirty tree and the gate notes a SillyTavern ref other than the baseline's. CI jobs time out after 30 minutes.
+
 ### Code
 
 - A lean pass with no change in behavior: ⑤'s three IndexedDB cursor loops share one helper (`eachKey`), the pipeline and felt counters are reset from their own keys instead of a second copy, the ④ per-generation caches are cleared through one function, `[Symbol.replace]` reads its meta once, the unused `builtAt` field and the never-styled `rpk-heavy`, `rpk-primary` and `rpk-legend` class names are gone, and the comments no longer point at the 0.3.0 planning document ("feature list N"). `text-overflow: clip` (the default) left the stylesheet.

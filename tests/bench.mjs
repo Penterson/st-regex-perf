@@ -55,12 +55,14 @@ async function warmRatio() {
 let failed = false;
 if (update) {
     const r = await warmRatio();
-    const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
+    const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trim() !== '';
+    const commit = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim() + (dirty ? '-dirty' : ''); // -dirty: measured with uncommitted changes
     const baseline = { warmRatio: Number(r.ratio.toFixed(3)), warmMs: Number(r.warmMs.toFixed(1)), noneWarmMs: Number(r.noneWarmMs.toFixed(1)), reps, stRef: ST_REF, commit, date: new Date().toISOString().slice(0, 10) };
     await writeFile(BASELINE_FILE, JSON.stringify(baseline, null, 4) + '\n');
     console.log(`baseline written: warm ratio ${baseline.warmRatio}`);
 } else if (gate) {
     const baseline = JSON.parse(await readFile(BASELINE_FILE, 'utf8'));
+    if (baseline.stRef && baseline.stRef !== ST_REF) console.log(`note: the baseline was measured on SillyTavern ${baseline.stRef}, this run uses ${ST_REF}`);
     const limit = Math.min(baseline.warmRatio * (1 + GATE_SLOWER), 1 + GATE_OVERHEAD);
     let r = await warmRatio();
     for (let again = 0; r.ratio > limit && again < 2; again++) {

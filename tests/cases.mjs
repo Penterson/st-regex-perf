@@ -567,7 +567,7 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'persistDbMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges', 'fastPathStatic', 'htmlMemo', 'htmlMemoMaxEntries', 'htmlMemoMaxMB', 'streamingIncremental', 'adaptive', 'frameStats', 'streamingParagraphCache'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistDbMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges', 'fastPathStatic', 'htmlMemo', 'htmlMemoMaxEntries', 'htmlMemoMaxMB', 'streamingIncremental', 'adaptive', 'frameStats', 'streamingParagraphCache'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
         // ⑤ is on by default since it stores in IndexedDB instead of the chat file (0.5.0)
         for (const [k, v] of Object.entries(r.baseline.initial)) if (k !== 'persist') assert.equal(r.current.initial[k], v, `default ${k}`);
@@ -862,7 +862,7 @@ test('⑨ HTML cache: a re-render reuses the formatted HTML (the converter sees 
     assert.ok(c.third[1] < 10, 'back to the old markdown settings: the old key hits');
     assert.ok(c.encoded[1] > 20, 'a markdown setting changed: formatted again');
     assert.ok(c.dice[0][1] > 10 && c.dice[1][1] > 10, 'a message a {{random}} script matched is formatted every time');
-    assert.deepEqual(c.dice.map(x => x[0]), n.dice.map(x => x[0]).map((_, i) => c.dice[i][0]), 'rolls are not compared, only re-rendered');
+    assert.equal(c.dice.length, n.dice.length, 'rolls are not compared (random), only that both renders happened');
     assert.ok(c.reasoning[0][1] >= 10 && c.reasoning[1][1] < 10, 'reasoning is cached in memory too');
     assert.equal(c.reasoning[1][0], n.reasoning[1][0]);
     assert.deepEqual(c.stored, [null, null, null], '⑤ off: nothing in the chat');
@@ -947,7 +947,7 @@ test('④ paragraph cache: a conversion that depends on the whole text fails the
     assert.equal(r.current.warnings.length, 1, JSON.stringify(r.current.warnings));
     assert.match(r.current.warnings[0], /split markdown differed from the whole one for message #0/);
     assert.deepEqual(r.current.paragraph, { passes: 0, hits: 0, fallbacks: 1 });
-    assert.deepEqual(r.current.chars, r.current.steps.map((s, i) => r.current.chars[i]), 'sanity');
+    assert.equal(r.current.chars.length, r.current.steps.length, 'one conversion count per tick');
     assert.ok(r.current.chars.every((n, i) => n >= r.current.steps[i].length), 'after the fallback every tick converts the whole text');
 });
 
@@ -1001,10 +1001,66 @@ test('① felt: the frame sampler counts frames during a generation only; long t
 test('① felt: a long task is split into the display passes it held and the rest', async ({ each }) => {
     const r = (await each('longTaskPipe', null, { variants: ['current'] })).current;
     assert.ok(r.renders >= 5, `renders inside the task: ${r.renders}`);
-    if (!r.felt.longTasks) return; // the browser did not report long tasks: nothing to split
+    if (!r.felt.longTasks) { // the browser did not report long tasks: nothing to split (headless Chrome without the entry type)
+        console.log('      (no longtask entries from this browser: the split is not checked)');
+        return;
+    }
     const last = r.felt.lastLongTask;
     assert.ok(last && last.ms >= 100, JSON.stringify(r.felt));
     assert.ok(last.pipeMs >= 30 && last.pipeMs <= 75, `about 60 ms of renders inside the ${last.ms} ms task: ${JSON.stringify(last)}`);
     assert.ok(r.felt.longTaskPipeMs <= r.felt.longTaskMs, JSON.stringify(r.felt));
     assert.match(r.text, /display renders inside those tasks: [\d.]+ ms of [\d.]+ ms; the latest task: [\d.]+ ms of [\d.]+ ms/);
+});
+
+test('⑤ in SillyTavern\'s order: a chat printed before its CHAT_CHANGED gets its own rows; the first render after a switch is served after a head start, else the next one', async ({ each }) => {
+    const r = (await each('persistChatOrder', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.rows, { a: 2, b: 3 }, 'the rows of a chat printed before CHAT_CHANGED belong to that chat');
+    assert.equal(r.firstRenderHits, 0, 'without a head start the first pass only starts the read');
+    assert.equal(r.nextRenderHits, 2, 'the next render is served');
+    assert.equal(r.headStartHits, 3, 'rows read while #chat was empty serve the first render');
+    assert.equal(r.rowsAfter, 5, 'no row was filed under another chat');
+});
+
+test('⑦ ⑧: a pass with a fused or tripped script is not kept by ⑨ or ⑤; turning ⑧ off lets the script run again', async ({ each }) => {
+    const r = (await each('skipNotCached', null, { variants: ['current'] })).current;
+    assert.deepEqual(r, { fused: false, afterFuseOff: true, afterFuseOffFromDb: true, tripRun: true, trippedPass: false, afterBreakerOff: true, afterBreakerOffFromDb: true });
+});
+
+test('① "Reset stats" then "Measure on this chat": a later spike is recorded on a stat the measurement created', async ({ each }) => {
+    const r = (await each('measureAfterReset', null, { variants: ['current'] })).current;
+    assert.equal(r.error, null, 'the slow render throws nothing');
+    assert.equal(r.spikes, 1);
+    assert.equal(r.spike, true);
+});
+
+test('④ the streaming skip rests the streamed message only; a stream ended by an error gets one more render, a finished one does not', async ({ each }) => {
+    const r = (await each('streamOtherMessage', null, { variants: ['current'] })).current;
+    assert.equal(r.other, 'about YOU', 'another message rendered during the stream keeps its display scripts');
+    assert.equal(r.streamed, 'me streaming', 'the streamed message rests');
+    assert.equal(r.rerendersAfterError, 1);
+    assert.equal(r.final, 'YOU streaming');
+    assert.equal(r.rerendersAfterFinish, 0);
+});
+
+test('⑨ wraps the converter instance (showdown keeps makeHtml as an own property) and wraps a remade converter again', async ({ each }) => {
+    const r = (await each('showdownInstance', null, { variants: ['current'] })).current;
+    assert.equal(r.ownProperty, true, 'the stand-in has showdown\'s shape');
+    assert.equal(r.first[1], 1);
+    assert.deepEqual(r.second, [r.first[0], 0], 'the hit does not call the converter');
+    assert.deepEqual(r.third, [r.first[0], 0], 'the remade converter is wrapped before the next markdown stage');
+    assert.equal(r.wrapped, true);
+});
+
+test('{{group}} in a display replacement follows a renamed group member', async ({ each }) => {
+    const r = (await each('groupRename', null, { variants: ['none', 'current'] }));
+    assert.equal(r.current.before, 'hello Ann, Bob');
+    assert.equal(r.current.again, 'hello Ann, Bob');
+    assert.equal(r.current.renamed, 'hello Ann, Rob');
+    assert.deepEqual([r.none.before, r.none.renamed], ['hello Ann, Bob', 'hello Ann, Rob']);
+});
+
+test('the Limits rows keep their whole tooltip when it holds a double quote', async ({ each }) => {
+    const r = (await each('limitTitles', null, { variants: ['current'] })).current;
+    assert.equal(r.title, 'Runs "Measure on this chat" once after a chat opens.');
+    assert.deepEqual(r.extraAttributes, []);
 });
