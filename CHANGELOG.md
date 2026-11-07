@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Code
+
+- A lean pass with no change in behavior: ⑤'s three IndexedDB cursor loops share one helper (`eachKey`), the pipeline and felt counters are reset from their own keys instead of a second copy, the ④ per-generation caches are cleared through one function, `[Symbol.replace]` reads its meta once, the unused `builtAt` field and the never-styled `rpk-heavy`, `rpk-primary` and `rpk-legend` class names are gone, and the comments no longer point at the 0.3.0 planning document ("feature list N"). `text-overflow: clip` (the default) left the stylesheet.
+
 ## 0.5.0 — 2026-11-07
 
 Why this release: 0.4.0 measured the whole render; this one acts on what the measurement showed. While a reply streams, markdown and sanitizing run on the paragraph being written only (④'s paragraph cache), ⑤ moves out of the chat file into IndexedDB and is on by default, and each long task says how much of it was display rendering, so the effect of the paragraph cache can be read off the same number before and after.

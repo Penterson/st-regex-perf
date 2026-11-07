@@ -62,7 +62,6 @@
 .regex-perf-kit .rpk-pipe-seg {
     overflow: hidden;
     white-space: nowrap;
-    text-overflow: clip;
     padding: 0 4px;
     box-sizing: border-box;
     min-width: 0;
@@ -432,7 +431,7 @@
     max-height: 70vh;
 }
 
-/* cost chips in the Regex extension's own list (feature list 2.1) */
+/* cost chips in the Regex extension's own list */
 .rpk-chip {
     margin-left: 0.4em;
     font-size: 0.8em;
@@ -440,7 +439,7 @@
     white-space: nowrap;
 }
 
-/* lint (feature list 2.3) */
+/* lint */
 .regex-perf-kit .rpk-lint li {
     margin: 0.2em 0;
 }

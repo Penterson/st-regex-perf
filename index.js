@@ -1,13 +1,14 @@
 /**
  * Regex Perf Kit — speeds up SillyTavern's built-in Regex extension without touching any regex script.
  *
- * The engine compiles every script pattern through RegexProvider.instance.get(). That method is patched to
- * return a RegExp subclass whose [Symbol.replace] (where String.prototype.replace() dispatches) adds
- * ① profiler, ② literal prefilter, ③ memo cache, ④ streaming skip of display-only scripts, ⑥ replacer fast path,
- * ⑦ input-length fuse and ⑧ circuit breaker. ST's MessageFormatter hooks add ⑤ a persisted display cache (IndexedDB), ⑨ a cache
- * of the formatted HTML (regex + markdown skipped together on a re-render), ④'s compromise mode with incremental
- * formatting and a paragraph cache (markdown and sanitizing on the paragraph being written only), and a timing of the whole display pipeline (regex / markdown / sanitize) so the panel can say what share
- * of a render the regex stage is. No ST core file is modified.
+ * The engine compiles every script pattern through RegexProvider.instance.get(). That method is patched to return a
+ * RegExp subclass whose [Symbol.replace] (where String.prototype.replace() dispatches) adds ① profiler, ② literal
+ * prefilter, ③ memo cache, ④ streaming skip of display-only scripts, ⑥ replacer fast path, ⑦ input-length fuse and
+ * ⑧ circuit breaker. ST's MessageFormatter hooks add ⑤ a persisted display cache (IndexedDB), ⑨ a cache of the
+ * formatted HTML (regex and markdown skipped together on a re-render), ④'s compromise mode with incremental formatting
+ * and a paragraph cache (markdown and sanitizing on the paragraph being written only), and a timing of the whole
+ * display pipeline (regex / markdown / sanitize) so the panel can say what share of a render the regex stage is.
+ * No ST core file is modified.
  */
 
 // Namespace import: older engines lack getScriptsByType / SCRIPT_TYPES, and a missing named import fails to load.
@@ -113,7 +114,7 @@ function liveStream() {
 // SillyTavern's macro syntax: {{...}} and the legacy <USER> <BOT> <CHAR> <GROUP> <CHARIFNOTGROUP> markers.
 const MACRO = /{{|<(?:user|bot|char(?:ifnotgroup)?|group)>/i;
 // Macros whose value holds for a whole message render: {{user}} {{char}} {{persona}} {{group}} and the legacy markers
-// SillyTavern maps to them. A replacement or trim string using only these is memoized per value set (feature list 1.2);
+// SillyTavern maps to them. A replacement or trim string using only these is memoized per value set;
 // any other macro, known or not, keeps the script out of ③.
 const STATIC_MACRO = /{{(?:user|char|persona|group)}}|<(?:user|bot|char|group)>/gi;
 
@@ -168,10 +169,9 @@ function classEnd(source, i) {
     return j;
 }
 
-// ② Literal presence per input: each literal (or case-insensitive check) gets a small id, and an input's answers are
-// kept in an array by id, so a string flowing through every script is scanned once per literal. The last input needs
-// no hashing; with keep (displayed messages, which re-render) the litCacheMax() most recent inputs up to the memo's
-// length limit are remembered too. Save-time inputs never come back, so hashing them would cost more than it saves.
+// ② Literal presence per input: each literal (or case-insensitive check) gets a small id and an input's answers are kept
+// by id, so a string flowing through every script is scanned once per literal. With keep (displayed messages, which
+// re-render) the litCacheMax() most recent inputs up to the memo's length limit are remembered; save-time inputs are not.
 let chatLen = 0; // messages in the current chat: a re-render brings each displayed one back, so the cache grows with it
 const litCacheMax = () => Math.max(256, 2 * chatLen);
 const litIds = new Map(); // literal or "\0source/flags" -> id
@@ -480,7 +480,7 @@ function pruneTerms(terms) {
     return [...singles.slice(0, 6).map(s => [s]), ...sets.slice(0, 2)];
 }
 
-// ---- Catastrophic backtracking (feature list 1.5) ----
+// ---- Catastrophic backtracking ----
 
 // Character-class overlap is approximated on a sample: ASCII plus a few other scripts and an astral character.
 const REDOS_SAMPLE = [...Array.from({ length: 128 }, (_, i) => String.fromCharCode(i)), '가', '한', '中', 'é', 'ß', 'Σ', '😀', '　', ' '];
@@ -621,7 +621,7 @@ const hasUnboundedInside = (alts) => alts.some(items => items.some(({ atom, q })
 
 const NO_REDOS = { severity: null, kind: null, snippet: null };
 /**
- * Static ReDoS analysis (feature list 1.5): nested unbounded quantifiers (x+)+ and an unbounded group whose branches can
+ * Static ReDoS analysis: nested unbounded quantifiers (x+)+ and an unbounded group whose branches can
  * start with the same character (a|ab)+ are exponential; adjacent unbounded atoms that can match the same characters
  * \s*\s* polynomial (exponential inside an unbounded group). Character overlap is sampled, so this is a verdict on the
  * pattern's shape, not a proof. kind names the shape (also 'dotalt' for the linear but slow (.|\n)*, which gets a
@@ -727,7 +727,7 @@ const keyOf = (re) => re.source + '\u0000' + re.flags;
 
 // A RAW/ESCAPED find pattern with macros ({{random}}, {{getvar::x}}) compiles to another string on every run, so the
 // compiled key misses its script. The raw pattern is matched instead: re-substituted (exact when the macro's value is
-// stable) or as a shape in which each macro stands for any text (feature list 3, row 2).
+// stable) or as a shape in which each macro stands for any text.
 const MACRO_SPLIT = /{{[^{}]*}}|<(?:user|bot|char(?:ifnotgroup)?|group)>/gi;
 const shapeOf = (raw) => new RegExp('^' + raw.split(MACRO_SPLIT).map(escapeRe).join('[\\s\\S]*?') + '$');
 function resolveDynamic(regexString, dynamic) {
@@ -741,7 +741,7 @@ function resolveDynamic(regexString, dynamic) {
     return dynamic.find(d => d.shape.test(regexString))?.info;
 }
 
-// ---- ⑥ Fast path (feature list 1.1) ----
+// ---- ⑥ Fast path ----
 
 const VERIFY_RUNS = 3; // a script's first fast-path runs are compared with SillyTavern's own callback
 const fastPathOff = new Set(); // fast keys (pattern + replacement) that disagreed once: back to the callback for the session
@@ -844,14 +844,14 @@ function buildTrimReplacer(replaceString, trims, named) {
     };
 }
 
-/** @type {{map: Map<string, object>, dynamic: object[], counts: object, depthRules: number[][], version: string, displayVersion: string, builtAt: number} | null} */
+/** @type {{map: Map<string, object>, dynamic: object[], counts: object, depthRules: number[][], version: string, displayVersion: string, checkedAt: number} | null} */
 let infoCache = null; // null = rebuild on next use
 const markDirty = () => { infoCache = null; };
 let infoBuilds = 0; // how often the script info was rebuilt (in the JSON report)
 const FINGERPRINT_EVERY_MS = 16; // the script lists are fingerprinted at most once per frame
 
 // Parsed patterns, needles and templates outlive a rebuild: with hundreds of scripts, re-parsing all of them on every
-// rebuild was a parse storm (feature list 1.3, 3 row 5).
+// rebuild was a parse storm.
 const CACHE_MAX = 2000;
 const compiledCache = new Map(); // pattern string, as RegexProvider receives it -> RegExp | null
 const needleCache = new Map(); // "source\0flags" -> extractNeedle()
@@ -865,7 +865,7 @@ function cached(map, key, make, max = CACHE_MAX) {
     }
     return v;
 }
-// regexFromString() swallows the engine's error; the invalid-pattern list (feature list 2.2) shows it, so the pattern is
+// regexFromString() swallows the engine's error; the invalid-pattern list shows it, so the pattern is
 // compiled again the way SillyTavern splits it.
 const compile = (pattern) => cached(compiledCache, pattern, () => {
     try {
@@ -916,9 +916,9 @@ function buildInfo(groups) {
     const map = new Map();
     const dynamic = []; // {raw, substitute, shape, info} of RAW/ESCAPED scripts whose pattern has macros, see resolveDynamic()
     const counts = { total: 0, active: 0, noNeedle: 0, redos: 0, redosExp: 0, invalid: 0, types: {} };
-    const invalid = []; // {id, name, type, error} of scripts whose pattern does not compile (feature list 2.2)
+    const invalid = []; // {id, name, type, error} of scripts whose pattern does not compile
     const versionParts = [];
-    const displayParts = []; // the parts that can change a display result: the ⑤ key's version (feature list 3, row 4)
+    const displayParts = []; // the parts that can change a display result: the ⑤ key's version
     const depthRules = []; // [min, max] of display scripts with depth limits, for the ⑤ key
 
     for (const [origin, list] of groups) {
@@ -1037,7 +1037,7 @@ function buildInfo(groups) {
     }
     const version = fnv1a(versionParts.join('\u0003'));
     if (version !== infoCache?.version) clearLitCache(); // other scripts, other literals
-    return { map, dynamic, invalid, counts, depthRules, version, displayVersion: fnv1a(displayParts.join('\u0003')), fp: fingerprint(groups), checkedAt: Date.now(), builtAt: Date.now() };
+    return { map, dynamic, invalid, counts, depthRules, version, displayVersion: fnv1a(displayParts.join('\u0003')), fp: fingerprint(groups), checkedAt: Date.now() };
 }
 
 // ---- Instrumented RegExp ----
@@ -1056,7 +1056,7 @@ const SAMPLE_EVERY = 8;
 let statsDirty = false; // the stats changed since the panel was last rendered
 let tripSeq = 0; // ⑧ ids for the Undo controls of tripped scripts
 
-/** ⑧ Turns a script off for the session and says so, with Undo and Open script in the toast (feature list 1.5). */
+/** ⑧ Turns a script off for the session and says so, with Undo and Open script in the toast. */
 function trip(stat) {
     stat.tripped = true;
     statsDirty = true;
@@ -1195,7 +1195,7 @@ function getStat(key, re) {
             incremental: 0, // ④ runs on the new lines of a streamed message only
             seen: 0, // every run that executed, also the ones sampling left untimed
             spike: null, // {ms, len, head, messageId}: the newest run over SPIKE_MS
-            spikes: [], // the SPIKE_KEEP newest such runs, newest first (feature list 2.2)
+            spikes: [], // the SPIKE_KEEP newest such runs, newest first
             moreMatches: 0, // runs of a pattern without g that would have matched again (lint "missing g")
             needle: null, // the needle the wrapper uses (and its nested flag), set with its meta
             redos: NO_REDOS, // the analyzer's verdict, set with its meta
@@ -1221,7 +1221,8 @@ class PerfRegExp extends RegExp {
     }
 
     [Symbol.replace](str, replacer) {
-        const { stat, markdownOnly, test, memoPrefix, memoStatic } = this._meta;
+        const meta = this._meta;
+        const { stat, markdownOnly, test, memoPrefix, memoStatic } = meta;
 
         if (stat === skipStat) return str;
         if (bypass && displayPass) { // a stored ⑤ result is being shown for this message
@@ -1241,7 +1242,6 @@ class PerfRegExp extends RegExp {
             stat.streamSkipped++;
             return unchanged(stat, str);
         }
-        const meta = this._meta;
         if (displayPass && meta.dynamic) passVolatile = true; // ⑨ ⑤: another render may compile another pattern
         // ④ incremental formatting (compromise mode): a line-local script that already formatted a prefix of this
         // streamed message, up to a line break, runs on the lines after it only; the rest of the output is reused.
@@ -1564,7 +1564,7 @@ let passTk = null; // at the end of our BEFORE_REGEX hook
 let passT1 = null; // at our AFTER_REGEX hook
 let passT2 = null; // at our AFTER_MARKDOWN hook
 let passHtmlHit = false; // this pass is a ⑨ hit
-const resetPipe = () => { Object.assign(pipe, { passes: 0, hookMs: 0, regexMs: 0, markdownMs: 0, sanitizeMs: 0, htmlHits: 0, htmlHitMs: 0, htmlStores: 0, paraPasses: 0, paraHits: 0, paraFallbacks: 0 }); };
+const resetPipe = () => { for (const k of Object.keys(pipe)) if (k !== 'loadMs') pipe[k] = 0; }; // loadMs belongs to the chat, not to the stats
 const pipeTotal = () => pipe.hookMs + pipe.regexMs + pipe.markdownMs + pipe.sanitizeMs;
 /** Regex time as a share of the timed display renders (0..1), null before anything was timed. */
 const regexShare = () => {
@@ -1647,8 +1647,9 @@ function wrapShowdown() {
 // freeze the page (PerformanceObserver 'longtask', Chromium). Counted since the stats were reset; the frame sampler
 // runs only during a generation, so idle pages pay nothing.
 const FRAME_BUDGET_MS = 1000 / 60;
-const feel = { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0, longTaskPipeMs: 0, lastLongTask: null };
-const resetFeel = () => { Object.assign(feel, { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0, longTaskPipeMs: 0, lastLongTask: null }); };
+const FEEL_ZERO = { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0, longTaskPipeMs: 0, lastLongTask: null };
+const feel = { ...FEEL_ZERO };
+const resetFeel = () => { Object.assign(feel, FEEL_ZERO); };
 // The display passes of the last few seconds, as [start, end] on the performance clock, so a long task can be split
 // into "the render pipeline" (what this extension can see and partly save) and "the rest" (SillyTavern's DOM work,
 // layout, other extensions): a stutter whose task holds little pipeline time is not this extension's to fix.
@@ -1764,11 +1765,9 @@ function pipeVersion() {
 }
 
 // ④ paragraph cache (compromise mode): while a reply streams, the HTML of its finished paragraphs is kept, so showdown
-// and DOMPurify run on the paragraph being written. The split point is a blank line after a plain paragraph, a heading
-// or a closed code fence, outside fences, lists, quotes, tables and open raw HTML (paragraphCut); showdown converts the
-// two parts as it would the whole, joined by a line break. The first renders that split are compared with a conversion
-// of the whole text and a sanitizing of the whole HTML; on any difference the message goes back to whole renders (the
-// self-check ⑥ and ④ incremental use too). Dropped when the generation ends.
+// and DOMPurify run on the paragraph being written. showdown converts the two parts as it would the whole, joined by a
+// line break. A message's first split renders are compared with whole ones; on any difference it goes back to whole
+// renders (the self-check ⑥ and ④ incremental use too). Dropped when the generation ends.
 const paraViews = new Map(); // stream key -> {sep, tailStart, head, html, pre, san, checks, sanChecks, off}
 const PARA_MARK = '\uE000'; // put between the two HTML parts by makeHtml, taken out again by our AFTER_MARKDOWN hook (the first)
 const PARA_VERIFY = 3;
@@ -1899,11 +1898,13 @@ let persistAvailable = false; // the hooks exist (recent SillyTavern)
 let htmlStageAvailable = false; // the AFTER_MARKDOWN stage exists too (⑨ and the pipeline timing need it)
 let pending = null; // {id, key, input, html}: message awaiting its after-regex result (id: ⑤'s row, null when nothing can be stored)
 const streamViews = new Map(); // ④ compromise: "<messageId><m|r>" -> {at, prefix, out} of the streamed message
+/** ④'s per-generation state: the compromise views and the paragraph cache (both hold the streamed message's text). */
+const clearStreamCaches = () => { streamViews.clear(); paraViews.clear(); };
 let streamView = null; // the view this pass formats
 let streamTail = null; // raw text this pass appends after the regex stage
 
 // Depth of a message as messageFormatting() counts it (non-system messages after it), from one table per render burst:
-// built on first use, dropped by a microtask, so a synchronous run over the chat computes it once (feature list 1.3).
+// built on first use, dropped by a microtask, so a synchronous run over the chat computes it once.
 let depthTable = null;
 function depthAt(chat, i) {
     if (depthTable?.chat !== chat || depthTable.len !== chat.length) {
@@ -2260,6 +2261,15 @@ let persistLoaded = false; // this chat's rows have been read (or there is nothi
 let persistLastAt = 0; // `at` is strictly increasing, so rows stored in the same millisecond still age in order
 
 const idbDone = (req) => new Promise((ok, no) => { req.onsuccess = () => ok(req.result); req.onerror = () => no(req.error); });
+/** Walks a key cursor request; each(cursor) returning false stops the walk. */
+const eachKey = (req, each) => new Promise((ok, no) => {
+    req.onsuccess = () => {
+        const cur = req.result;
+        if (!cur || each(cur) === false) return ok();
+        cur.continue();
+    };
+    req.onerror = () => no(req.error);
+});
 const txDone = (tx) => new Promise((ok, no) => { tx.oncomplete = () => ok(); tx.onerror = tx.onabort = () => no(tx.error); });
 
 /** Opens (and on first use creates) the database; resolves to null where IndexedDB is unavailable. */
@@ -2294,17 +2304,12 @@ async function measurePersistDb(db) {
     const addedRows = persistDbRows;
     let bytes = 0;
     let rows = 0;
-    await new Promise((resolve) => {
-        const req = db.transaction(DB_STORE).objectStore(DB_STORE).index('age').openKeyCursor();
-        req.onsuccess = () => {
-            const cur = req.result;
-            if (!cur) return resolve();
+    try {
+        await eachKey(db.transaction(DB_STORE).objectStore(DB_STORE).index('age').openKeyCursor(), (cur) => {
             bytes += cur.key[1];
             rows++;
-            cur.continue();
-        };
-        req.onerror = () => resolve();
-    });
+        });
+    } catch { /* an unreadable store counts as empty */ }
     persistDbBytes = bytes + (persistDbBytes - added);
     persistDbRows = rows + (persistDbRows - addedRows);
     statsDirty = true;
@@ -2313,7 +2318,7 @@ async function measurePersistDb(db) {
 /** The current chat as ⑤ keys it, or null without an open chat. */
 function persistChatKeyNow() {
     const { chatId, groupId, characterId, characters } = ctx();
-    if (chatId == null || chatId === '') return null;
+    if (!chatId) return null;
     return groupId ? `g:${groupId}:${chatId}` : `c:${characters?.[characterId]?.avatar ?? characterId}:${chatId}`;
 }
 
@@ -2405,23 +2410,17 @@ async function evictPersisted(db) {
     try {
         const tx = db.transaction(DB_STORE, 'readwrite');
         const store = tx.objectStore(DB_STORE);
-        await new Promise((resolve, reject) => {
-            const req = store.index('age').openKeyCursor();
-            req.onsuccess = () => {
-                const cur = req.result;
-                if (!cur || persistDbBytes <= target) return resolve();
-                store.delete(cur.primaryKey);
-                persistDbBytes -= cur.key[1];
-                persistDbRows--;
-                const mine = persistMem.get(cur.primaryKey);
-                if (mine) {
-                    persistMem.delete(cur.primaryKey);
-                    persistAcct.entries--;
-                    persistAcct.bytes -= mine.n;
-                }
-                cur.continue();
-            };
-            req.onerror = () => reject(req.error);
+        await eachKey(store.index('age').openKeyCursor(), (cur) => {
+            if (persistDbBytes <= target) return false;
+            store.delete(cur.primaryKey);
+            persistDbBytes -= cur.key[1];
+            persistDbRows--;
+            const mine = persistMem.get(cur.primaryKey);
+            if (mine) {
+                persistMem.delete(cur.primaryKey);
+                persistAcct.entries--;
+                persistAcct.bytes -= mine.n;
+            }
         });
         await txDone(tx);
     } catch (e) { console.warn('[RegexPerf] ⑤ could not drop old results', e); }
@@ -2442,16 +2441,7 @@ async function clearPersistedDb() {
     try {
         const tx = db.transaction(DB_STORE, 'readwrite');
         const store = tx.objectStore(DB_STORE);
-        await new Promise((resolve, reject) => {
-            const req = store.index('chat').openKeyCursor(IDBKeyRange.only(chatKey));
-            req.onsuccess = () => {
-                const cur = req.result;
-                if (!cur) return resolve();
-                store.delete(cur.primaryKey);
-                cur.continue();
-            };
-            req.onerror = () => reject(req.error);
-        });
+        await eachKey(store.index('chat').openKeyCursor(IDBKeyRange.only(chatKey)), (cur) => { store.delete(cur.primaryKey); });
         await txDone(tx);
     } catch (e) { console.warn('[RegexPerf] ⑤ could not clear the stored results', e); }
     statsDirty = true;
@@ -2590,7 +2580,7 @@ async function turnOffByName(name) {
     return t`Turned off: ${hits[0].name}`;
 }
 
-// ---- Lint (feature list 2.3) and saving through the engine ----
+// ---- Lint and saving through the engine ----
 
 /**
  * Saves a change to the scripts with these ids through the engine (no Regex drawer involved) and re-reads the script
@@ -2643,7 +2633,7 @@ async function confirmPopup(html) {
     return r === 1 || r === true;
 }
 
-// ---- Cost chips in the Regex extension's own list (feature list 2.1) ----
+// ---- Cost chips in the Regex extension's own list ----
 
 const LIST_IDS = ['saved_regex_scripts', 'saved_scoped_scripts', 'saved_preset_scripts'];
 const observedLists = new WeakSet();
@@ -2712,7 +2702,7 @@ let measureBusy = false; // a measurement is running (it yields, so other code r
  * Renders every message of the current chat as SillyTavern displays it (messageFormatting), first with the
  * prefilter, the memo and ⑤ off, then with the user's settings, and returns both times. With a stat, both passes
  * run with the caches off, the second one without that pattern: {with, without}. The chat was rendered when it
- * opened, so this is a re-render, as on swipes, edits and reloads. Chunked (feature list 1.4): every MEASURE_CHUNK
+ * opened, so this is a re-render, as on swipes, edits and reloads. Chunked: every MEASURE_CHUNK
  * messages it yields to the page, so the page stays usable. The features are turned off through cfg only while a
  * message is being formatted, so a render that happens in between gets the user's settings and nothing temporary can
  * be saved; the stats are restored afterwards.
@@ -2937,7 +2927,7 @@ const settingsHtml = () => `
       </details>
 
       <div class="rpk-buttons">
-        <div class="menu_button rpk-primary" id="rpk_measure" title="${t`Re-renders this chat twice, with the features off and on, and shows the real difference. Runs in small steps, so the page stays usable.`}">${t`Measure on this chat`}</div>
+        <div class="menu_button" id="rpk_measure" title="${t`Re-renders this chat twice, with the features off and on, and shows the real difference. Runs in small steps, so the page stays usable.`}">${t`Measure on this chat`}</div>
         <div class="menu_button" id="rpk_copy">${t`Copy report`}</div>
         <div class="menu_button rpk-minor" id="rpk_copy_json" title="${t`Copy the report as JSON`}">JSON</div>
         <div class="menu_button rpk-minor" id="rpk_copy_csv" title="${t`Copy the table as CSV`}">CSV</div>
@@ -2962,7 +2952,7 @@ const settingsHtml = () => `
         <summary>${t`Lint`} <span class="rpk-dim" id="rpk_lint_count"></span></summary>
         <ul id="rpk_lint_list"></ul>
       </details>
-      <details class="rpk-tips rpk-legend" data-section="legend">
+      <details class="rpk-tips" data-section="legend">
         <summary>${t`How to read the table`}</summary>
         <ul>
           <li>${t`Rows are sorted by total time. A highlighted row takes half or more of all regex time: fixing or turning it off helps the most.`}</li>
@@ -3073,7 +3063,7 @@ function renderPanel() {
     }
     ui.rows = rows.slice(0, 60);
     setContent(ui.tbody, ui.rows.map((r, i) => {
-        const cls = (s.total > 0 && r.totalMs / s.total >= 0.5) ? 'rpk-hot' : (r.redos.severity === 'exp' ? 'rpk-heavy' : '');
+        const cls = s.total > 0 && r.totalMs / s.total >= 0.5 ? 'rpk-hot' : '';
         const lit = fmtNeedles(r);
         const m = rowMeasures.get(r);
         const actions = (m ? `<span class="rpk-row-ms" title="${esc(t`Without this script the chat renders in ${fmtMs(m.without)} ms instead of ${fmtMs(m.with)} ms (③ and ⑤ off)`)}">${m.with >= m.without ? '−' : '+'}${fmtMs(Math.abs(m.with - m.without))} ms</span>` : '')
@@ -3106,7 +3096,7 @@ function renderPanel() {
 }
 
 /**
- * Turning a script off goes through the engine (saveScriptsByType, feature list 3 row 9); opening it in the editor
+ * Turning a script off goes through the engine (saveScriptsByType); opening it in the editor
  * has no API, so the Regex drawer's own list is used: each script row has the script's id and an .edit_existing_regex
  * button (and a .regex-toggle-on switch, the fallback for turning it off on an engine without saveScriptsByType).
  */
@@ -3324,15 +3314,13 @@ eventSource.on(event_types.GENERATION_STARTED, (_type, _params, dryRun) => {
     if (dryRun) return;
     checkWrapper();
     generating = true;
-    streamViews.clear();
-    paraViews.clear();
+    clearStreamCaches();
     startFrames();
 });
 for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPED]) {
     eventSource.on(event, () => {
         generating = false;
-        streamViews.clear();
-        paraViews.clear(); // the paragraph cache holds the streamed message's HTML
+        clearStreamCaches();
         for (const w of wrapped.values()) if (w._meta) w._meta.inc = null; // ④ incremental state holds the streamed text
     });
 }
@@ -3343,8 +3331,7 @@ for (const event of [event_types.CHARACTER_MESSAGE_RENDERED, event_types.USER_ME
 }
 eventSource.on(event_types.CHAT_CHANGED, () => {
     markDirty();
-    streamViews.clear();
-    paraViews.clear();
+    clearStreamCaches();
     loadPersisted();
     chatLen = ctx().chat?.length ?? 0;
     const now = performance.now();
