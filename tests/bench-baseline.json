@@ -1,9 +1,9 @@
 {
-    "warmRatio": 0.668,
-    "warmMs": 34.2,
-    "noneWarmMs": 51.1,
+    "warmRatio": 0.478,
+    "warmMs": 27.7,
+    "noneWarmMs": 57.9,
     "reps": 11,
     "stRef": "staging",
-    "commit": "e21e666",
-    "date": "2026-11-06"
+    "commit": "9ab4090",
+    "date": "2026-11-07"
 }
