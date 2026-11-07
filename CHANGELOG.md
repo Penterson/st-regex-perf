@@ -14,6 +14,17 @@
   - A message's first three split renders are compared with a whole conversion and a whole sanitizing; a difference sends that message back to whole renders, with a console warning (the self-check ⑥ and ④ incremental use). The cache is dropped when the generation ends; the final render goes through the whole pipeline.
   - The summary, the text report and the JSON (`pipeline.paragraph`: `passes`, `hits`, `fallbacks`) count the split renders.
 
+### Storage
+
+- ⑤ stores in the browser's IndexedDB instead of the chat file, and is on by default.
+  - One row per displayed message, keyed by the chat (character avatar or group id + chat id) and the message's 64-bit hash and length; the row holds the whole ⑤/⑨ key, so the invalidation rules are unchanged (display scripts' version, names, depth rules, markdown settings). A changed message leaves its old row until it ages out.
+  - The hooks stay synchronous: a chat's rows are read into memory when the chat opens (CHAT_CHANGED, and once at start) and the hooks look there only; stores go to the memory copy at once and to IndexedDB in one transaction 200 ms later (and on `pagehide`).
+  - Limits: `⑤ Saved results, all chats (MB)` (`persistDbMaxMB`, 64 MB by default) replaces the per-chat cap; beyond it the rows stored longest ago are dropped first, whichever chat they belong to (a key cursor over an `[at, n]` index, so sizes are read without the rows). `persistMaxMB` is no longer read.
+  - "Clear saved results (this chat)" deletes this chat's rows and, as before, what older versions wrote into the chat file; the chat is saved only when such entries were there.
+  - Entries older versions wrote into chat files (`extra.regex_perf_cache`) are still served when their key matches, never written or trimmed again.
+  - Where IndexedDB cannot be opened, the panel's ⑤ note says so and only the chat-file entries are read.
+  - The usage line reads `⑤ saved results: N messages in this chat, X of 64 MB in all chats`; the JSON `memo.persist` gains `dbRows`, `dbBytes`, `maxMB`, `loaded`, `pending`, `available`.
+
 ### Fixes
 
 - The settings panel and Limits list the features in order, ① to ⑨ (⑨ sat between ⑥ and ⑦).
@@ -30,6 +41,7 @@
 - The lint scenario measures each fix button's box against its row (81 cases).
 - `measureVerdict` is exported; a case feeds it hand-made results.
 - ④ paragraph cache: a streamed reply with paragraphs, a heading, a list, a code fence and a quote block renders like plain SillyTavern tick by tick while the converter and the sanitizer see the last paragraph only; a converter whose output depends on the whole text fails the first self-check and the message goes back to whole renders (84 cases). The stand-in converter's trailing-space pass is per line now (`\s+$` ate the blank line between paragraphs).
+- ⑤ in IndexedDB: rows come back when a chat opens again (another chat in between drops the memory copy), two chats with the same messages keep rows of their own, clearing is per chat, the size limit drops the oldest rows first, the usage matches a scan of the database, and a chat-file entry of an older version is served when its key matches and left alone otherwise (85 cases). The harness page gets a chat id of its own (`chatId` / `groupId` in its `getContext()`), so rows never cross between tests; scenarios that need every re-render to do work turn ⑤ off as they turn ⑨ off.
 
 ## 0.4.0 — 2026-11-07
 

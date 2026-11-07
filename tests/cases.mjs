@@ -193,12 +193,12 @@ test('extra: ⑤ persisted display output refreshes when the message depth or a 
 
 // Words the Korean UI keeps in English: product and SillyTavern setting names, slash command verbs, data formats,
 // units, the test's script names.
-const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|staging|regexperf|reset|text|json|csv|measure|\boff\b|JSON|CSV|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b|{{(?:user|char|persona|group)}}|\bfuse\b|\bHTML\b|PerformanceObserver|dotAll|Chromium|regex|markdown|sanitize/g;
+const EN_ALLOWED = /Regex Perf Kit(?: report)?|SillyTavern|User Settings|Messages to Load|Streaming FPS|Only Format (?:Display|Prompt)|MessageFormatter|IndexedDB|staging|regexperf|reset|text|json|csv|measure|\boff\b|JSON|CSV|Status card|Greedy|Nobody|Digits|status|nothing-here|\bms\b|\bMB\b|\bKB\b|\bST\b|{{(?:user|char|persona|group)}}|\bfuse\b|\bHTML\b|PerformanceObserver|dotAll|Chromium|regex|markdown|sanitize/g;
 
 /** What the Korean panel must say (the plain-language wording of the panel redesign), as shown on screen. */
 const KO_PANEL = [
     '① 프로파일러', '② 리터럴 프리필터', '③ 결과 캐시',
-    '④ 스트리밍 중 표시용 스크립트 건너뛰기', '절충안: 완성된 줄은 계속 꾸미기', '⑤ 영구 캐시 (채팅 파일에 저장)',
+    '④ 스트리밍 중 표시용 스크립트 건너뛰기', '절충안: 완성된 줄은 계속 꾸미기', '⑤ 영구 캐시 (브라우저에 저장)',
     '</status>', // the example tag in ②'s description survives HTML insertion
     '한도', '이 채팅으로 측정', '리포트 복사', '측정 초기화', '새로고침', '저장된 결과 삭제 (이 채팅)',
     '번 실행했고', '번은 실행하지 않았습니다', '부터 측정', '표 읽는 법', '설정만으로 할 수 있는 것',
@@ -432,11 +432,11 @@ test('chat open: optional auto-measure and a one-time hint when the first render
 test('reset settings restores the defaults; open sections are remembered across loads', async ({ each }) => {
     const r = (await each('resetSettings', null, { variants: ['current'] })).current;
     assert.deepEqual(r.openAtStart, { limits: false, lint: false, legend: false, tips: false }, 'closed by default');
-    assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistMaxMB: 2 });
+    assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistDbMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, fastPathStatic: true, htmlMemo: true, htmlMemoMaxEntries: 2000, htmlMemoMaxMB: 32, streamingIncremental: true, streamingParagraphCache: true, adaptive: true, frameStats: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: false, persistMaxLen: 60000, persistMaxMB: 8, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
-    assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistMaxMB: '8' }, 'the controls follow');
+    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, fastPathStatic: true, htmlMemo: true, htmlMemoMaxEntries: 2000, htmlMemoMaxMB: 32, streamingIncremental: true, streamingParagraphCache: true, adaptive: true, frameStats: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: true, persistMaxLen: 60000, persistDbMaxMB: 64, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
+    assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistDbMaxMB: '64' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
     assert.deepEqual(r.uiAfterOpen, { limits: true }, 'opening a section is remembered');
@@ -495,7 +495,7 @@ test('item 15: memo and ⑤ limits are editable (validated) and memo / ⑤ usage
     assert.deepEqual(r.current.found, [true, true, true, true]);
     assert.deepEqual(r.current.values, { memoMaxEntries: 4, memoMaxLen: 0, memoMaxMB: 64, persistMaxLen: 123457 });
     assert.match(r.current.usage, /cache: 4 entries/);
-    assert.match(r.current.usage, /in this chat: 3 messages, ≈0 KB of 8 MB/);
+    assert.match(r.current.usage, /⑤ saved results: 3 messages in this chat, [\d.]+ of 64 MB in all chats/);
 });
 
 test('③ hashed keys (Limits toggle, default off): exact results from half the memory; toggling clears the cache', async ({ each }) => {
@@ -511,25 +511,27 @@ test('③ hashed keys (Limits toggle, default off): exact results from half the 
     assert.equal(r.current.hashed.setting, true, 'saved as a setting');
 });
 
-test('⑤ key: 64 bits of the text, so same-length fnv1a collisions do not share a result; old-format entries are recomputed', async ({ each }) => {
+test('⑤ key: 64 bits of the text, so same-length fnv1a collisions do not share a result; chat-file entries of older versions are read, never written', async ({ each }) => {
     const r = await each('persistKey');
     assert.deepEqual(r.none.out, ['zhj0tclp', 'ti0fsnfk', 'ti0fsnfk']);
-    assert.deepEqual(r.baseline.out, ['zhj0tclp', 'zhj0tclp', 'ti0fsnfk'], 'baseline serves the colliding message the stored result (bug reproduced)');
-    assert.deepEqual(r.current.out, r.none.out);
+    assert.deepEqual(r.baseline.out, ['zhj0tclp', 'zhj0tclp', 'zhj0tclp'], 'baseline serves the colliding message the stored result (bug reproduced)');
+    assert.deepEqual(r.current.out, [...r.none.out, 'LEGACY', 'ti0fsnfk'], 'a matching chat-file entry is served; an older key format is recomputed');
+    assert.equal(r.current.rows, 2, 'a row per message text (chat + hash): the text before the edit keeps its row until it ages out');
     assert.match(r.current.key, /^[0-9a-z]+-[0-9a-z]+:8:/, 'two hashes, then the length');
+    assert.deepEqual(r.current.legacy, { k: r.current.key.replace(/^[^:]+/, 'old'), v: 'STALE' }, 'the chat-file entry is left as it was');
+    assert.equal(r.current.legacyChatRows, 1, 'the recomputed result went to IndexedDB');
 });
 
-test('⑤ budget: beyond the per-chat cap the oldest messages\' results are dropped; usage is shown against the cap', async ({ each }) => {
-    const r = await each('persistBudget', null, { variants: ['baseline', 'current'] });
-    assert.deepEqual(r.baseline.stored, Array(26).fill(true), 'baseline keeps everything');
-    assert.equal(r.baseline.hasLimit, false);
-    const kept = r.current.stored.map((v, i) => v ? i : -1).filter(i => i >= 0);
-    assert.ok(kept.length >= 18 && kept.length <= 20, `about 20 x 50 KB fit in 1 MB: ${kept.length}`);
+test('⑤ budget: beyond the size limit the rows stored longest ago are dropped first; usage is shown against the limit', async ({ each }) => {
+    const r = (await each('persistBudget', null, { variants: ['current'] })).current;
+    const kept = r.stored.map((v, i) => v ? i : -1).filter(i => i >= 0);
+    assert.ok(kept.length >= 17 && kept.length <= 21, `about 19 x 48 KB fit in 90% of 1 MB: ${kept.length}`);
     assert.deepEqual(kept, Array.from({ length: kept.length }, (_, k) => 26 - kept.length + k), 'the newest messages are kept, the oldest dropped');
-    assert.ok(r.current.chars <= 1048576, 'within the cap');
-    assert.match(r.current.usage, new RegExp(`⑤ saved in this chat: ${kept.length} messages, ≈\\d+ KB of 1 MB`));
-    assert.equal(r.current.hasLimit, true);
-    assert.equal(r.current.limit, 2, 'the cap is editable under Limits');
+    assert.ok(r.bytes <= 1048576, 'within the limit');
+    assert.match(r.usage, new RegExp(`⑤ saved results: ${kept.length} messages in this chat, [\\d.]+ of 1 MB in all chats`));
+    assert.equal(r.hasLimit, true);
+    assert.equal(r.limit, 2, 'the limit is editable under Limits');
+    assert.equal(r.inChat, false, 'nothing is written into the chat');
 });
 
 test('item 16: streaming compromise mode formats completed lines at most every N ms; final render is complete', async ({ each }) => {
@@ -565,24 +567,30 @@ test('release hygiene: manifest version in the changelog, auto_update on, screen
 test('unchanged vs baseline: settings, controls, toggles, /regexperf and ⑤ clearing behave as before', async ({ each }) => {
     for (const locale of ['ko-kr', 'en']) {
         const r = await each('ux', null, { locale, variants: ['baseline', 'current'] });
-        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges', 'fastPathStatic', 'htmlMemo', 'htmlMemoMaxEntries', 'htmlMemoMaxMB', 'streamingIncremental', 'adaptive', 'frameStats', 'streamingParagraphCache'];
+        const added = ['memoMaxMB', 'streamingThrottle', 'streamingThrottleMs', 'persistMaxMB', 'persistDbMaxMB', 'memoHashKeys', 'autoMeasure', 'loadHintMs', 'ui', 'fastPath', 'memoStatic', 'memoPostHoc', 'profilerSampling', 'timeReplacer', 'fuse', 'fuseLen', 'breaker', 'breakerMs', 'breakerCount', 'lint', 'listBadges', 'fastPathStatic', 'htmlMemo', 'htmlMemoMaxEntries', 'htmlMemoMaxMB', 'streamingIncremental', 'adaptive', 'frameStats', 'streamingParagraphCache'];
         assert.deepEqual(Object.keys(r.current.initial).filter(k => !added.includes(k)), Object.keys(r.baseline.initial));
-        for (const [k, v] of Object.entries(r.baseline.initial)) assert.equal(r.current.initial[k], v, `default ${k}`);
+        // ⑤ is on by default since it stores in IndexedDB instead of the chat file (0.5.0)
+        for (const [k, v] of Object.entries(r.baseline.initial)) if (k !== 'persist') assert.equal(r.current.initial[k], v, `default ${k}`);
+        assert.equal(r.current.initial.persist, true);
         assert.deepEqual({ memoMaxMB: r.current.initial.memoMaxMB, streamingThrottle: r.current.initial.streamingThrottle }, { memoMaxMB: 64, streamingThrottle: false });
         for (const id of r.baseline.ids) assert.ok(r.current.ids.includes(id), `#${id}`);
-        assert.deepEqual(r.current.checked, r.baseline.checked);
+        assert.deepEqual({ ...r.current.checked, rpk_persist: 0 }, { ...r.baseline.checked, rpk_persist: 0 });
+        assert.deepEqual(r.current.checked.rpk_persist, { checked: true, disabled: r.baseline.checked.rpk_persist.disabled });
         // ⑥ verifies a script's first fast-path runs against SillyTavern's callback, so those runs execute the regex twice
         assert.deepEqual({ ...r.current.toggled, rerun: Math.min(r.current.toggled.rerun, 1) }, r.baseline.toggled);
-        // ⑤ now stores the formatted HTML (h) instead of the after-regex text (v / same)
-        assert.deepEqual(r.current.stored, ['h', 'k']);
-        assert.deepEqual(r.baseline.stored, ['k', 'same']);
+        // ⑤ now stores the formatted HTML (h) in an IndexedDB row instead of the after-regex text (v / same) in the chat
+        assert.deepEqual(r.current.stored, ['at,chat,h,id,k,n']);
+        assert.deepEqual(r.current.storedInChat, [], 'nothing is written into the chat');
+        assert.deepEqual(r.baseline.storedInChat, ['k', 'same']);
         const verbs = ['reset | text | json | csv | measure | off <script name>']; // the argument help grew with the new verbs
         assert.deepEqual(r.current.slash.args, verbs);
+        // the button cleared the one row; the chat file held nothing, so it was not saved (the baseline saved its chat)
+        assert.deepEqual({ ...r.current.cleared, saved: 0, toast: 0 }, { ...r.baseline.cleared, saved: 0, toast: 0, rows: 0 });
+        assert.equal(r.current.cleared.saved, 0);
         if (locale === 'ko-kr') { // the baseline's UI is Korean in every locale
-            assert.deepEqual(r.current.cleared, r.baseline.cleared);
+            assert.equal(r.current.cleared.toast, r.baseline.cleared.toast);
             assert.deepEqual({ ...r.current.slash, args: 0 }, { ...r.baseline.slash, args: 0 });
         } else {
-            assert.deepEqual({ ...r.current.cleared, toast: 0 }, { ...r.baseline.cleared, toast: 0 });
             assert.equal(r.current.cleared.toast, 'Removed 1 persistent cache entries.');
             assert.deepEqual({ ...r.current.slash, reset: 0, args: 0 }, { ...r.baseline.slash, reset: 0, args: 0 });
             assert.equal(r.current.slash.reset, 'Stats reset');
@@ -694,12 +702,28 @@ test('feature list 1.4: "Measure on this chat" yields to the page between chunks
     assert.ok(r.ticks >= 20, `the page ran ${r.ticks} timer ticks during the measurement (2 passes of 12 chunks)`);
 });
 
-test('feature list 1.3: ⑤ usage is kept incrementally and matches a scan of the chat', async ({ each }) => {
+test('feature list 1.3: ⑤ usage is kept as rows are stored and dropped, and matches a scan of the database', async ({ each }) => {
     const r = (await each('persistAccounting', null, { variants: ['current'] })).current;
     for (const [shown, scanned] of [r.a, r.b]) {
-        assert.deepEqual(shown, scanned);
-        assert.ok(scanned.chars <= r.max && scanned.entries >= 5, JSON.stringify(scanned));
+        assert.deepEqual({ entries: shown.entries, bytes: shown.bytes }, scanned, 'this chat');
+        assert.deepEqual({ entries: shown.dbRows, bytes: shown.dbBytes }, scanned, 'all chats: this page has the one chat');
+        assert.ok(scanned.bytes <= r.max && scanned.entries >= 5, JSON.stringify(scanned));
     }
+});
+
+test('⑤ IndexedDB: rows come back when the chat opens again, two chats keep rows of their own, clearing is per chat', async ({ each }) => {
+    const r = await each('persistDb', null, { variants: ['none', 'current'] });
+    assert.deepEqual(r.current.first.map(x => x[0]), r.none.first.map(x => x[0]));
+    assert.deepEqual(r.current.second.map(x => x[0]), r.none.second.map(x => x[0]));
+    assert.equal(r.current.rowsA, 3);
+    assert.equal(r.current.rowsAll, 6, 'the other chat got rows of its own');
+    assert.equal(r.current.again[0], r.none.first[0][0]);
+    assert.ok(r.current.again[1] < 10, `served from the row read back from IndexedDB (${r.current.again[1]} characters converted)`);
+    assert.equal(r.current.hits, 1);
+    assert.equal(r.current.toast, 'Removed 3 persistent cache entries.');
+    assert.deepEqual(r.current.rowsAfterClear, { a: 0, b: 3 });
+    assert.match(r.current.usage, /⑤ saved results: 0 messages in this chat, [\d.]+ of 64 MB in all chats/);
+    assert.equal(r.current.inChat, false);
 });
 
 test('feature list 1.3: sampled profiling after 1000 runs; the replacer timing can be turned off', async ({ each }) => {
@@ -813,10 +837,11 @@ test('feature list 2.1: a cost chip after each script in the Regex extension\'s 
 
 test('unchanged vs baseline: without MessageFormatter hooks ⑤ is disabled with a note', async ({ each }) => {
     const r = await each('ux', null, { hooks: false, variants: ['baseline', 'current'] });
-    assert.deepEqual(r.current.checked, r.baseline.checked);
+    assert.deepEqual({ ...r.current.checked, rpk_persist: 0 }, { ...r.baseline.checked, rpk_persist: 0 });
     assert.equal(r.current.checked.rpk_persist.disabled, true);
     assert.match(r.current.note, /MessageFormatter/);
-    assert.deepEqual(r.current.stored, r.baseline.stored, 'nothing is stored without hooks');
+    assert.deepEqual([r.current.stored, r.current.storedInChat], [[], []], 'nothing is stored without hooks');
+    assert.deepEqual(r.baseline.storedInChat, []);
 });
 
 // ---- 0.4.0 ----
@@ -848,10 +873,11 @@ test('⑨ HTML cache: a re-render reuses the formatted HTML (the converter sees 
     assert.deepEqual(c.bar.map(b => b[0]), ['pipe-regex', 'pipe-markdown', 'pipe-sanitize', 'pipe-hook']);
 });
 
-test('⑨ with ⑤: the finished HTML is stored in the chat (h) and serves a fresh page', async ({ each }) => {
+test('⑨ with ⑤: the finished HTML is stored (h) and serves the chat when it opens again', async ({ each }) => {
     const r = (await each('htmlMemo', { persist: true }, { variants: ['current'] })).current;
-    assert.deepEqual(r.stored, ['h,k', null, null], 'the volatile message is not stored');
-    assert.ok(r.fromChat[1] < 10, `served from the chat entry (${r.fromChat[1]} chars converted)`);
+    assert.deepEqual(r.stored, [null, null, null], 'nothing is written into the chat');
+    assert.deepEqual(r.rows, ['at,chat,h,id,k,n'], 'one row: the volatile message and the reasoning are not stored');
+    assert.ok(r.fromChat[1] < 10, `served from the row read back from IndexedDB (${r.fromChat[1]} chars converted)`);
     assert.equal(r.fromChat[0], r.first[0]);
     assert.ok(r.persistHits >= 1);
 });

@@ -12,6 +12,8 @@ export let this_chid;
 export let name1 = 'User';
 export let name2 = 'Char';
 export let streamingProcessor = null;
+export let chatId = 'harness-' + Math.random().toString(36).slice(2); // a chat of its own per page, so ⑤'s IndexedDB rows never cross between tests
+export let groupId;
 export const power_user = {
     user_prompt_bias: '', show_user_prompt_bias: true,
     auto_fix_generated_markdown: false, encode_tags: false, allow_name2_display: true,
@@ -74,6 +76,8 @@ export function setState(patch) {
     if ('name1' in patch) name1 = patch.name1;
     if ('name2' in patch) name2 = patch.name2;
     if ('streamingProcessor' in patch) streamingProcessor = patch.streamingProcessor;
+    if ('chatId' in patch) chatId = patch.chatId;
+    if ('groupId' in patch) groupId = patch.groupId;
 }
 
 export function saveSettingsDebounced() { counters.saveSettings++; }

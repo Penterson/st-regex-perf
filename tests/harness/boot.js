@@ -36,6 +36,8 @@ globalThis.SillyTavern = {
             chat: st.chat,
             characters: st.characters,
             characterId: st.this_chid,
+            groupId: st.groupId,
+            chatId: st.chatId,
             name1: st.name1,
             name2: st.name2,
             streamingProcessor: st.streamingProcessor,

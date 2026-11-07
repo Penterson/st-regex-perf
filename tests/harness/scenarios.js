@@ -678,12 +678,12 @@ export async function resetSettings(h) {
     const openAtStart = sections();
     setControl(root, 'rpk_prefilter', false);
     setControl(root, 'rpk_memoMaxEntries', 4);
-    setControl(root, 'rpk_persistMaxMB', 2);
-    const changed = { prefilter: rpk.prefilter, memoMaxEntries: rpk.memoMaxEntries, persistMaxMB: rpk.persistMaxMB };
+    setControl(root, 'rpk_persistDbMaxMB', 2);
+    const changed = { prefilter: rpk.prefilter, memoMaxEntries: rpk.memoMaxEntries, persistDbMaxMB: rpk.persistDbMaxMB };
     const saves = h.st.counters.saveSettings;
     button.click();
     const after = { ...rpk };
-    const controls = { prefilter: root.querySelector('#rpk_prefilter').checked, memoMaxEntries: root.querySelector('#rpk_memoMaxEntries').value, persistMaxMB: root.querySelector('#rpk_persistMaxMB').value };
+    const controls = { prefilter: root.querySelector('#rpk_prefilter').checked, memoMaxEntries: root.querySelector('#rpk_memoMaxEntries').value, persistDbMaxMB: root.querySelector('#rpk_persistDbMaxMB').value };
     const limits = root.querySelector('details[data-section="limits"]');
     limits.open = true;
     await sleep(0); // the toggle event is queued
@@ -823,7 +823,11 @@ export async function memoHash(h) {
     return { plain, hashed };
 }
 
-/** ⑤ key: two same-length messages with the same fnv1a hash must not share a stored result; old keys are recomputed. */
+/**
+ * ⑤ key: two same-length messages with the same fnv1a hash must not share a stored result. What an older version wrote
+ * into the chat file (extra.regex_perf_cache) is still served when its key matches, ignored in an older key format, and
+ * never written again.
+ */
 export async function persistKey(h) {
     applyProfile(h, { persist: true });
     await useScripts(h, [script({ findRegex: '/o/g', replaceString: '0', markdownOnly: true })]);
@@ -832,27 +836,38 @@ export async function persistKey(h) {
     const render = () => h.st.messageFormatting(h.st.chat[0].mes, 'Char', false, false, 0);
     const out = [render()];
     h.st.chat[0].mes = b; // edited to a colliding message of the same length
-    out.push(render());
-    const entry = h.st.chat[0].extra.regex_perf_cache;
-    // an entry in an older key format is ignored and replaced
-    if (entry) h.st.chat[0].extra.regex_perf_cache = { k: entry.k.replace(/^[^:]+/, 'old'), v: 'STALE' };
-    out.push(render());
-    return { out, key: h.st.chat[0].extra.regex_perf_cache?.k ?? null };
+    out.push(render(), render());
+    const rows = await idbRows(h);
+    const row = rows.find(r => r.h === out[1]);
+    let legacy = null;
+    if (row) { // the baseline has no rows: the chat-file steps are for the current code (and plain SillyTavern, which ignores the entry)
+        h.st.setState({ chatId: 'legacy-' + h.st.chatId }); // another chat: nothing stored for it, so the chat-file entry is what ⑤ finds
+        await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+        await settle(h);
+        setControl(panel(), 'rpk_htmlMemo', false); // ⑨ (memory, not per chat) would serve the message first
+        h.st.chat[0].extra.regex_perf_cache = { k: row.k, v: 'LEGACY' };
+        out.push(render());
+        h.st.chat[0].extra.regex_perf_cache = { k: row.k.replace(/^[^:]+/, 'old'), v: 'STALE' }; // an older key format: ignored
+        out.push(render());
+        legacy = { ...h.st.chat[0].extra.regex_perf_cache };
+    }
+    return { out, key: row?.k ?? null, rows: rows.length, legacy, legacyChatRows: row ? (await idbRows(h)).length : null };
 }
 
-/** ⑤ budget: beyond persistMaxMB per chat, the oldest messages' stored results are dropped first. */
+/** ⑤ budget: beyond persistDbMaxMB (all chats) the rows stored longest ago are dropped first. */
 export async function persistBudget(h) {
-    applyProfile(h, { persist: true, persistMaxMB: 1, persistMaxLen: 100000 });
+    applyProfile(h, { persist: true, persistDbMaxMB: 1, persistMaxLen: 100000 });
     await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
-    const body = 'x'.repeat(50000); // each stored result is ≈50 KB: 1 MB holds 20 of them
+    const body = 'x'.repeat(24000); // each row is ≈48 KB (2 bytes a character): 1 MB holds 21, the trim stops at 90%
     h.st.setState({ chat: Array.from({ length: 26 }, (_, i) => msg(`${i} ${body}`)) });
     h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
-    const stored = h.st.chat.map(m => !!m.extra.regex_perf_cache);
-    const chars = h.st.chat.reduce((a, m) => a + (m.extra.regex_perf_cache ? m.extra.regex_perf_cache.k.length + (m.extra.regex_perf_cache.v?.length ?? 0) + (m.extra.regex_perf_cache.h?.length ?? 0) : 0), 0);
+    const rows = await idbRows(h);
+    const stored = h.st.chat.map((m, i) => rows.some(r => parseInt(r.h) === i));
+    const bytes = rows.reduce((a, r) => a + r.n, 0);
     const root = panel(true);
-    const usage = root.querySelector('#rpk_usage')?.textContent ?? ''; // the baseline has no usage line
-    const hasLimit = setControl(root, 'rpk_persistMaxMB', 2);
-    return { stored, chars, usage, hasLimit, limit: h.extension_settings.regex_perf_kit.persistMaxMB };
+    const usage = root.querySelector('#rpk_usage')?.textContent ?? '';
+    const hasLimit = setControl(root, 'rpk_persistDbMaxMB', 2);
+    return { stored, bytes, usage, hasLimit, limit: h.extension_settings.regex_perf_kit.persistDbMaxMB, inChat: h.st.chat.some(m => m.extra.regex_perf_cache) };
 }
 
 /** Item 16. Compromise mode: while streaming, display scripts format the completed lines at most every N ms. */
@@ -918,16 +933,18 @@ export async function ux(h) {
         textStarts: String(await cmd.callback({}, 'text')).split('\n')[0].replace(/\(.*\)/, ''),
         popup: (await cmd.callback({}, ''), h.popups.map(p => /^<pre class="rpk-report">/.test(p.content))),
     };
-    // ⑤: entries stored in the chat, then cleared by the button (which saves the chat)
+    // ⑤: the result is stored (the baseline: in the chat; now: a row in IndexedDB), then cleared by the button
     rpk.persist = true;
     h.st.setState({ chat: [msg('x')] });
     h.st.messageFormatting('x', 'Char', false, false, 0);
-    const stored = Object.keys(h.st.chat[0].extra.regex_perf_cache ?? {}).sort();
+    const storedInChat = Object.keys(h.st.chat[0].extra.regex_perf_cache ?? {}).sort();
+    const stored = (await idbRows(h)).map(r => Object.keys(r).sort().join());
     const chatSaves = h.st.counters.saveChat;
+    const toastsBefore = h.toasts.length;
     root.querySelector('#rpk_clear_persist').click();
-    await sleep(0);
-    const cleared = { left: 'regex_perf_cache' in h.st.chat[0].extra, saved: h.st.counters.saveChat - chatSaves, toast: h.toasts.at(-1)?.[1] };
-    return { initial, ids, checked, toggled, slash, stored, cleared, note: root.querySelector('#rpk_persist_note').textContent };
+    for (let i = 0; i < 200 && h.toasts.length === toastsBefore; i++) await sleep(10); // the button awaits the database
+    const cleared = { left: 'regex_perf_cache' in h.st.chat[0].extra, saved: h.st.counters.saveChat - chatSaves, toast: h.toasts.at(-1)?.[1], rows: (await idbRows(h)).length };
+    return { initial, ids, checked, toggled, slash, stored, storedInChat, cleared, note: root.querySelector('#rpk_persist_note').textContent };
 }
 
 /**
@@ -1108,7 +1125,7 @@ export async function fastPathAssembled(h) {
  * is never memoized.
  */
 export async function memoStatic(h) {
-    applyProfile(h, { htmlMemo: false }); // ⑨ would serve the re-renders before ③ gets to run
+    applyProfile(h, { htmlMemo: false, persist: false }); // ⑨ and ⑤ would serve the re-renders before ③ gets to run
     h.st.setState({ name1: 'Ann', name2: 'Cat', chat: [msg('me', { name: 'Cat' }), msg('me', { name: 'Kit' }), msg('roll [d]', { name: 'Cat' })] });
     await useScripts(h, [
         script({ scriptName: 'Who', findRegex: '/\\bme\\b/g', replaceString: '{{char}}', markdownOnly: true }),
@@ -1200,28 +1217,69 @@ export async function measureAsync(h) {
 
 /** Feature list 1.3. ⑤ usage is kept incrementally and matches a full scan of the chat. */
 export async function persistAccounting(h) {
-    applyProfile(h, { persist: true, persistMaxMB: 1 });
+    applyProfile(h, { persist: true, persistDbMaxMB: 1 });
     await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
-    h.st.setState({ chat: Array.from({ length: 30 }, (_, i) => msg(`${i} x ` + 'x'.repeat(50000))) }); // ~100 KB each
+    h.st.setState({ chat: Array.from({ length: 30 }, (_, i) => msg(`${i} x ` + 'x'.repeat(50000))) }); // ~100 KB a row
     const render = (i) => h.st.messageFormatting(h.st.chat[i].mes, h.st.chat[i].name, false, false, i);
-    const scan = () => {
-        let entries = 0;
-        let chars = 0;
-        for (const m of h.st.chat) {
-            const e = m.extra?.regex_perf_cache;
-            if (!e) continue;
-            entries++;
-            chars += String(e.k).length + (e.v?.length ?? 0) + (e.h?.length ?? 0);
-        }
-        return { entries, chars };
+    const scan = async () => {
+        const rows = await idbRows(h);
+        return { entries: rows.length, bytes: rows.reduce((a, r) => a + r.n, 0) };
     };
-    const shown = async () => JSON.parse(await h.commands.regexperf.callback({}, 'json')).memo.persist;
+    const shown = async () => {
+        const p = (await json(h)).memo.persist;
+        return { entries: p.entries, bytes: p.bytes, dbRows: p.dbRows, dbBytes: p.dbBytes };
+    };
     for (let i = 0; i < 30; i++) render(i);
-    const a = [await shown(), scan()];
-    render(3); // its entry was dropped as one of the oldest: stored again, the oldest remaining one dropped
+    await settle(h);
+    const a = [await shown(), await scan()];
+    render(3); // its row was dropped as one of the oldest: stored again, the oldest remaining one dropped
     render(29); // a hit: nothing changes
-    const b = [await shown(), scan()];
+    await settle(h);
+    const b = [await shown(), await scan()];
     return { a, b, max: 1048576 };
+}
+
+/**
+ * ⑤ in IndexedDB: a chat's rows come back when the chat opens again (the memory copy is dropped in between), two chats
+ * with the same messages keep rows of their own, and "Clear saved results (this chat)" leaves the other chat's rows.
+ */
+export async function persistDb(h) {
+    applyProfile(h, { persist: true });
+    h.st.setConverter('para');
+    await useScripts(h, [script({ findRegex: '/\\*\\*(.+?)\\*\\*/g', replaceString: '<b>$1</b>', markdownOnly: true })]);
+    const texts = ['first **a**', 'second **b**\n\nmore', 'third'];
+    const chatA = h.st.chatId;
+    const chatB = 'other-' + chatA;
+    const open = async (id) => {
+        h.st.setState({ chatId: id, chat: texts.map(t => msg(t)) });
+        await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+        await settle(h);
+    };
+    const c = h.st.counters;
+    const render = (i) => { const before = c.converterChars; const out = h.st.messageFormatting(h.st.chat[i].mes, 'Char', false, false, i); return [out, c.converterChars - before]; };
+    const root = panel();
+    const r = {};
+    await open(chatA);
+    r.first = texts.map((_, i) => render(i));
+    r.rowsA = (await idbRows(h)).length;
+    await open(chatB);
+    r.second = texts.map((_, i) => render(i)); // the same messages in another chat: full renders (⑨ hits aside), rows of their own
+    if (!root) return r; // plain SillyTavern: the outputs are what the test compares
+    r.rowsAll = (await idbRows(h, { all: true })).filter(x => x.chat.endsWith(chatA) || x.chat.endsWith(chatB)).length;
+    await open(chatA);
+    setControl(root, 'rpk_htmlMemo', false); // ⑨ emptied: only ⑤ can serve the next render
+    setControl(root, 'rpk_htmlMemo', true);
+    const hits0 = (await json(h)).totals.persistHits;
+    r.again = render(0);
+    r.hits = (await json(h)).totals.persistHits - hits0;
+    const toastsBefore = h.toasts.length;
+    root.querySelector('#rpk_clear_persist').click();
+    for (let i = 0; i < 200 && h.toasts.length === toastsBefore; i++) await sleep(10);
+    r.toast = h.toasts.at(-1)?.[1];
+    r.rowsAfterClear = { a: (await idbRows(h)).length, b: (await idbRows(h, { all: true })).filter(x => x.chat.endsWith(chatB)).length };
+    r.usage = panel(true).querySelector('#rpk_usage').textContent;
+    r.inChat = h.st.chat.some(m => m.extra.regex_perf_cache);
+    return r;
 }
 
 /** Feature list 1.3. Sampled profiling after 1000 runs, and the replacer timing toggle. */
@@ -1475,7 +1533,38 @@ export async function benchSave(h, settings) {
 
 /** The extension module itself, for its exported analyzers. */
 const extension = () => import('/scripts/extensions/third-party/st-regex-perf/index.js');
-const json = async (h) => (h.commands.regexperf ? JSON.parse(await h.commands.regexperf.callback({}, 'json')) : null);
+/** The JSON report, or null without the extension (and with the baseline, whose /regexperf has no json verb). */
+async function json(h) {
+    if (!h.commands.regexperf) return null;
+    try {
+        return JSON.parse(await h.commands.regexperf.callback({}, 'json'));
+    } catch {
+        return null;
+    }
+}
+
+/** Waits until ⑤ has read this chat's rows and written the pending ones (at once without the extension, or with the baseline's chat-file ⑤). */
+async function settle(h) {
+    for (let i = 0; i < 200; i++) {
+        const p = (await json(h))?.memo?.persist;
+        if (!p || !('loaded' in p) || (p.loaded && p.pending === 0)) return;
+        await sleep(20);
+    }
+    throw new Error('⑤ did not settle');
+}
+
+/** ⑤'s rows in IndexedDB for this page's chat (every chat with all: true), after the pending writes; [] where the database does not exist. */
+async function idbRows(h, { all = false } = {}) {
+    await settle(h);
+    if (!(await indexedDB.databases()).some(d => d.name === 'regex_perf_kit')) return []; // opening would create an empty database the extension could not upgrade
+    const db = await new Promise((ok, no) => { const req = indexedDB.open('regex_perf_kit'); req.onsuccess = () => ok(req.result); req.onerror = () => no(req.error); });
+    try {
+        const rows = await new Promise((ok, no) => { const req = db.transaction('results').objectStore('results').getAll(); req.onsuccess = () => ok(req.result); req.onerror = () => no(req.error); });
+        return all ? rows : rows.filter(r => r.chat.endsWith(':' + h.st.chatId));
+    } finally {
+        db.close();
+    }
+}
 
 /**
  * ⑨. A re-render of an unchanged message is served from the HTML cache: the converter sees the placeholder only, the
@@ -1506,8 +1595,15 @@ export async function htmlMemo(h, { persist = false } = {}) {
     r.third = chars(() => render(0)); // back to the first key: a hit
     const j = await json(h);
     r.pipeline = j && { full: j.pipeline.full, hits: j.pipeline.htmlHits, stores: j.pipeline.htmlStores, pct: j.pipeline.regexPct + j.pipeline.markdownPct + j.pipeline.sanitizePct + j.pipeline.hookPct };
-    r.stored = h.st.chat.map(m => (m.extra.regex_perf_cache ? Object.keys(m.extra.regex_perf_cache).sort().join() : null));
-    if (persist) { // a fresh page would find the chat entries only: clear the memory cache through its toggle
+    r.stored = h.st.chat.map(m => (m.extra.regex_perf_cache ? Object.keys(m.extra.regex_perf_cache).sort().join() : null)); // the chat file: never written any more
+    r.rows = (await idbRows(h)).map(x => Object.keys(x).sort().join());
+    if (persist) { // another page would find the rows only: reopen the chat (another chat in between drops the memory copy), with ⑨ emptied
+        const id = h.st.chatId;
+        h.st.setState({ chatId: 'elsewhere-' + id });
+        await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+        h.st.setState({ chatId: id });
+        await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+        await settle(h);
         const root = panel();
         setControl(root, 'rpk_htmlMemo', false);
         setControl(root, 'rpk_htmlMemo', true);
@@ -1521,7 +1617,7 @@ export async function htmlMemo(h, { persist = false } = {}) {
 
 /** ⑨ limits: beyond the memory cap the oldest formatted messages are dropped; a message over the cap is not kept. */
 export async function htmlMemoBudget(h) {
-    applyProfile(h, { htmlMemoMaxMB: 1, htmlMemoMaxEntries: 1000 });
+    applyProfile(h, { htmlMemoMaxMB: 1, htmlMemoMaxEntries: 1000, persist: false }); // ⑤ would serve what ⑨ dropped
     await useScripts(h, [script({ findRegex: '/x/g', replaceString: 'y', markdownOnly: true })]);
     const body = 'x'.repeat(50000); // ≈100 KB per entry (key + HTML, 2 bytes a character): 1 MB holds about 10
     h.st.setState({ chat: Array.from({ length: 16 }, (_, i) => msg(`${i} ${body}`)) });
@@ -1629,7 +1725,7 @@ export async function streamParagraphs(h, { on, converter = 'para' }) {
  * SillyTavern's own output, also with a $ in a name and with a trim string holding {{char}}.
  */
 export async function fastPathStatic(h, { on }) {
-    applyProfile(h, { fastPathStatic: on, memo: false, htmlMemo: false });
+    applyProfile(h, { fastPathStatic: on, memo: false, htmlMemo: false, persist: false });
     await useScripts(h, [
         script({ scriptName: 'Who', findRegex: '/\\bme\\b/g', replaceString: '{{char}}!', markdownOnly: true }),
         script({ scriptName: 'Both', findRegex: '/(\\w+) greets/g', replaceString: '{{user}} greets $1 and {{char}}', markdownOnly: true }),
@@ -1655,7 +1751,7 @@ export async function fastPathStatic(h, { on }) {
 export async function adaptive(h) {
     h.st.setConverter('para');
     await useScripts(h, [script({ scriptName: 'Never', findRegex: '/zzz-never/g', replaceString: 'y', markdownOnly: true })]);
-    applyProfile(h, { prefilter: false, htmlMemo: false, memo: false }); // every pass runs the regex for real
+    applyProfile(h, { prefilter: false, htmlMemo: false, memo: false, persist: false }); // every pass runs the regex for real
     const body = ('**bold** and more text, "quoted" too.\n\n').repeat(120); // ≈4.5 KB: the converter's cost grows with it, the regex stage's fixed part does not
     h.st.setState({ chat: Array.from({ length: 70 }, (_, i) => msg(`${i} ${body}`)) });
     const render = () => h.st.chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, false, i));
@@ -1695,7 +1791,7 @@ export async function frameStats(h) {
  * display passes it held and the rest, so a stutter can be blamed on the pipeline or on what lies outside it.
  */
 export async function longTaskPipe(h) {
-    applyProfile(h, { htmlMemo: false, memo: false });
+    applyProfile(h, { htmlMemo: false, memo: false, persist: false });
     await useScripts(h, [script({ findRegex: '/\\bme\\b/g', replaceString: 'you', markdownOnly: true })]);
     const text = Array.from({ length: 60 }, (_, i) => `line ${i} about me and **them** and me again`).join('\n');
     h.st.setState({ chat: [msg(text)] });

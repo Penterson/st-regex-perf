@@ -4,7 +4,7 @@
  * The engine compiles every script pattern through RegexProvider.instance.get(). That method is patched to
  * return a RegExp subclass whose [Symbol.replace] (where String.prototype.replace() dispatches) adds
  * ① profiler, ② literal prefilter, ③ memo cache, ④ streaming skip of display-only scripts, ⑥ replacer fast path,
- * ⑦ input-length fuse and ⑧ circuit breaker. ST's MessageFormatter hooks add ⑤ a persisted display cache, ⑨ a cache
+ * ⑦ input-length fuse and ⑧ circuit breaker. ST's MessageFormatter hooks add ⑤ a persisted display cache (IndexedDB), ⑨ a cache
  * of the formatted HTML (regex + markdown skipped together on a re-render), ④'s compromise mode with incremental
  * formatting and a paragraph cache (markdown and sanitizing on the paragraph being written only), and a timing of the whole display pipeline (regex / markdown / sanitize) so the panel can say what share
  * of a render the regex stage is. No ST core file is modified.
@@ -48,9 +48,9 @@ const defaultSettings = {
     streamingSkip: true,
     streamingThrottle: false, // ④ compromise mode: format the streamed message at most every streamingThrottleMs
     streamingThrottleMs: 500,
-    persist: false,
+    persist: true, // ⑤ the display result of each message is kept in IndexedDB (chat + message hash) and served when the chat opens again
     persistMaxLen: 60000,
-    persistMaxMB: 8, // ⑤ per chat; beyond it, the oldest messages' results are dropped
+    persistDbMaxMB: 64, // ⑤ all chats together; beyond it, the results stored longest ago are dropped first
     memoHashKeys: false, // ③ keyed by hash64(input) + length instead of the input: half the memory, see the Limits note
     autoMeasure: false, // run "Measure on this chat" once after a chat opens
     loadHintMs: 3000, // a chat whose first render takes longer gets a one-time hint about "# Messages to Load"
@@ -1897,7 +1897,7 @@ function paraOff(view, stage, whole, got) {
 
 let persistAvailable = false; // the hooks exist (recent SillyTavern)
 let htmlStageAvailable = false; // the AFTER_MARKDOWN stage exists too (⑨ and the pipeline timing need it)
-let pending = null; // {msg, key, input}: message awaiting its after-regex result
+let pending = null; // {id, key, input, html}: message awaiting its after-regex result (id: ⑤'s row, null when nothing can be stored)
 const streamViews = new Map(); // ④ compromise: "<messageId><m|r>" -> {at, prefix, out} of the streamed message
 let streamView = null; // the view this pass formats
 let streamTail = null; // raw text this pass appends after the regex stage
@@ -2013,19 +2013,20 @@ function installPersistHooks() {
         const msg = chat?.[c.messageId];
         if (!msg) return mes;
         const key = keyFor(mes, c, chat, msg);
+        const id = wantPersist && persistChatKey !== null ? persistIdOf(key) : null;
         if (wantHtml) {
             const hit = htmlMemo.get(key);
             if (hit) {
-                if (wantPersist && msg.extra?.[EXTRA_KEY]?.k !== key && hit.value.length <= cfg.persistMaxLen) { // ⑤ learns it too
-                    storePersisted(chat, msg, { k: key, h: hit.value });
+                if (id !== null && persistMem.get(id)?.k !== key && hit.value.length <= cfg.persistMaxLen) { // ⑤ learns it too
+                    storePersisted(id, { k: key, h: hit.value });
                     persistStats.stores++;
-                    trimPersisted(chat);
                 }
                 return serveHtml(hit.value);
             }
         }
         if (wantPersist) {
-            const e = msg.extra?.[EXTRA_KEY];
+            // this chat's stored results, else what an older version wrote into the chat file (read, never written again)
+            const e = (id !== null ? persistMem.get(id) : undefined) ?? msg.extra?.[EXTRA_KEY];
             if (e && e.k === key) {
                 if (e.h != null) { // a stored HTML result needs ⑨'s stage to take over; without it, recompute
                     if (wantHtml) {
@@ -2039,7 +2040,7 @@ function installPersistHooks() {
                 }
             }
         }
-        pending = { msg: wantPersist ? msg : null, key, input: mes, html: wantHtml };
+        pending = { id, key, input: mes, html: wantHtml };
         return mes;
     }
 
@@ -2057,11 +2058,9 @@ function installPersistHooks() {
         }
         if (p && !p.html) {
             pending = null;
-            if (p.msg && !passVolatile && mes.length <= cfg.persistMaxLen) {
-                const chat = ctx().chat;
-                storePersisted(chat, p.msg, mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes });
+            if (p.id !== null && !passVolatile && mes.length <= cfg.persistMaxLen) {
+                storePersisted(p.id, mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes });
                 persistStats.stores++;
-                trimPersisted(chat);
             }
         }
         if (!htmlStageAvailable) resetPass();
@@ -2095,11 +2094,9 @@ function installPersistHooks() {
                     pipe.htmlStores++;
                 }
             }
-            if (p.msg && cfg.persist && mes.length <= cfg.persistMaxLen) {
-                const chat = ctx().chat;
-                storePersisted(chat, p.msg, { k: p.key, h: mes });
+            if (p.id !== null && cfg.persist && mes.length <= cfg.persistMaxLen) {
+                storePersisted(p.id, { k: p.key, h: mes });
                 persistStats.stores++;
-                trimPersisted(chat);
             }
         }
         return mes;
@@ -2108,6 +2105,7 @@ function installPersistHooks() {
     wrapShowdown();
 }
 
+/** "Clear saved results (this chat)": this chat's rows in IndexedDB, and what an older version wrote into the chat file. */
 async function clearPersistedCache() {
     const { chat, saveChat } = ctx();
     let removed = 0;
@@ -2117,11 +2115,10 @@ async function clearPersistedCache() {
             removed++;
         }
     }
-    forgetPersistAcct();
     if (removed && typeof saveChat === 'function') {
         try { await saveChat(); } catch (e) { console.warn('[RegexPerf] saveChat failed', e); }
     }
-    return removed;
+    return removed + await clearPersistedDb();
 }
 
 // ---- Report ----
@@ -2178,7 +2175,7 @@ function buildSummary() {
     const total = sum('totalMs');
     const top = rows.find(r => r.calls > 0);
     const { chat } = ctx();
-    const persist = persistAvailable ? persistTotals(chat) : null; // ⑤ storage in this chat (only scanned when the hooks exist)
+    const persist = persistAvailable ? { entries: persistAcct.entries, bytes: persistAcct.bytes, dbRows: persistDbRows, dbBytes: persistDbBytes, maxMB: settings.persistDbMaxMB, loaded: persistLoaded, pending: persistPending.size + persistInFlight, available: !persistDbFailed } : null; // ⑤ storage
     return {
         counts,
         invalid,
@@ -2197,8 +2194,8 @@ function buildSummary() {
         topShare: top && total > 0 ? top.totalMs / total * 100 : 0,
         usage: t`③ memory cache: ${memoLru.size} entries, ${(memoBytes / 1048576).toFixed(1)} of ${settings.memoMaxMB} MB`
             + (htmlStageAvailable ? '. ' + t`⑨ HTML cache: ${htmlMemo.map.size} messages, ${(htmlMemo.bytes / 1048576).toFixed(1)} of ${settings.htmlMemoMaxMB} MB` : '')
-            + (persist ? '. ' + t`⑤ saved in this chat: ${persist.entries} messages, ≈${Math.round(persist.chars / 1024)} KB of ${settings.persistMaxMB} MB` : ''),
-        persist: persist && { entries: persist.entries, chars: persist.chars },
+            + (persist ? '. ' + t`⑤ saved results: ${persist.entries} messages in this chat, ${(persist.dbBytes / 1048576).toFixed(1)} of ${settings.persistDbMaxMB} MB in all chats` : ''),
+        persist,
         pipe: pipelineSummary(),
         feel: { ...feel },
     };
@@ -2238,56 +2235,227 @@ function feelText(f) {
     return parts.join('; ');
 }
 
-/** Size of a ⑤ entry, in characters (about its bytes in the chat file). */
-const persistSize = (e) => String(e.k).length + (e.v?.length ?? 0) + (e.h?.length ?? 0);
+// ---- ⑤ storage: IndexedDB ----
 
-// ⑤ usage is a running total per chat (feature list 1.3): a full scan only for another chat or after a change the
-// hooks cannot see (CHAT_CHANGED, a deleted message).
-const persistAcct = { chat: null, entries: 0, chars: 0 };
-const forgetPersistAcct = () => { persistAcct.chat = null; };
+// One row per displayed message: id = chat key + "\0" + the message's hash and length (the first two fields of its ⑤/⑨
+// key), value = {id, chat, k (the whole key), h | v | same, at, n (estimated bytes)}. The hooks are synchronous, so
+// a chat's rows are read into persistMem when the chat opens and the hooks look there only; stores go to the memory
+// copy at once and to IndexedDB in one transaction a moment later. Beyond persistDbMaxMB (all chats) the rows stored
+// longest ago go first. What older versions wrote into chat files (extra.regex_perf_cache) is still read, never written.
+const DB_NAME = 'regex_perf_kit';
+const DB_STORE = 'results';
+const FLUSH_MS = 200;
+let persistDb = null; // the open database (null until opened, or when IndexedDB is unavailable)
+let persistDbOpening = null; // the opening promise
+let persistDbFailed = false; // IndexedDB could not be opened in this browser
+let persistDbBytes = 0; // estimated size of every stored row, all chats (measured once at the first open, kept up to date)
+let persistDbRows = 0;
+let persistChatKey = null; // the chat persistMem holds (character avatar or group id + chat id), null when no chat is open
+const persistMem = new Map(); // this chat's rows by id
+const persistAcct = { entries: 0, bytes: 0 }; // this chat
+const persistPending = new Map(); // rows waiting for the next flush, by id
+let persistFlushTimer = 0;
+let persistInFlight = 0; // rows of the flush that is running (the JSON's `pending` counts them, so a test can wait for the write)
+let persistLoaded = false; // this chat's rows have been read (or there is nothing to read)
+let persistLastAt = 0; // `at` is strictly increasing, so rows stored in the same millisecond still age in order
 
-/** The ⑤ entries in a chat: how many messages hold one and their total size. */
-function persistTotals(chat) {
-    if (chat !== persistAcct.chat) {
-        let entries = 0;
-        let chars = 0;
-        for (const m of chat ?? []) {
-            const e = m?.extra?.[EXTRA_KEY];
-            if (!e) continue;
-            entries++;
-            chars += persistSize(e);
+const idbDone = (req) => new Promise((ok, no) => { req.onsuccess = () => ok(req.result); req.onerror = () => no(req.error); });
+const txDone = (tx) => new Promise((ok, no) => { tx.oncomplete = () => ok(); tx.onerror = tx.onabort = () => no(tx.error); });
+
+/** Opens (and on first use creates) the database; resolves to null where IndexedDB is unavailable. */
+function openPersistDb() {
+    if (persistDb) return Promise.resolve(persistDb);
+    if (persistDbOpening) return persistDbOpening;
+    persistDbOpening = (async () => {
+        try {
+            const req = indexedDB.open(DB_NAME, 1);
+            req.onupgradeneeded = () => {
+                const store = req.result.createObjectStore(DB_STORE, { keyPath: 'id' });
+                store.createIndex('chat', 'chat');
+                store.createIndex('age', ['at', 'n']); // a key cursor over it gives sizes oldest first without reading the rows
+            };
+            const db = await idbDone(req);
+            db.onversionchange = () => { db.close(); persistDb = null; };
+            persistDb = db;
+            await measurePersistDb(db);
+            return db;
+        } catch (e) {
+            persistDbFailed = true;
+            console.warn('[RegexPerf] ⑤ IndexedDB is not available; only results older versions wrote into chat files are read', e);
+            return null;
         }
-        Object.assign(persistAcct, { chat, entries, chars });
-    }
-    return persistAcct;
+    })();
+    return persistDbOpening;
 }
 
-/** Puts a ⑤ entry on a message, keeping the running total. */
-function storePersisted(chat, msg, entry) {
-    const acct = persistTotals(chat);
-    msg.extra ||= {};
-    const old = msg.extra[EXTRA_KEY];
+/** Sums the stored rows' sizes (from the index keys, not the rows) into persistDbBytes / persistDbRows. */
+async function measurePersistDb(db) {
+    const added = persistDbBytes; // rows stored before the measurement finished are already counted
+    const addedRows = persistDbRows;
+    let bytes = 0;
+    let rows = 0;
+    await new Promise((resolve) => {
+        const req = db.transaction(DB_STORE).objectStore(DB_STORE).index('age').openKeyCursor();
+        req.onsuccess = () => {
+            const cur = req.result;
+            if (!cur) return resolve();
+            bytes += cur.key[1];
+            rows++;
+            cur.continue();
+        };
+        req.onerror = () => resolve();
+    });
+    persistDbBytes = bytes + (persistDbBytes - added);
+    persistDbRows = rows + (persistDbRows - addedRows);
+    statsDirty = true;
+}
+
+/** The current chat as ⑤ keys it, or null without an open chat. */
+function persistChatKeyNow() {
+    const { chatId, groupId, characterId, characters } = ctx();
+    if (chatId == null || chatId === '') return null;
+    return groupId ? `g:${groupId}:${chatId}` : `c:${characters?.[characterId]?.avatar ?? characterId}:${chatId}`;
+}
+
+/** ⑤'s row id for a message: the chat, then the message's hash and length (the first two fields of its key). */
+function persistIdOf(key) {
+    return persistChatKey + '\u0000' + key.slice(0, key.indexOf(':', key.indexOf(':') + 1));
+}
+
+/** Reads the current chat's rows into persistMem (CHAT_CHANGED, and once at start); nothing to do for the same chat. */
+function loadPersisted() {
+    const chatKey = persistChatKeyNow();
+    if (chatKey === persistChatKey && (persistLoaded || chatKey === null)) return;
+    persistChatKey = chatKey;
+    persistMem.clear();
+    persistAcct.entries = persistAcct.bytes = 0;
+    persistLoaded = chatKey === null;
+    if (chatKey === null) return;
+    (async () => {
+        const db = await openPersistDb();
+        if (persistChatKey !== chatKey) return; // another chat opened meanwhile
+        if (db) {
+            try {
+                const rows = await idbDone(db.transaction(DB_STORE).objectStore(DB_STORE).index('chat').getAll(chatKey));
+                if (persistChatKey !== chatKey) return;
+                for (const row of rows) {
+                    if (persistMem.has(row.id)) continue; // stored again while the read ran: the new row wins
+                    persistMem.set(row.id, row);
+                    persistAcct.entries++;
+                    persistAcct.bytes += row.n;
+                }
+            } catch (e) { console.warn('[RegexPerf] ⑤ could not read the stored results', e); }
+        }
+        persistLoaded = true;
+        statsDirty = true;
+    })();
+}
+
+/** Keeps a message's result: in the memory copy at once, in IndexedDB at the next flush. */
+function storePersisted(id, fields) {
+    const at = persistLastAt = Math.max(Date.now(), persistLastAt + 1);
+    const row = { id, chat: persistChatKey, at, n: 0, ...fields };
+    row.n = (id.length + row.k.length + (row.h?.length ?? 0) + (row.v?.length ?? 0) + 40) * 2;
+    const old = persistMem.get(id);
     if (old) {
-        acct.entries--;
-        acct.chars -= persistSize(old);
+        persistAcct.entries--;
+        persistAcct.bytes -= old.n;
+        persistDbBytes -= old.n;
+        persistDbRows--;
     }
-    msg.extra[EXTRA_KEY] = entry;
-    acct.entries++;
-    acct.chars += persistSize(entry);
+    persistMem.set(id, row);
+    persistAcct.entries++;
+    persistAcct.bytes += row.n;
+    persistDbBytes += row.n;
+    persistDbRows++;
+    persistPending.set(id, row);
+    if (!persistFlushTimer) persistFlushTimer = setTimeout(flushPersisted, FLUSH_MS);
 }
 
-/** Drops ⑤ entries from the oldest messages until the chat is within persistMaxMB. */
-function trimPersisted(chat) {
-    if (!chat) return;
-    const acct = persistTotals(chat);
-    const max = cfg.persistMaxMB * 1048576;
-    for (let i = 0; acct.chars > max && i < chat.length; i++) {
-        const e = chat[i]?.extra?.[EXTRA_KEY];
-        if (!e) continue;
-        acct.chars -= persistSize(e);
-        acct.entries--;
-        delete chat[i].extra[EXTRA_KEY];
+/** Writes the pending rows in one transaction, then drops the oldest rows while the store is over its size limit. */
+async function flushPersisted() {
+    persistFlushTimer = 0;
+    const db = await openPersistDb();
+    if (!db) {
+        persistPending.clear();
+        return;
     }
+    const rows = [...persistPending.values()];
+    persistPending.clear();
+    persistInFlight += rows.length;
+    try {
+        if (rows.length) {
+            try {
+                const tx = db.transaction(DB_STORE, 'readwrite');
+                const store = tx.objectStore(DB_STORE);
+                for (const row of rows) store.put(row);
+                await txDone(tx);
+            } catch (e) { console.warn('[RegexPerf] ⑤ could not store the results', e); }
+        }
+        if (persistDbBytes > settings.persistDbMaxMB * 1048576) await evictPersisted(db);
+    } finally {
+        persistInFlight -= rows.length;
+        statsDirty = true;
+    }
+}
+
+/** Deletes rows oldest first (all chats) until the store is under 90% of its limit. */
+async function evictPersisted(db) {
+    const target = settings.persistDbMaxMB * 1048576 * 0.9;
+    try {
+        const tx = db.transaction(DB_STORE, 'readwrite');
+        const store = tx.objectStore(DB_STORE);
+        await new Promise((resolve, reject) => {
+            const req = store.index('age').openKeyCursor();
+            req.onsuccess = () => {
+                const cur = req.result;
+                if (!cur || persistDbBytes <= target) return resolve();
+                store.delete(cur.primaryKey);
+                persistDbBytes -= cur.key[1];
+                persistDbRows--;
+                const mine = persistMem.get(cur.primaryKey);
+                if (mine) {
+                    persistMem.delete(cur.primaryKey);
+                    persistAcct.entries--;
+                    persistAcct.bytes -= mine.n;
+                }
+                cur.continue();
+            };
+            req.onerror = () => reject(req.error);
+        });
+        await txDone(tx);
+    } catch (e) { console.warn('[RegexPerf] ⑤ could not drop old results', e); }
+}
+
+/** Deletes this chat's rows; how many there were. */
+async function clearPersistedDb() {
+    const chatKey = persistChatKey;
+    const removed = persistMem.size;
+    persistPending.clear(); // only this chat's rows are ever pending
+    persistDbBytes -= persistAcct.bytes;
+    persistDbRows -= persistMem.size;
+    persistMem.clear();
+    persistAcct.entries = persistAcct.bytes = 0;
+    if (chatKey === null) return removed;
+    const db = await openPersistDb();
+    if (!db) return removed;
+    try {
+        const tx = db.transaction(DB_STORE, 'readwrite');
+        const store = tx.objectStore(DB_STORE);
+        await new Promise((resolve, reject) => {
+            const req = store.index('chat').openKeyCursor(IDBKeyRange.only(chatKey));
+            req.onsuccess = () => {
+                const cur = req.result;
+                if (!cur) return resolve();
+                store.delete(cur.primaryKey);
+                cur.continue();
+            };
+            req.onerror = () => reject(req.error);
+        });
+        await txDone(tx);
+    } catch (e) { console.warn('[RegexPerf] ⑤ could not clear the stored results', e); }
+    statsDirty = true;
+    return removed;
 }
 
 let measured = null; // last "Measure on this chat" result
@@ -2734,7 +2902,7 @@ const settingsHtml = () => `
         ${feature('rpk_streamingIncremental', t`Incremental: run line-local scripts on the new lines only`, t`In compromise mode, a script whose matches cannot cross a line break (no \\n, \\s, [^…] or dotAll) formats only the lines added since its last run and reuses the rest. The first runs are compared with a full run; on any difference the script goes back to full runs.`, { sub: true })}
         ${feature('rpk_streamingParagraphCache', t`Paragraph cache: convert and sanitize the last paragraph only`, t`In compromise mode, while a reply streams, the HTML of its finished paragraphs (up to the last blank line outside code fences, lists, quotes and tables) is kept, so markdown and the sanitizer run on the paragraph being written. The first renders are compared with a whole conversion; on any difference the message goes back to whole renders, with a console warning. Dropped when the generation ends.`, { sub: true })}
         </div>
-        ${feature('rpk_persist', t`⑤ Save results in the chat file (persistent cache)`, t`Stores the display result with the message, so reopening the chat skips the work. The chat file grows; results are recomputed automatically when a script changes. With ⑨ on, the finished HTML is stored, so markdown is skipped too.`, { labelId: 'rpk_persist_label' })}
+        ${feature('rpk_persist', t`⑤ Save results in the browser (persistent cache)`, t`Stores each displayed message's result in the browser's IndexedDB (not in the chat file any more), so reopening the chat skips the work. Keyed by the chat and a hash of the message; recomputed automatically when a script, a name or a markdown setting changes. Beyond the size under Limits the results stored longest ago are dropped first. With ⑨ on, the finished HTML is stored, so markdown is skipped too. Results an older version wrote into the chat file are still read, never written.`, { labelId: 'rpk_persist_label' })}
         <div class="rpk-feature-group">
         ${feature('rpk_fastPath', t`⑥ Replace without SillyTavern's callback (fast path)`, t`When a script's replacement has no macros, the browser's own template replacement is used instead of SillyTavern's per-match callback, where most of the replacer time goes. The first runs of every script are compared with SillyTavern's result; on any difference the script goes back to the callback.`)}
         ${feature('rpk_fastPathStatic', t`Also for replacements with {{user}}, {{char}}, {{persona}} or {{group}}`, t`Their values hold for a whole message render, so the template is finished per name set and verified the same way (display renders only).`, { sub: true })}
@@ -2752,8 +2920,8 @@ const settingsHtml = () => `
           ${limit('memoMaxEntries', t`③ Cache entries`, t`Oldest results are dropped beyond this many.`)}
           ${limit('memoMaxLen', t`③ Longest input to cache (characters)`, t`Longer inputs are not cached.`)}
           ${limit('memoMaxMB', t`③ Cache memory (MB)`, t`Oldest results are dropped beyond this estimated size (2 bytes per character of input and output).`)}
-          ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved in the chat.`)}
-          ${limit('persistMaxMB', t`⑤ Saved results per chat (MB)`, t`Beyond this, the oldest messages' results are dropped from the chat.`)}
+          ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved.`)}
+          ${limit('persistDbMaxMB', t`⑤ Saved results, all chats (MB)`, t`Beyond this estimated size the results stored longest ago are dropped first, whichever chat they belong to. Stored in the browser's IndexedDB, not in the chat file.`)}
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
           ${limit('fuseLen', t`⑦ Fuse: longest input a risky pattern runs on (characters)`)}
           ${limit('breakerMs', t`⑧ Breaker: a run counts as long over (ms)`)}
@@ -2819,7 +2987,7 @@ const settingsHtml = () => `
 
 const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_adaptive: 'adaptive', rpk_frameStats: 'frameStats', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_fastPathStatic: 'fastPathStatic', rpk_htmlMemo: 'htmlMemo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_streamingIncremental: 'streamingIncremental', rpk_streamingParagraphCache: 'streamingParagraphCache', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure', rpk_lint: 'lint', rpk_listBadges: 'listBadges' };
 // editable limits: setting -> [min, max]
-const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], htmlMemoMaxEntries: [0, 1e6], htmlMemoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], fuseLen: [1000, 1e7], breakerMs: [50, 60000], breakerCount: [1, 100], loadHintMs: [100, 600000] };
+const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], htmlMemoMaxEntries: [0, 1e6], htmlMemoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistDbMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], fuseLen: [1000, 1e7], breakerMs: [50, 60000], breakerCount: [1, 100], loadHintMs: [100, 600000] };
 
 const RENDER_MIN_MS = 500; // the panel is re-rendered at most this often while stats keep changing
 let ui = null; // panel elements, cached by bindUi()
@@ -2923,7 +3091,8 @@ function renderPanel() {
 
     setContent(ui.note, !persistAvailable
         ? t`⑤, the compromise mode and ③'s name-macro option need a newer SillyTavern (staging with MessageFormatter hooks).`
-        : settings.persist ? t`⑤ is on: display results are being saved in this chat. Changing a script invalidates them automatically.` : '', 'textContent');
+        : settings.persist && persistDbFailed ? t`⑤: IndexedDB is not available in this browser; only results an older version wrote into chat files are read.`
+            : settings.persist ? t`⑤ is on: display results are saved in the browser (IndexedDB) and served when the chat opens again. Changing a script invalidates them automatically.` : '', 'textContent');
     setContent(ui.usage, s.usage, 'textContent');
     setContent(ui.measure, measured ? `<p>${esc(measureText(measured))}</p><p class="rpk-dim">${esc(slowestText(measured))}</p>` + measureVerdict(measured).map(l => `<p class="rpk-verdict">${esc(l)}</p>`).join('') : '');
 
@@ -3176,7 +3345,7 @@ eventSource.on(event_types.CHAT_CHANGED, () => {
     markDirty();
     streamViews.clear();
     paraViews.clear();
-    forgetPersistAcct();
+    loadPersisted();
     chatLen = ctx().chat?.length ?? 0;
     const now = performance.now();
     const loadMs = now - lastCall < BURST_GAP_MS ? lastCall - burstStart : 0; // the render burst that just ended
@@ -3191,11 +3360,12 @@ eventSource.on(event_types.CHAT_CHANGED, () => {
         }, 500);
     }
 });
-if (event_types.MESSAGE_DELETED) eventSource.on(event_types.MESSAGE_DELETED, forgetPersistAcct);
+globalThis.addEventListener?.('pagehide', () => { if (persistPending.size) flushPersisted(); }); // ⑤ the last renders before the tab closes
 eventSource.on(event_types.SETTINGS_UPDATED, markDirty);
 if (event_types.PRESET_CHANGED) eventSource.on(event_types.PRESET_CHANGED, markDirty);
 eventSource.on(event_types.APP_READY, () => {
     try { installPersistHooks(); } catch (e) { console.warn('[RegexPerf] persist hooks failed', e); }
+    if (persistAvailable) loadPersisted(); // a chat may be open already
     try {
         const container = document.getElementById('extensions_settings2') || document.getElementById('extensions_settings');
         if (container) {
