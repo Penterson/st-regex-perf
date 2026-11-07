@@ -435,7 +435,7 @@ test('reset settings restores the defaults; open sections are remembered across 
     assert.deepEqual(r.changed, { prefilter: false, memoMaxEntries: 4, persistDbMaxMB: 2 });
     const features = { ...r.after };
     delete features.ui;
-    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, fastPathStatic: true, htmlMemo: true, htmlMemoMaxEntries: 2000, htmlMemoMaxMB: 32, streamingIncremental: true, streamingParagraphCache: true, adaptive: true, frameStats: true, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: true, persistMaxLen: 60000, persistDbMaxMB: 64, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
+    assert.deepEqual(features, { profiler: true, profilerSampling: false, timeReplacer: true, prefilter: true, memo: true, memoStatic: true, memoPostHoc: true, fastPath: true, fastPathStatic: true, htmlMemo: true, htmlMemoMaxEntries: 2000, htmlMemoMaxMB: 32, streamingIncremental: true, streamingParagraphCache: true, adaptive: true, frameStats: false, memoMaxEntries: 3000, memoMaxLen: 20000, memoMaxMB: 64, streamingSkip: true, streamingThrottle: false, streamingThrottleMs: 500, persist: true, persistMaxLen: 60000, persistDbMaxMB: 64, memoHashKeys: false, autoMeasure: false, loadHintMs: 3000, fuse: false, fuseLen: 20000, breaker: false, breakerMs: 500, breakerCount: 3, lint: true, listBadges: true }, 'defaultSettings');
     assert.deepEqual(r.controls, { prefilter: true, memoMaxEntries: '3000', persistDbMaxMB: '64' }, 'the controls follow');
     assert.ok(r.saved >= 1, 'saved');
     assert.equal(r.toast, 'Settings restored to their defaults.');
@@ -995,7 +995,15 @@ test('① felt: the frame sampler counts frames during a generation only; long t
     assert.ok(r.during.dropped >= 1 && r.during.frozen >= 1, JSON.stringify(r.during));
     assert.equal(r.after.frames, r.during.frames, 'the sampler stopped with the generation');
     if (r.after.longTasks) assert.ok(r.after.streamLongTasks >= 1, JSON.stringify(r.after));
-    assert.match(r.text, /^Felt: frames late while streaming: \d+ of \d+/m);
+    assert.match(r.text, /^Stutter: frames late during a generation: \d+ of \d+/m);
+});
+
+test('① stutter: "Measure on this chat" leaves no long tasks of its own in the counters', async ({ each }) => {
+    const r = (await each('measureLongTasks', null, { variants: ['current'] })).current;
+    assert.ok(r.measureMs > 150, `the measurement took ${r.measureMs} ms: too quick to hold long tasks`);
+    assert.deepEqual(r.after, r.before, 'the stutter counters after the measurement');
+    assert.ok(r.later.longTasks >= r.before.longTasks + 1, `a long task after the measurement is still counted: ${JSON.stringify(r.later)}`);
+    assert.equal(r.offCleared, 0, 'turning the option off clears the figures');
 });
 
 test('① felt: a long task is split into the display passes it held and the rest', async ({ each }) => {

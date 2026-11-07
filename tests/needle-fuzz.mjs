@@ -7,7 +7,7 @@ import { CASES, fuzz, runCases } from './harness/needle-fuzz.js';
 register('data:text/javascript,' + encodeURIComponent(`
 const stub = (code) => ({ url: 'data:text/javascript,' + encodeURIComponent(code), shortCircuit: true });
 export async function resolve(specifier, context, next) {
-    if (specifier.endsWith('/regex/engine.js')) return stub('export const RegexProvider = { instance: { get() {}, clear() {} } }; export const getRegexScripts = () => [];');
+    if (specifier.endsWith('/regex/engine.js')) return stub('class P { get() {} clear() {} } export const RegexProvider = { instance: new P() }; export const getRegexScripts = () => [];');
     if (specifier.endsWith('/utils.js')) return stub('export const regexFromString = () => undefined;');
     if (specifier.endsWith('/script.js')) return stub('export let converter; export function updateMessageBlock() {}');
     return next(specifier, context);

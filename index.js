@@ -45,7 +45,7 @@ const defaultSettings = {
     streamingIncremental: true, // ④ compromise mode: scripts that cannot match across a line run on the new lines only
     streamingParagraphCache: true, // ④ compromise mode: the finished paragraphs' HTML is kept while the reply streams; markdown and the sanitizer run on the paragraph being written
     adaptive: true, // ① when the regex stage is a negligible share of the render, time 1 run in 64 (the panel says so)
-    frameStats: true, // ① count dropped frames while streaming and long tasks (what a user feels), when the browser can
+    frameStats: false, // ① stutter counters: late frames during a generation and long tasks (over 50 ms), when the browser can; off: the figures change on their own, which not everyone wants to watch
     memoMaxEntries: 3000,
     memoMaxLen: 20000,
     memoMaxMB: deviceMemory && deviceMemory <= 2 ? 16 : deviceMemory && deviceMemory <= 4 ? 32 : 64,
@@ -1265,14 +1265,14 @@ class PerfRegExp extends RegExp {
         if (cfg.prefilter && test && !test(str, keep)) {
             stat.skipped++;
             if (prevOut === str && prevIn !== str && prevStat !== stat) noteConflict(prevStat, stat, prevIn, test, this._native, keep);
-            if (incremental) meta.inc = { msg: streamKey, in: str, out: str };
+            if (incremental) meta.inc.set(streamKey, { in: str, out: str });
             return unchanged(stat, str);
         }
         let inc = null; // the prefix already formatted, when the new text continues it after a line break
         let incIn = str; // what the regex really runs on
         if (incremental) {
-            const prev = meta.inc;
-            if (prev && prev.msg === streamKey && str.length > prev.in.length && prev.in.endsWith('\n') && str.startsWith(prev.in)) {
+            const prev = meta.inc.get(streamKey); // per stream: the reasoning and the body of one message keep prefixes of their own
+            if (prev && str.length > prev.in.length && prev.in.endsWith('\n') && str.startsWith(prev.in)) {
                 inc = prev;
                 incIn = str.slice(prev.in.length);
             }
@@ -1375,7 +1375,7 @@ class PerfRegExp extends RegExp {
                 }
             }
         }
-        if (incremental) meta.inc = { msg: streamKey, in: str, out };
+        if (incremental) meta.inc.set(streamKey, { in: str, out });
         const dt = t0 ? performance.now() - t0 : 0;
         if (cfg.breaker && dt > cfg.breakerMs && ++stat.slowRuns >= cfg.breakerCount) trip(stat); // ⑧
         if (profile) {
@@ -1482,7 +1482,7 @@ function patchProvider() {
     // SillyTavern's get() is the class method; an own property on the instance is another extension's wrapper.
     if (inst.get !== Object.getPrototypeOf(inst)?.get) warnWrapper(t`Another extension had already replaced the regex engine's get() when Regex Perf Kit loaded: its runs may be measured twice or not at all.`);
     const origGet = inst.get.bind(inst);
-    const origClear = inst.clear.bind(inst);
+    const origClear = typeof inst.clear === 'function' ? inst.clear.bind(inst) : null; // older providers may have no clear()
 
     inst.get = patchedGet = function (regexString) {
         const base = origGet(regexString);
@@ -1524,7 +1524,7 @@ function patchProvider() {
                 volatile: info ? info.volatile : true,
                 dynamic: !info || info.dynamicVolatile, // the find pattern itself can change between renders: volatile even without a match
                 lineLocal: !!info?.lineLocal && !incOff.has(key),
-                inc: null, // ④ incremental formatting: {msg, in, out} of the last streamed prefix this script saw
+                inc: new Map(), // ④ incremental formatting: stream key -> {in, out}, the last streamed prefix this script saw in that stream
                 incVerify: w._meta?.incVerify ?? INC_VERIFY_RUNS, // incremental runs still to check against a full run
             };
             w._version = version;
@@ -1534,7 +1534,7 @@ function patchProvider() {
     };
 
     inst.clear = function () {
-        origClear();
+        origClear?.();
         wrapped.clear();
         markDirty();
     };
@@ -1725,6 +1725,13 @@ function startFrames() {
     frameLast = 0;
     frameRaf = requestAnimationFrame(frameTick);
 }
+// "Measure on this chat" renders the whole chat in chunks, each a long task of its own. The observer delivers its entries
+// after the measurement has finished (so after measureChat() restored the counters), so the tasks that overlap a
+// measurement (the first chunk runs in the task that started it) are recognized by their times and left out: they are
+// not what the user felt.
+const measureSpans = []; // [start, end] on the performance clock of the recent measurements, newest last
+const MEASURE_SPANS_KEPT = 8;
+const inMeasurement = (start, end) => measureSpans.some(([a, b]) => start <= b && end >= a);
 let longTaskObserver = null;
 function observeLongTasks() {
     if (longTaskObserver || typeof PerformanceObserver !== 'function') return;
@@ -1733,6 +1740,7 @@ function observeLongTasks() {
         longTaskObserver = new PerformanceObserver((list) => {
             if (!cfg.frameStats) return;
             for (const e of list.getEntries()) {
+                if (inMeasurement(e.startTime, e.startTime + e.duration)) continue; // this extension's own measurement, not the page's stutter
                 feel.longTasks++;
                 feel.longTaskMs += e.duration;
                 if (e.duration >= 100) feel.longTasks100++;
@@ -2043,7 +2051,9 @@ function installPersistHooks() {
         const wantPersist = cfg.persist && !c.isReasoning;
         const sp = liveStream();
         if (!sp && c.messageId === streamSkippedMsg) streamSkippedMsg = null; // the streamed message's final render
-        if (sp) return cfg.streamingSkip && cfg.streamingThrottle && sp.messageId === c.messageId ? streamPass(mes, c) : mes;
+        // the streamed message: ④'s compromise mode or nothing (its text changes every tick); another message rendered
+        // during the stream (scrolling up, an edit) is served and stored as usual
+        if (sp && sp.messageId === c.messageId) return cfg.streamingSkip && cfg.streamingThrottle ? streamPass(mes, c) : mes;
         if (!wantHtml && !wantPersist) return mes;
         const chat = ctx().chat;
         const msg = chat?.[c.messageId];
@@ -2270,9 +2280,9 @@ const paraText = (p) => t`④ paragraph cache: ${p.paragraph.hits} streaming ren
 /** What a user feels, in words: dropped frames while streaming, long tasks, the time a chat took to open. */
 function feelText(f) {
     const parts = [];
-    if (f.frames) parts.push(t`frames late while streaming: ${f.dropped} of ${f.frames} (${f.frozen} freezes over 100 ms)`);
-    if (f.longTasks) parts.push(t`tasks over 50 ms: ${f.longTasks} (${f.longTasks100} over 100 ms, ${fmtMs(f.longTaskMs)} ms blocked, ${f.streamLongTasks} while streaming)`);
-    if (f.longTasks && f.lastLongTask) parts.push(t`display renders inside those tasks: ${fmtMs(f.longTaskPipeMs)} ms of ${fmtMs(f.longTaskMs)} ms; the latest task: ${fmtMs(f.lastLongTask.pipeMs)} ms of ${fmtMs(f.lastLongTask.ms)} ms (the rest is SillyTavern's DOM work, layout and other extensions)`);
+    if (f.frames) parts.push(t`frames late during a generation: ${f.dropped} of ${f.frames} (${f.frozen} freezes over 100 ms)`);
+    if (f.longTasks) parts.push(t`tasks over 50 ms: ${f.longTasks} (${f.longTasks100} over 100 ms, ${fmtMs(f.longTaskMs)} ms blocked, ${f.streamLongTasks} during a generation)`);
+    if (f.longTasks && f.lastLongTask) parts.push(t`display renders inside those tasks: ${fmtMs(f.longTaskPipeMs)} ms of ${fmtMs(f.longTaskMs)} ms; the latest task: ${fmtMs(f.lastLongTask.pipeMs)} ms of ${fmtMs(f.lastLongTask.ms)} ms (the rest: SillyTavern's DOM work and layout, other extensions, and this extension's own storage and panel work)`);
     return parts.join('; ');
 }
 
@@ -2546,7 +2556,7 @@ function buildReportText() {
         if (s.pipe.light) lines.push(t`The regex stage is under 2% of the renders: the profiler times 1 run in 64 (adaptive).`);
     }
     const felt = feelText(s.feel);
-    if (felt) lines.push(t`Felt: ${felt}`);
+    if (felt) lines.push(t`Stutter: ${felt}`);
     if (s.pipe.loadMs) lines.push(t`Opening this chat rendered for ${fmtMs(s.pipe.loadMs)} ms`);
     if (measured) lines.push(measureText(measured), slowestText(measured), ...measureVerdict(measured));
     if (s.top) lines.push(t`#1 "${s.top.name}" takes ${s.topShare.toFixed(0)}% of the total time`);
@@ -2814,10 +2824,14 @@ async function measureChat(without = null) {
     const savedLight = adaptiveLight;
     const times = [];
     let first, second;
+    const span = [performance.now(), Infinity]; // long tasks that start in here are the measurement's, see inMeasurement()
+    measureSpans.push(span);
+    if (measureSpans.length > MEASURE_SPANS_KEPT) measureSpans.shift();
     try {
         first = await render(without ? null : times, null, over(without ? CACHES_OFF : FEATURES_OFF)); // the raw cost of each message
         second = await render(null, without, over(without ? CACHES_OFF : { profiler: false, adaptive: false }));
     } finally {
+        span[1] = performance.now();
         measureBusy = false;
         for (const [k, st] of stats) COUNTERS.forEach((c, i) => { st[c] = saved.get(k)?.[i] ?? zero(c); });
         Object.assign(persistStats, savedPersist);
@@ -2947,7 +2961,7 @@ const settingsHtml = () => `
         ${feature('rpk_profilerSampling', t`Sample: past 1000 runs of a script, time 1 run in 8`, t`Timing is two clock reads per run; with sampling, the totals of a busy script are scaled from every eighth run. On by default on devices reporting 4 GB or less (only Chromium-based browsers report it).`, { sub: true })}
         ${feature('rpk_timeReplacer', t`Time the replacement separately (the Replacer column)`, t`Two more clock reads per match. Off, that column stays 0.`, { sub: true })}
         ${feature('rpk_adaptive', t`Adaptive: time 1 run in 64 once regex is under 2% of the renders`, t`The whole display pipeline is timed (regex, markdown, sanitizing). When the regex stage is a negligible share, the profiler steps back and the summary says so instead of promising savings.`, { sub: true })}
-        ${feature('rpk_frameStats', t`Count what a user feels: late frames while streaming, long tasks`, t`A frame sampler runs only during a generation; long tasks (over 50 ms) come from the browser's PerformanceObserver where it offers them (Chromium). Idle pages pay nothing.`, { sub: true })}
+        ${feature('rpk_frameStats', t`Measure stutter: late frames during a generation, tasks over 50 ms`, t`Counts the frames the page painted late while a reply was generated and the tasks that blocked the page for over 50 ms (from the browser's PerformanceObserver, Chromium only), and says how much of those tasks was display rendering. The figures keep changing while the page runs, so this is off by default; turning it off clears them. The frame sampler runs during a generation only.`, { sub: true })}
         </div>
         ${feature('rpk_prefilter', t`② Skip runs that cannot match (literal prefilter)`, t`If the message does not even contain the fixed text a script looks for (such as &lt;/status&gt;), the regex is not run. The result is exactly the same.`)}
         <div class="rpk-feature-group">
@@ -2979,6 +2993,7 @@ const settingsHtml = () => `
           ${limit('memoMaxEntries', t`③ Cache entries`, t`Oldest results are dropped beyond this many.`)}
           ${limit('memoMaxLen', t`③ Longest input to cache (characters)`, t`Longer inputs are not cached.`)}
           ${limit('memoMaxMB', t`③ Cache memory (MB)`, t`Oldest results are dropped beyond this estimated size (2 bytes per character of input and output).`)}
+          ${limit('memoHashKeys', t`③ Key the cache by a hash of the input`, t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`, 'checkbox')}
           ${limit('persistMaxLen', t`⑤ Longest result to save (characters)`, t`Longer display results are not saved.`)}
           ${limit('persistDbMaxMB', t`⑤ Saved results, all chats (MB)`, t`Beyond this estimated size the results stored longest ago are dropped first, whichever chat they belong to. Stored in the browser's IndexedDB, not in the chat file.`)}
           ${limit('streamingThrottleMs', t`Compromise interval (ms)`)}
@@ -2987,7 +3002,6 @@ const settingsHtml = () => `
           ${limit('breakerCount', t`⑧ Breaker: long runs that turn the script off`)}
           ${limit('htmlMemoMaxEntries', t`⑨ HTML cache entries`, t`Oldest formatted messages are dropped beyond this many.`)}
           ${limit('htmlMemoMaxMB', t`⑨ HTML cache memory (MB)`, t`Oldest formatted messages are dropped beyond this estimated size.`)}
-          ${limit('memoHashKeys', t`③ Key the cache by a hash of the input`, t`Keeps a 64-bit hash of each input instead of the input: about half the memory for long chats, at the cost of hashing every input. A collision (two same-length inputs with the same hash) would return the other input's result; with 64 bits that takes billions of inputs.`, 'checkbox')}
           ${limit('loadHintMs', t`Hint about "# Messages to Load" when opening a chat takes longer than (ms)`, t`Shown once per session as a toast.`)}
           ${limit('autoMeasure', t`Measure automatically when a chat opens`, t`Runs "Measure on this chat" once after a chat opens.`, 'checkbox')}
           ${limit('lint', t`Lint the scripts`, t`Missing g, group references the pattern cannot fill, double escapes, browser support, duplicate patterns. Shown under Lint; a fix is applied only when you confirm it.`, 'checkbox')}
@@ -3203,6 +3217,7 @@ function bindUi() {
             if ((key === 'memo' && !el.checked) || key === 'memoHashKeys') clearMemo(); // entries keyed the other way are useless
             if (key === 'htmlMemo' && !el.checked) htmlMemo.clear();
             if (key === 'breaker' && !el.checked) for (const s of stats.values()) if (s.tripped) untrip(s); // off: nothing stays skipped
+            if (key === 'frameStats' && !el.checked) resetFeel(); // off: the figures leave the summary instead of standing still
             renderPanel();
         });
     }
@@ -3392,7 +3407,7 @@ for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPE
     eventSource.on(event, () => {
         generating = false;
         clearStreamCaches();
-        for (const w of wrapped.values()) if (w._meta) w._meta.inc = null; // ④ incremental state holds the streamed text
+        for (const w of wrapped.values()) w._meta?.inc.clear(); // ④ incremental state holds the streamed text
         rerenderSkipped();
     });
 }
