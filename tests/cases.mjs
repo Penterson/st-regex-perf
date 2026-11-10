@@ -1094,3 +1094,116 @@ test('the Limits rows keep their whole tooltip when it holds a double quote', as
     assert.equal(r.title, 'Runs "Measure on this chat" once after a chat opens.');
     assert.deepEqual(r.extraAttributes, []);
 });
+
+// ---- 0.5.5: the 0.5.4 audit's findings ----
+
+test('a start SillyTavern abandons (a slash command, no backend) costs no getContext() per display script and no idle frames, and ends; a late start is picked up', async ({ each }) => {
+    const r = (await each('abandonedStarts', null, { variants: ['current'] })).current;
+    assert.equal(r.commandContexts, 0, 'a slash command starts no generation');
+    assert.equal(r.commandFrames, 0);
+    assert.equal(r.noBackendFrames, 0, 'no frame is counted before SillyTavern marks the page');
+    if (r.idleLongTask) assert.equal(r.idleLongTask.streaming, false, 'the abandoned start has ended');
+    assert.equal(r.lateLive, 'ab', 'display scripts rest while the late stream is live');
+    assert.equal(r.liveContexts, 0, 'the streaming processor is read without getContext()');
+    assert.equal(r.lateFinished, 'AB');
+});
+
+test('① adaptive sampling: a script that matched is not reported as never matching', async ({ each }) => {
+    const r = (await each('adaptiveMatches', null, { variants: ['current'] })).current;
+    assert.equal(r.light, true, 'adaptive sampling engaged');
+    assert.equal(r.sampled, true);
+    assert.equal(r.shown, 12);
+    assert.ok(!r.warnings.includes('no match'), r.warnings.join(', '));
+    assert.ok(!r.candidates.includes('Phone numbers'), r.candidates.join(', '));
+});
+
+test('/regexperf off <name> turns off that script only when another one shares its pattern', async ({ each }) => {
+    const r = (await each('offSharedPattern', null, { variants: ['current'] })).current;
+    assert.equal(r.reply, 'Turned off: Alpha');
+    assert.deepEqual(r.disabled, { Alpha: true, Beta: false });
+});
+
+test('what the extension saves (a lint fix, off) is in the Regex drawer\'s own script objects, so a later click there keeps it', async ({ each }) => {
+    const r = (await each('drawerKeepsSaves', null, { variants: ['current'] })).current;
+    assert.equal(r.fixed, '/a\\nb/g');
+    assert.equal(r.offReply, 'Turned off: Escaped');
+    assert.equal(r.switchAfterOff, true, 'the drawer\'s switch shows the script off');
+    assert.deepEqual(r.after, { findRegex: '/a\\nb/g', disabled: false });
+});
+
+test('④ paragraph cache: no boundary inside a multi-line HTML comment or a tag whose attributes span lines', async ({ each }) => {
+    const r = (await each('paragraphCutHtml', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.comment, ['She looks up.', 'She looks up.\n\n<!-- state\n\nmood: tense\n\ntrust: 3\n-->']);
+    assert.deepEqual(r.tag, ['Intro.', 'Intro.\n\n<div class="status"\n  style="color: red">\n\nHP: 10\n\nMP: 4\n\n</div>']);
+});
+
+test('"Reset settings" does what unticking does: ⑧ off runs a tripped script again, the stutter figures are cleared', async ({ each }) => {
+    const r = (await each('resetSettingsEffects', null, { variants: ['current'] })).current;
+    assert.deepEqual([r.before.out, r.before.tripped], ['a', true]);
+    assert.ok(r.before.frames > 0, 'frames were counted during the generation');
+    assert.deepEqual(r.after, { out: '', tripped: false, frames: 0, breaker: false, frameStats: false });
+});
+
+test('"Measure on this chat": the features-off pass runs a script ⑧ turned off, as SillyTavern would', async ({ each }) => {
+    const r = (await each('measureTripped', null, { variants: ['current'] })).current;
+    assert.equal(r.tripped, true);
+    assert.ok(r.off - r.on > 200, `off ${r.off} ms, on ${r.on} ms: 200 runs of a 2 ms macro`);
+});
+
+test('⑤ rows: messages with the same text in other places keep a row each, and re-renders store nothing', async ({ each }) => {
+    const r = (await each('persistEqualTexts', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.equal, { stores: 0, rows: 2 });
+    assert.deepEqual(r.distinct, { stores: 0, rows: 2 });
+});
+
+test('"Measure on this chat" stores no ⑤ rows or ⑨ entries for the messages it renders', async ({ each }) => {
+    const r = (await each('measureStoresNothing', null, { variants: ['current'] })).current;
+    assert.equal(r.measured, true);
+    assert.deepEqual(r.before, { rows: 5, html: 5 });
+    assert.deepEqual(r.after, r.before);
+});
+
+test('a RAW find pattern\'s macros: one evaluation per run as in SillyTavern, plus one when the extension reads the script list', async ({ each }) => {
+    const r = await each('findMacroEvaluations', null, { variants: ['none', 'current'] });
+    assert.equal(r.none, 10);
+    assert.equal(r.current, 11);
+});
+
+test('a RAW find pattern with {{user}}: after a persona rename the pattern compiled with the new name applies', async ({ each }) => {
+    const r = await each('findMacroRename', null, { variants: ['none', 'current'] });
+    assert.deepEqual(r.none, { before: 'Hello <$&>', afterRename: 'Hello <$&>' });
+    assert.deepEqual(r.current, r.none);
+});
+
+test('③ with ⑥ off: group text that assembles a macro is substituted by SillyTavern and not served from the cache', async ({ each }) => {
+    const r = await each('memoAssembledMacro', null, { variants: ['none', 'current'] });
+    assert.deepEqual(r.none, { first: 'User', afterRename: 'Renamed' });
+    assert.deepEqual(r.current, r.none);
+});
+
+test('a wrapper copied with its constructor replaces like a plain RegExp', async ({ each }) => {
+    const r = (await each('wrapperClone', null, { variants: ['current'] })).current;
+    assert.deepEqual(r, { replaced: 'bbb', lastIndex: 0, split: ['x', 'x'] });
+});
+
+test('a renamed script: its new name in the table and the report, and /regexperf off finds it by that name only', async ({ each }) => {
+    const r = (await each('renamedScript', null, { variants: ['current'] })).current;
+    assert.deepEqual(r.names, ['New name']);
+    assert.equal(r.report, true);
+    assert.equal(r.offOld, '"Old name" is not in the Regex extension\'s list.');
+    assert.equal(r.offNew, 'Turned off: New name');
+});
+
+test('the summary and the report tell ⑨ HTML cache and ⑤ saved results apart in what skipped a run', async ({ each }) => {
+    const r = (await each('bypassBreakdown', null, { variants: ['current'] })).current;
+    assert.equal(r.breakdown, 'prefilter 0, cache 0, streaming 0, HTML cache 2, saved results 0');
+    assert.match(r.report, /\| persistent cache bypasses 0 \(hits 0, stored 0\) \| HTML cache bypasses 2$/);
+});
+
+test('text that ends up in the panel\'s HTML is escaped: the name filter, a translated tooltip with a double quote', async ({ each }) => {
+    const r = (await each('panelEscapes', null, { variants: ['current'] })).current;
+    assert.equal(r.offTitle, 'Turn "this" script off');
+    assert.deepEqual(r.offAttributes, ['class', 'title']);
+    assert.equal(r.injected, false);
+    assert.equal(r.empty, 'No script name contains "<b id=rpk_probe>".');
+});
