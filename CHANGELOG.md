@@ -9,6 +9,10 @@
 - About a sixth fewer comment lines: repeated and obsolete ones out, and the pipeline note now says four timed parts instead of three.
 - READMEs: the MessageFormatter requirement is stated once (Install), the two caveats about other extensions' hooks are one, the paragraph-cache notes sit together, and the pre-0.5.3 settings note lives in this changelog only.
 - `docs/` screenshots recompressed losslessly (2.3 MB → 1.4 MB, pixel-identical); one redundant CSS declaration removed (`td.rpk-empty` already gets its opacity from `.rpk-dim`).
+- One helper each for steps that were written out several times: `setCapped()` for the five maps that drop their oldest entry when full (the parse caches, ②'s literal answers, the static-macro values, ⑥'s per-name templates, the wrapped patterns), `storeOf()` for ⑤'s five IndexedDB transactions, `byMemory()` for the defaults that follow the device's memory class, `spikeMes()` for a spike's message number (report and ⚡ tooltip), `listBoxes()` for the Regex drawer's lists, and `dim()` / `editIcon()` for markup the panel repeated seven and two times; `MB` replaces nine `1048576` literals.
+- The ReDoS branch-overlap check is one expression, `buildInfo()` names a script and tests for RAW/ESCAPED substitution once, the checkbox table spells out only its two irregular ids, and four comments that no longer matched the code (the pipeline line's example, two stutter descriptions, the load-time burst) are corrected or gone.
+- style.css: the two `:empty` rules are one, `.rpk-measured` drops a `:not(:empty)` that its hidden empty state made redundant, and the summary's and the measurement's rules sit with their sections (computed styles unchanged for every rendered element of the panel at four widths).
+- READMEs: the bench note no longer repeats the per-machine ratios given under 0.5.1.
 
 ## 0.5.4 — 2026-11-07
 

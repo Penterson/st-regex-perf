@@ -23,6 +23,9 @@ const { t, translate, extensionSettings, eventSource, event_types, getCurrentLoc
 
 // Chromium reports the device's memory class in GB; other browsers report nothing.
 const deviceMemory = Number(globalThis.navigator?.deviceMemory) || 0;
+/** A default by memory class: up to 2 GB, up to 4 GB, more or not reported. */
+const byMemory = (low, mid, high) => (!deviceMemory ? high : deviceMemory <= 2 ? low : deviceMemory <= 4 ? mid : high);
+const MB = 1048576;
 
 const defaultSettings = {
     profiler: true,
@@ -36,14 +39,14 @@ const defaultSettings = {
     fastPathStatic: true, // ⑥ also replacements whose only macros are the static ones
     htmlMemo: true,
     htmlMemoMaxEntries: 2000,
-    htmlMemoMaxMB: deviceMemory && deviceMemory <= 2 ? 8 : deviceMemory && deviceMemory <= 4 ? 16 : 32,
+    htmlMemoMaxMB: byMemory(8, 16, 32),
     streamingIncremental: true, // ④ compromise: line-local scripts run on the new lines only
     streamingParagraphCache: true, // ④ compromise: markdown and sanitizing on the paragraph being written only
     adaptive: true, // ① time 1 run in 64 once regex is a negligible share of the render
     frameStats: false, // ① stutter counters (late frames, long tasks)
     memoMaxEntries: 3000,
     memoMaxLen: 20000,
-    memoMaxMB: deviceMemory && deviceMemory <= 2 ? 16 : deviceMemory && deviceMemory <= 4 ? 32 : 64,
+    memoMaxMB: byMemory(16, 32, 64),
     streamingSkip: true,
     streamingThrottle: false, // ④ compromise mode
     streamingThrottleMs: 500,
@@ -190,10 +193,7 @@ function litPresent(str, id, lit, re, keep) {
             litSeen = [];
         } else {
             litSeen = litCache.get(str);
-            if (!litSeen) {
-                if (litCache.size >= litCacheMax()) litCache.delete(litCache.keys().next().value);
-                litCache.set(str, litSeen = []);
-            }
+            if (!litSeen) setCapped(litCache, str, litSeen = [], litCacheMax());
         }
     }
     let v = litSeen[id];
@@ -605,9 +605,8 @@ function firstOfSeq(items, flags) {
     for (const { atom, q } of items) {
         if (atom.kind === 'anchor' || (atom.kind === 'group' && atom.look)) continue;
         for (const c of firstOfAtom(atom, flags)) s.add(c);
-        const optional = q ? q.min === 0 : false;
         const canBeEmpty = atom.kind === 'group' && atom.alts.some(a => a.length === 0);
-        if (!optional && !canBeEmpty && atom.kind !== 'back') break;
+        if (q?.min !== 0 && !canBeEmpty && atom.kind !== 'back') break;
     }
     return s;
 }
@@ -617,7 +616,7 @@ function firstOfAtom(atom, flags) {
     if (atom.kind === 'group') for (const alt of atom.alts) for (const c of firstOfSeq(alt, flags)) s.add(c);
     return s;
 }
-const unbounded = (q) => !!q && q.max === Infinity;
+const unbounded = (q) => q?.max === Infinity;
 /** An unbounded quantifier anywhere inside (lookarounds aside). */
 const hasUnboundedInside = (alts) => alts.some(items => items.some(({ atom, q }) => (unbounded(q) && atom.kind !== 'anchor') || (atom.kind === 'group' && !atom.look && hasUnboundedInside(atom.alts))));
 
@@ -649,11 +648,7 @@ export function analyzeRedos(source, flags) {
                     if (rep && hasUnboundedInside(atom.alts)) report('exp', 'nested', atom.src + quantText(q));
                     if (rep && atom.alts.length > 1) {
                         const sets = atom.alts.map(a => firstOfSeq(a, flags));
-                        let overlap = false;
-                        for (let a = 0; a < sets.length && !overlap; a++) {
-                            for (let b = a + 1; b < sets.length && !overlap; b++) overlap = overlaps(sets[a], sets[b]);
-                        }
-                        if (overlap) report('exp', 'alternation', atom.src + quantText(q));
+                        if (sets.some((s, a) => sets.slice(a + 1).some(o => overlaps(s, o)))) report('exp', 'alternation', atom.src + quantText(q));
                         else if (!found && atom.alts.every(a => a.length === 1 && a[0].atom.kind === 'char' && !a[0].q)) found = { severity: null, kind: 'dotalt', snippet: atom.src + quantText(q) };
                     }
                     walk(atom.alts, inUnbounded || rep);
@@ -854,13 +849,14 @@ const CACHE_MAX = 2000;
 const compiledCache = new Map(); // pattern string, as RegexProvider receives it -> RegExp | null
 const needleCache = new Map(); // "source\0flags" -> extractNeedle()
 const templateCache = new Map(); // fast key -> buildTemplate()
+/** Adds a new key to a map holding at most max entries, dropping the oldest first. */
+function setCapped(map, key, value, max) {
+    if (map.size >= max) map.delete(map.keys().next().value);
+    map.set(key, value);
+}
 function cached(map, key, make, max = CACHE_MAX) {
     let v = map.get(key);
-    if (v === undefined) {
-        v = make();
-        if (map.size >= max) map.delete(map.keys().next().value);
-        map.set(key, v);
-    }
+    if (v === undefined) setCapped(map, key, v = make(), max);
     return v;
 }
 // regexFromString() swallows the engine's error: compiled again, split the same way, for the invalid-pattern list.
@@ -928,16 +924,18 @@ function buildInfo(groups) {
             counts.active++;
 
             let rs = s.findRegex;
+            const name = s.scriptName || t`(no name)`;
             const substitute = Number(s.substituteRegex);
-            const isDynamic = (substitute === 1 || substitute === 2) && MACRO.test(rs);
+            const substituted = substitute === 1 || substitute === 2; // RAW / ESCAPED, as runRegexScript() compiles them
+            const isDynamic = substituted && MACRO.test(rs);
             // static macros compile the same way for a whole render (their values are in the ⑨/⑤ key); others do not
             const dynamicVolatile = isDynamic && MACRO.test(rs.replace(STATIC_MACRO, ''));
-            if (substitute === 1 || substitute === 2) { // RAW / ESCAPED, as runRegexScript() compiles them
+            if (substituted) {
                 try { rs = substituteParamsExtended(rs, {}, substitute === 2 ? sanitizeRegexMacro : undefined); } catch { /* keep the raw pattern */ }
             }
             const { re, error } = compile(rs);
             if (!re) { // SillyTavern silently does nothing for such a script: listed in the panel
-                invalid.push({ id: s.id, name: s.scriptName || t`(no name)`, type: origin, error });
+                invalid.push({ id: s.id, name, type: origin, error });
                 counts.invalid++;
                 continue;
             }
@@ -961,7 +959,7 @@ function buildInfo(groups) {
             const strippedTrims = trims.map(trim => String(trim).replace(STATIC_MACRO, ''));
             const semiPure = !pure && pureOf(replacement.replace(STATIC_MACRO, ''), strippedTrims);
             const info = {
-                name: s.scriptName || t`(no name)`,
+                name,
                 markdownOnly: !!s.markdownOnly,
                 pure,
                 semiPure,
@@ -1024,7 +1022,8 @@ function buildInfo(groups) {
 
 // ---- Instrumented RegExp ----
 
-// Regex calls come in bursts; the burst that ends at CHAT_CHANGED is the chat's first render (the load hint's length).
+// Regex calls come in bursts; the burst that ends at CHAT_CHANGED is the chat's first render (the load hint's length
+// where display passes are not timed).
 const BURST_GAP_MS = 1000;
 let burstStart = 0;
 let lastCall = -Infinity;
@@ -1102,8 +1101,7 @@ function setPassStatic(chName, context = ctx()) {
         if (!staticVals) {
             const base = substituteParams('{{user}}\u0000{{char}}\u0000{{persona}}\u0000{{group}}');
             staticVals = [fnv1a(base), fnv1a(base + '\u0000' + substituteParams('{{char}}', { name2Override: chName }))];
-            if (staticByFp.size >= 32) staticByFp.delete(staticByFp.keys().next().value);
-            staticByFp.set(fp, staticVals);
+            setCapped(staticByFp, fp, staticVals, 32);
         }
         staticChName = chName;
     }
@@ -1130,8 +1128,7 @@ function staticFastFor(meta) {
         const trims = fs.trims.map(trim => String(trim).replace(STATIC_MACRO, trimValue));
         f = fastOf(fs.key + '\u0001' + key, template, replacement, trims, fs.named, fs.refs, meta.re);
         f.staticKey = key;
-        if (fs.byKey.size >= 8) fs.byKey.delete(fs.byKey.keys().next().value);
-        fs.byKey.set(key, f);
+        setCapped(fs.byKey, key, f, 8);
     }
     return f;
 }
@@ -1150,7 +1147,7 @@ const clearMemo = () => {
 
 /** Evicts least recently used entries until the memo fits both its entry and its memory limit. */
 function trimMemo() {
-    const maxBytes = cfg.memoMaxMB * 1048576;
+    const maxBytes = cfg.memoMaxMB * MB;
     while (memoLru.size && (memoLru.size > cfg.memoMaxEntries || memoBytes > maxBytes)) {
         const old = memoLru.values().next().value;
         memoLru.delete(old);
@@ -1173,8 +1170,7 @@ function getStat(key, re) {
             spike: null, // {ms, len, head, messageId}: the newest run over SPIKE_MS
             spikes: [], // the SPIKE_KEEP newest such runs, newest first
             moreMatches: 0, // runs without g that would have matched again (lint "missing g")
-            needle: null, // set with the wrapper's meta
-            redos: NO_REDOS, // set with the wrapper's meta
+            needle: null, redos: NO_REDOS, // set with the wrapper's meta
             fused: 0, // ⑦ inputs skipped
             broken: 0, // ⑧ runs skipped since the breaker tripped
             slowRuns: 0, // ⑧ runs over breakerMs
@@ -1388,7 +1384,7 @@ class PerfRegExp extends RegExp {
             // an unchanged output is a marker, so it is not counted twice
             const same = out === str;
             const size = (memoKey.length + (same ? 0 : out.length)) * 2;
-            if (size <= cfg.memoMaxMB * 1048576) { // a larger entry would flush the memo
+            if (size <= cfg.memoMaxMB * MB) { // a larger entry would flush the memo
                 const entry = { bucket, prefix: memoPrefix, key: memoKey, out: same ? null : out, same, size };
                 bucket.set(memoKey, entry);
                 memoLru.add(entry);
@@ -1466,8 +1462,7 @@ function patchProvider() {
                 console.warn('[RegexPerf] could not wrap regex, falling back', e);
                 return base;
             }
-            if (wrapped.size >= 1000) wrapped.delete(wrapped.keys().next().value);
-            wrapped.set(regexString, w);
+            setCapped(wrapped, regexString, w, 1000);
         }
         // re-linked whenever the script info changes, so an edit takes effect without RegexProvider.clear()
         if (w._version !== version) {
@@ -1632,8 +1627,8 @@ function ensureShowdownWrapped() {
     showdownWrapped = !!conv?.makeHtml?.[MAKE_HTML_WRAPPED];
 }
 
-// What a user feels: frames painted late while a reply streams, and long tasks (PerformanceObserver, Chromium). The
-// frame sampler runs only during a generation, so idle pages pay nothing.
+// Stutter: frames painted late during a generation, and long tasks (PerformanceObserver, Chromium). The frame sampler
+// runs only during a generation, so idle pages pay nothing.
 const FRAME_BUDGET_MS = 1000 / 60;
 const FEEL_ZERO = { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0, longTaskPipeMs: 0, lastLongTask: null };
 const feel = { ...FEEL_ZERO };
@@ -1650,7 +1645,7 @@ function notePass(start, end) {
     if (start - passLastEnd > BURST_GAP_MS) passBurstStart = start;
     passLastEnd = end;
     recentPasses.push(start, end);
-    if (recentPasses.length > RECENT_PASSES_MAX || (recentPasses.length && end - recentPasses[0] > RECENT_PASSES_MS)) {
+    if (recentPasses.length > RECENT_PASSES_MAX || end - recentPasses[0] > RECENT_PASSES_MS) {
         let i = 0;
         while (i < recentPasses.length && end - recentPasses[i + 1] > RECENT_PASSES_MS) i += 2;
         if (recentPasses.length - i > RECENT_PASSES_MAX) i = recentPasses.length - RECENT_PASSES_MAX;
@@ -2083,7 +2078,7 @@ function installPersistHooks() {
         if (p?.html && !volatile) {
             if (cfg.htmlMemo) {
                 const size = (p.key.length + mes.length) * 2;
-                const maxBytes = cfg.htmlMemoMaxMB * 1048576;
+                const maxBytes = cfg.htmlMemoMaxMB * MB;
                 if (size <= maxBytes) {
                     htmlMemo.set(p.key, mes, size);
                     htmlMemo.trim(cfg.htmlMemoMaxEntries, maxBytes);
@@ -2138,12 +2133,14 @@ const conflictText = (c) => (c.confirmed
     ? t`"${c.earlier.name}" runs first and removes what "${c.later.name}" would have matched: ${c.count} times`
     : t`"${c.earlier.name}" runs first and removes the literal "${c.later.name}" looks for: ${c.count} times (match not verified on long inputs)`);
 const spikeText = (sp) => t`Last spike: ${fmtMs(sp.ms)} ms on ${sp.len} characters, starting ${JSON.stringify(sp.head)}`;
+/** " (#12)": the message a spike happened on, when known. */
+const spikeMes = (sp) => (sp.messageId != null ? ` (#${sp.messageId})` : '');
 const fastText = (n) => t`⑥ fast path: ${n} runs without SillyTavern's callback`;
 /** Rows that never ran nor were skipped are left out of the table. */
 const active = (r) => r.calls + avoided(r) + r.bypass > 0;
 const badge = (text, title, cls = '', attrs = '') => ` <span class="rpk-badge${cls ? ' ' + cls : ''}"${attrs} title="${esc(title)}">${text}</span>`;
 /** The older spikes, for the ⚡ tooltip, and where a click goes. */
-const spikeHistory = (r) => r.spikes.slice(1, 5).map(sp => '\n' + t`${fmtMs(sp.ms)} ms on ${sp.len} characters` + (sp.messageId != null ? ` (#${sp.messageId})` : '')).join('')
+const spikeHistory = (r) => r.spikes.slice(1, 5).map(sp => '\n' + t`${fmtMs(sp.ms)} ms on ${sp.len} characters` + spikeMes(sp)).join('')
     + (r.spike?.messageId != null ? '\n' + t`Click to scroll to message #${r.spike.messageId}` : '');
 /** A row's warnings: words for the report, or badges for the panel. */
 function warnings(r, badges = false) {
@@ -2187,9 +2184,9 @@ function buildSummary() {
         chatLen: chat?.length ?? 0,
         top,
         topShare: top && total > 0 ? top.totalMs / total * 100 : 0,
-        usage: t`③ memory cache: ${memoLru.size} entries, ${(memoBytes / 1048576).toFixed(1)} of ${settings.memoMaxMB} MB`
-            + (htmlStageAvailable ? '. ' + t`⑨ HTML cache: ${htmlMemo.map.size} messages, ${(htmlMemo.bytes / 1048576).toFixed(1)} of ${settings.htmlMemoMaxMB} MB` : '')
-            + (persist ? '. ' + t`⑤ saved results: ${persist.entries} messages in this chat, ${(persist.dbBytes / 1048576).toFixed(1)} of ${settings.persistDbMaxMB} MB in all chats` : ''),
+        usage: t`③ memory cache: ${memoLru.size} entries, ${(memoBytes / MB).toFixed(1)} of ${settings.memoMaxMB} MB`
+            + (htmlStageAvailable ? '. ' + t`⑨ HTML cache: ${htmlMemo.map.size} messages, ${(htmlMemo.bytes / MB).toFixed(1)} of ${settings.htmlMemoMaxMB} MB` : '')
+            + (persist ? '. ' + t`⑤ saved results: ${persist.entries} messages in this chat, ${(persist.dbBytes / MB).toFixed(1)} of ${settings.persistDbMaxMB} MB in all chats` : ''),
         persist,
         pipe: pipelineSummary(),
         feel: { ...feel },
@@ -2217,12 +2214,11 @@ function pipelineSummary() {
         light: adaptiveLight && settings.adaptive,
     };
 }
-/** "regex 12% · markdown 61% · sanitize 27% of N renders (X ms)". */
 const pipeText = (p) => t`Display renders timed: ${p.full}, ${fmtMs(p.totalMs)} ms: regex ${p.regexPct}%, markdown ${p.markdownPct}%, sanitizing ${p.sanitizePct}%, this extension's own lookups ${p.hookPct}%`;
 const htmlText = (p) => t`⑨ HTML cache: ${p.htmlHits} renders reused, about ${fmtMs(p.htmlSavedMs)} ms saved`;
 const paraText = (p) => t`④ paragraph cache: ${p.paragraph.hits} streaming renders reused the finished paragraphs' HTML and converted the last paragraph only (${p.paragraph.passes} renders were split)`
     + (p.paragraph.fallbacks ? ' ' + t`(${p.paragraph.fallbacks} messages went back to whole renders)` : '');
-/** What a user feels, in words: dropped frames while streaming, long tasks, the time a chat took to open. */
+/** The stutter figures in words: late frames, long tasks and the display renders inside them. */
 function feelText(f) {
     const parts = [];
     if (f.frames) parts.push(t`frames late during a generation: ${f.dropped} of ${f.frames} (${f.frozen} freezes over 100 ms)`);
@@ -2271,6 +2267,8 @@ const eachKey = (req, each) => new Promise((ok, no) => {
     req.onerror = () => no(req.error);
 });
 const txDone = (tx) => new Promise((ok, no) => { tx.oncomplete = () => ok(); tx.onerror = tx.onabort = () => no(tx.error); });
+/** The results store in a new transaction, which is store.transaction. */
+const storeOf = (db, mode = 'readonly') => db.transaction(DB_STORE, mode).objectStore(DB_STORE);
 
 /** Opens (and on first use creates) the database; resolves to null where IndexedDB is unavailable. */
 function openPersistDb() {
@@ -2303,7 +2301,7 @@ async function measurePersistDb(db) {
     let bytes = 0;
     let rows = 0;
     try {
-        await eachKey(db.transaction(DB_STORE).objectStore(DB_STORE).index('age').openKeyCursor(), (cur) => {
+        await eachKey(storeOf(db).index('age').openKeyCursor(), (cur) => {
             bytes += cur.key[1];
             rows++;
         });
@@ -2346,7 +2344,7 @@ function loadPersisted(context) {
         if (stale()) return;
         if (db) {
             try {
-                const rows = await idbDone(db.transaction(DB_STORE).objectStore(DB_STORE).index('chat').getAll(chatKey));
+                const rows = await idbDone(storeOf(db).index('chat').getAll(chatKey));
                 if (stale()) return;
                 for (const row of rows) {
                     if (persistMem.has(row.id)) { // stored again during the read: the new row replaced it in the database
@@ -2403,13 +2401,12 @@ async function flushPersisted() {
     try {
         if (rows.length) {
             try {
-                const tx = db.transaction(DB_STORE, 'readwrite');
-                const store = tx.objectStore(DB_STORE);
+                const store = storeOf(db, 'readwrite');
                 for (const row of rows) store.put(row);
-                await txDone(tx);
+                await txDone(store.transaction);
             } catch (e) { console.warn('[RegexPerf] ⑤ could not store the results', e); }
         }
-        if (persistDbBytes > settings.persistDbMaxMB * 1048576) await evictPersisted(db);
+        if (persistDbBytes > settings.persistDbMaxMB * MB) await evictPersisted(db);
     } finally {
         persistInFlight -= rows.length;
         statsDirty = true;
@@ -2418,10 +2415,9 @@ async function flushPersisted() {
 
 /** Deletes rows oldest first (all chats) until the store is under 90% of its limit. */
 async function evictPersisted(db) {
-    const target = settings.persistDbMaxMB * 1048576 * 0.9;
+    const target = settings.persistDbMaxMB * MB * 0.9;
     try {
-        const tx = db.transaction(DB_STORE, 'readwrite');
-        const store = tx.objectStore(DB_STORE);
+        const store = storeOf(db, 'readwrite');
         await eachKey(store.index('age').openKeyCursor(), (cur) => {
             if (persistDbBytes <= target) return false;
             store.delete(cur.primaryKey);
@@ -2432,7 +2428,7 @@ async function evictPersisted(db) {
                 persistMemBytes -= mine.n;
             }
         });
-        await txDone(tx);
+        await txDone(store.transaction);
     } catch (e) { console.warn('[RegexPerf] ⑤ could not drop old results', e); }
 }
 
@@ -2451,10 +2447,9 @@ async function clearPersistedDb() {
     const db = await openPersistDb();
     if (!db) return removed;
     try {
-        const tx = db.transaction(DB_STORE, 'readwrite');
-        const store = tx.objectStore(DB_STORE);
+        const store = storeOf(db, 'readwrite');
         await eachKey(store.index('chat').openKeyCursor(IDBKeyRange.only(chatKey)), (cur) => { store.delete(cur.primaryKey); });
-        await txDone(tx);
+        await txDone(store.transaction);
         if (!wasLoaded) await measurePersistDb(db); // rows not read yet were deleted too
     } catch (e) { console.warn('[RegexPerf] ⑤ could not clear the stored results', e); }
     statsDirty = true;
@@ -2514,8 +2509,8 @@ function buildReportText() {
     if (spikes.length) {
         lines.push('', t`Spikes (newest run over ${SPIKE_MS} ms per script)`);
         for (const r of spikes) {
-            lines.push(`${r.name}: ${spikeText(r.spike)}` + (r.spike.messageId != null ? ` (#${r.spike.messageId})` : ''));
-            for (const sp of r.spikes.slice(1)) lines.push(`  ${fmtMs(sp.ms)} ms / ${sp.len}` + (sp.messageId != null ? ` (#${sp.messageId})` : ''));
+            lines.push(`${r.name}: ${spikeText(r.spike)}` + spikeMes(r.spike));
+            for (const sp of r.spikes.slice(1)) lines.push(`  ${fmtMs(sp.ms)} ms / ${sp.len}` + spikeMes(sp));
         }
     }
     const risks = s.rows.filter(r => r.redos.kind);
@@ -2647,11 +2642,11 @@ const LIST_IDS = ['saved_regex_scripts', 'saved_scoped_scripts', 'saved_preset_s
 const observedLists = new WeakSet();
 const statById = new Map(); // script id -> its stat, for the chips
 let chipTimer = 0;
+const listBoxes = () => LIST_IDS.map(id => document.getElementById(id)).filter(Boolean);
 /** Watches the Regex drawer's lists (SillyTavern rebuilds them) once they exist. */
 function installListBadges() {
-    for (const id of LIST_IDS) {
-        const box = document.getElementById(id);
-        if (!box || observedLists.has(box)) continue;
+    for (const box of listBoxes()) {
+        if (observedLists.has(box)) continue;
         observedLists.add(box);
         new MutationObserver(() => {
             if (!chipTimer) chipTimer = setTimeout(() => { chipTimer = 0; updateListBadges(); }, 50);
@@ -2677,9 +2672,7 @@ function updateListBadges() {
         return;
     }
     const total = [...stats.values()].reduce((acc, r) => acc + r.totalMs, 0);
-    for (const id of LIST_IDS) {
-        const box = document.getElementById(id);
-        if (!box) continue;
+    for (const box of listBoxes()) {
         for (const row of box.querySelectorAll('.regex-script-label[id]')) {
             const name = row.querySelector('.regex_script_name');
             const stat = statById.get(row.id);
@@ -2999,7 +2992,9 @@ const settingsHtml = () => `
   </div>
 </div>`;
 
-const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_adaptive: 'adaptive', rpk_frameStats: 'frameStats', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_fastPathStatic: 'fastPathStatic', rpk_htmlMemo: 'htmlMemo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_streamingIncremental: 'streamingIncremental', rpk_streamingParagraphCache: 'streamingParagraphCache', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure', rpk_lint: 'lint', rpk_listBadges: 'listBadges' };
+// checkbox id -> setting: #rpk_<setting>, but for ④'s first two
+const TOGGLES = { rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle' };
+for (const key of ['profiler', 'profilerSampling', 'timeReplacer', 'adaptive', 'frameStats', 'prefilter', 'memo', 'memoStatic', 'memoPostHoc', 'fastPath', 'fastPathStatic', 'htmlMemo', 'streamingIncremental', 'streamingParagraphCache', 'persist', 'fuse', 'breaker', 'memoHashKeys', 'autoMeasure', 'lint', 'listBadges']) TOGGLES['rpk_' + key] = key;
 // setting -> [min, max]
 const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], htmlMemoMaxEntries: [0, 1e6], htmlMemoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistDbMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], fuseLen: [1000, 1e7], breakerMs: [50, 60000], breakerCount: [1, 100], loadHintMs: [100, 600000] };
 
@@ -3021,6 +3016,8 @@ const litTitle = (r, lit) => [
 ].filter(Boolean).join('\n');
 /** A key figure in the summary; the tests read it by its key. */
 const fig = (key, value) => `<b data-k="${key}">${value}</b>`;
+const dim = (html) => `<span class="rpk-dim">${html}</span>`;
+const editIcon = () => ` <span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span>`;
 
 /** The display pipeline as a stacked bar; empty until something was timed. */
 function pipeBarHtml(p) {
@@ -3037,25 +3034,25 @@ function renderPanel() {
     const lines = [];
     lines.push(t`${c.active} of ${c.total} scripts active (${typeCounts(c)}). ${s.chatLen} messages in this chat.`);
     if (c.noNeedle || c.redos) {
-        lines.push(`<span class="rpk-dim">${t`Patterns to look at: no fixed text ${c.noNeedle}, backtracking risk ${c.redos} (exponential ${c.redosExp}).`}</span>`);
+        lines.push(dim(t`Patterns to look at: no fixed text ${c.noNeedle}, backtracking risk ${c.redos} (exponential ${c.redosExp}).`));
     }
     const breakdown = t`prefilter ${s.skipped}, cache ${s.hits}, streaming ${s.streamSkipped}` + (persistAvailable ? ', ' + t`saved results ${s.bypass}` : '');
     if (!s.calls && !s.skips && !s.bypass) {
-        lines.push(`<span class="rpk-dim">${t`No runs measured yet. Render a message or reopen the chat.`}</span>`);
+        lines.push(dim(t`No runs measured yet. Render a message or reopen the chat.`));
     } else {
         lines.push(t`Regex ran ${fig('runs', s.calls)} times, ${fig('ms', fmtMs(s.total) + ' ms')} in total.`);
         lines.push(s.calls
             ? t`${fig('skipped', s.skips + s.bypass)} runs were skipped (${breakdown}), saving about ${fig('saved', fmtMs(s.saved) + ' ms')}.`
             : t`${fig('skipped', s.skips + s.bypass)} runs were skipped (${breakdown}). The time saved is known once some runs have been measured.`);
-        if (s.fast) lines.push(`<span class="rpk-dim">${fastText(s.fast)}</span>`);
+        if (s.fast) lines.push(dim(fastText(s.fast)));
     }
     if (s.pipe.available && s.pipe.full) {
-        lines.push(`<span class="rpk-dim">${esc(pipeText(s.pipe))}.</span>` + (s.pipe.htmlHits ? ` ${esc(htmlText(s.pipe))}.` : '') + (s.pipe.paragraph.passes ? ` <span class="rpk-dim">${esc(paraText(s.pipe))}.</span>` : ''));
-        if (s.pipe.light) lines.push(`<span class="rpk-dim">${t`The regex stage is under 2% of the renders here: ②③④ have little to save, so the profiler times 1 run in 64. What helps more is under "What SillyTavern's own settings can do".`}</span>`);
+        lines.push(dim(esc(pipeText(s.pipe)) + '.') + (s.pipe.htmlHits ? ` ${esc(htmlText(s.pipe))}.` : '') + (s.pipe.paragraph.passes ? ' ' + dim(esc(paraText(s.pipe)) + '.') : ''));
+        if (s.pipe.light) lines.push(dim(t`The regex stage is under 2% of the renders here: ②③④ have little to save, so the profiler times 1 run in 64. What helps more is under "What SillyTavern's own settings can do".`));
     }
     const felt = feelText(s.feel);
     if (felt || s.pipe.loadMs) {
-        lines.push(`<span class="rpk-dim">${esc([felt, s.pipe.loadMs ? t`opening this chat rendered for ${fmtMs(s.pipe.loadMs)} ms` : ''].filter(Boolean).join('; '))}.</span>`);
+        lines.push(dim(esc([felt, s.pipe.loadMs ? t`opening this chat rendered for ${fmtMs(s.pipe.loadMs)} ms` : ''].filter(Boolean).join('; ')) + '.'));
     }
     if (s.top && s.calls > 0) {
         lines.push(t`Slowest: <b>${esc(s.top.name)}</b>, ${s.topShare.toFixed(0)}% of the time.` + (s.topShare >= 50 ? ' ' + t`Turning it off or fixing it helps the most.` : ''));
@@ -3092,12 +3089,12 @@ function renderPanel() {
         const actions = (m ? `<span class="rpk-row-ms" title="${esc(t`Without this script the chat renders in ${fmtMs(m.without)} ms instead of ${fmtMs(m.with)} ms (③, ⑤ and ⑨ off)`)}">${m.with >= m.without ? '−' : '+'}${fmtMs(Math.abs(m.with - m.without))} ms</span>` : '')
             + `<span class="rpk-measure-row fa-solid fa-stopwatch" title="${t`Measure this chat without this script`}"></span>`
             + (r.spike ? ` <span class="rpk-repro fa-solid fa-copy" title="${t`Copy a repro of the newest spike (pattern, input length and head) for a bug report`}"></span>` : '')
-            + (r.ids.length ? ` <span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span> <span class="rpk-off fa-solid fa-power-off" title="${t`Turn this script off`}"></span>` : '');
+            + (r.ids.length ? editIcon() + ` <span class="rpk-off fa-solid fa-power-off" title="${t`Turn this script off`}"></span>` : '');
         return `<tr class="${cls}${r.ids.length ? ' rpk-script' : ''}" title="${esc(r.src)}" data-i="${i}">
           ${td('rank', ranks.get(r))}${td('name', esc(r.name) + warnings(r, true).join(''))}
           ${td('runs', r.calls)}${td('total', fmtMs(r.totalMs))}${td('avg', fmtMs(avgMs(r)))}${td('max', fmtMs(r.maxMs))}
           ${td('repl', fmtMs(r.replMs))}${td('matched', r.matched)}${td('changed', r.changed)}
-          ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', lit ? esc(lit) : `<span class="rpk-dim">${t`none`}</span>`, 'rpk-lit', litTitle(r, lit))}
+          ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', lit ? esc(lit) : dim(t`none`), 'rpk-lit', litTitle(r, lit))}
           ${td('act', actions, 'rpk-act')}
         </tr>`;
     }).join('') || `<tr><td colspan="13" class="rpk-dim rpk-empty">${nameFilter && s.rows.length ? t`No script name contains "${nameFilter}".` : t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
@@ -3114,7 +3111,7 @@ function renderPanel() {
     setContent(ui.lintCount, lint.length ? `(${lint.length})` : '', 'textContent');
     setContent(ui.lintList, lint.length ? lint.map((row, i) => `<li data-rule="${row.rule}" data-script="${esc(row.info.name)}" data-i="${i}"><b>${esc(row.info.name)}</b>: ${esc(row.text)}`
         + (row.fix ? ` <span class="menu_button rpk-fix" title="${esc(t`Shows the change and saves it through the regex engine when you confirm`)}">${esc(row.fix.label)}</span>` : '')
-        + (row.info.ids.length ? ` <span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span>` : '') + '</li>').join('')
+        + (row.info.ids.length ? editIcon() : '') + '</li>').join('')
         : `<li class="rpk-dim">${settings.lint ? t`Nothing to report` : t`Lint is off (Limits)`}</li>`);
 }
 
@@ -3173,7 +3170,7 @@ function bindUi() {
             el.value = settings[key];
             saveSettingsDebounced();
             trimMemo();
-            htmlMemo.trim(settings.htmlMemoMaxEntries, settings.htmlMemoMaxMB * 1048576);
+            htmlMemo.trim(settings.htmlMemoMaxEntries, settings.htmlMemoMaxMB * MB);
             if (key === 'persistDbMaxMB' && !persistFlushTimer) persistFlushTimer = setTimeout(flushPersisted, 0); // evicts beyond the new limit
             renderPanel();
         });
