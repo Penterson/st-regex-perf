@@ -322,7 +322,6 @@
 .regex-perf-kit .rpk-table td.rpk-empty {
     white-space: normal;
     padding: 10px 0;
-    opacity: 0.6;
 }
 
 .regex-perf-kit .rpk-table tr.rpk-script {

@@ -1,83 +1,77 @@
 /**
  * Regex Perf Kit — speeds up SillyTavern's built-in Regex extension without touching any regex script.
  *
- * The engine compiles every script pattern through RegexProvider.instance.get(). That method is patched to return a
- * RegExp subclass whose [Symbol.replace] (where String.prototype.replace() dispatches) adds ① profiler, ② literal
- * prefilter, ③ memo cache, ④ streaming skip of display-only scripts, ⑥ replacer fast path, ⑦ input-length fuse and
- * ⑧ circuit breaker. ST's MessageFormatter hooks add ⑤ a persisted display cache (IndexedDB), ⑨ a cache of the
- * formatted HTML (regex and markdown skipped together on a re-render), ④'s compromise mode with incremental formatting
- * and a paragraph cache (markdown and sanitizing on the paragraph being written only), and a timing of the whole
- * display pipeline (regex / markdown / sanitize) so the panel can say what share of a render the regex stage is.
- * No ST core file is modified.
+ * RegexProvider.instance.get() is patched to return a RegExp subclass whose [Symbol.replace] adds ① profiler,
+ * ② literal prefilter, ③ memo, ④ streaming skip, ⑥ fast path, ⑦ fuse and ⑧ circuit breaker. MessageFormatter hooks add
+ * ⑤ a persisted display cache (IndexedDB), ⑨ an HTML cache, ④'s compromise mode (incremental formatting, paragraph
+ * cache) and per-stage timing of the display pipeline. No SillyTavern core file is modified.
  */
 
-// Namespace import: older engines lack getScriptsByType / SCRIPT_TYPES, and a missing named import fails to load.
+// Namespace imports: a named export an older SillyTavern lacks would fail the whole module.
 import * as engine from '../../regex/engine.js';
 import { regexFromString } from '../../../utils.js';
-// script.js exports what the hooks cannot reach through getContext(): the showdown converter instance (its makeHtml is
-// an own property, not a prototype method) and updateMessageBlock(); a namespace import survives an older export list.
+// For what getContext() lacks: the showdown converter instance and updateMessageBlock().
 import * as st from '../../../../script.js';
 
 const { RegexProvider, getRegexScripts, getScriptsByType, SCRIPT_TYPES } = engine;
 const EXTRA_KEY = 'regex_perf_cache';
 const ctx = () => SillyTavern.getContext();
-// Fixed for the session, so read once; live state (chat, names, the streaming processor) is read through ctx().
-const { t, translate, extensionSettings, eventSource, event_types, getCurrentLocale, addLocaleData } = ctx();
+// Fixed for the session; live state (chat, names, streaming) is read through ctx().
+const { t, translate, extensionSettings, eventSource, event_types, getCurrentLocale, addLocaleData, saveSettingsDebounced } = ctx();
 
 // ---- Settings ----
 
-// Chromium reports the device's memory class (GB, rounded), other browsers nothing: the memo's default size follows it.
+// Chromium reports the device's memory class in GB; other browsers report nothing.
 const deviceMemory = Number(globalThis.navigator?.deviceMemory) || 0;
 
 const defaultSettings = {
     profiler: true,
-    profilerSampling: deviceMemory > 0 && deviceMemory <= 4, // ① past 1000 runs of a script, time 1 run in 8 and scale
-    timeReplacer: true, // ① two more clock reads per match for the Replacer column
+    profilerSampling: deviceMemory > 0 && deviceMemory <= 4, // ① past 1000 runs of a script, time 1 in 8
+    timeReplacer: true, // ① the Replacer column
     prefilter: true,
     memo: true,
-    memoStatic: true, // ③ also for scripts whose only macros are {{user}} {{char}} {{persona}} {{group}}: keyed by their values
-    memoPostHoc: true, // ③ also for inputs with macro syntax outside the matched text
-    fastPath: true, // ⑥ macro-free replacements run as a native string template instead of SillyTavern's callback
-    fastPathStatic: true, // ⑥ also replacements whose only macros are {{user}} {{char}} {{persona}} {{group}}: a template per value set
-    htmlMemo: true, // ⑨ the formatted HTML of a message is reused on a re-render: regex and markdown are both skipped
+    memoStatic: true, // ③ also scripts whose only macros are {{user}} {{char}} {{persona}} {{group}}
+    memoPostHoc: true, // ③ also inputs with macro syntax outside the matched text
+    fastPath: true,
+    fastPathStatic: true, // ⑥ also replacements whose only macros are the static ones
+    htmlMemo: true,
     htmlMemoMaxEntries: 2000,
     htmlMemoMaxMB: deviceMemory && deviceMemory <= 2 ? 8 : deviceMemory && deviceMemory <= 4 ? 16 : 32,
-    streamingIncremental: true, // ④ compromise mode: scripts that cannot match across a line run on the new lines only
-    streamingParagraphCache: true, // ④ compromise mode: the finished paragraphs' HTML is kept while the reply streams; markdown and the sanitizer run on the paragraph being written
-    adaptive: true, // ① when the regex stage is a negligible share of the render, time 1 run in 64 (the panel says so)
-    frameStats: false, // ① stutter counters: late frames during a generation and long tasks (over 50 ms), when the browser can; off: the figures change on their own, which not everyone wants to watch
+    streamingIncremental: true, // ④ compromise: line-local scripts run on the new lines only
+    streamingParagraphCache: true, // ④ compromise: markdown and sanitizing on the paragraph being written only
+    adaptive: true, // ① time 1 run in 64 once regex is a negligible share of the render
+    frameStats: false, // ① stutter counters (late frames, long tasks)
     memoMaxEntries: 3000,
     memoMaxLen: 20000,
     memoMaxMB: deviceMemory && deviceMemory <= 2 ? 16 : deviceMemory && deviceMemory <= 4 ? 32 : 64,
     streamingSkip: true,
-    streamingThrottle: false, // ④ compromise mode: format the streamed message at most every streamingThrottleMs
+    streamingThrottle: false, // ④ compromise mode
     streamingThrottleMs: 500,
-    persist: true, // ⑤ the display result of each message is kept in IndexedDB (chat + message hash) and served when the chat opens again
+    persist: true,
     persistMaxLen: 60000,
-    persistDbMaxMB: 64, // ⑤ all chats together; beyond it, the results stored longest ago are dropped first
-    memoHashKeys: false, // ③ keyed by hash64(input) + length instead of the input: half the memory, see the Limits note
-    autoMeasure: false, // run "Measure on this chat" once after a chat opens
-    loadHintMs: 3000, // a chat whose first render takes longer gets a one-time hint about "# Messages to Load"
-    fuse: false, // ⑦ risky patterns are not run on inputs longer than fuseLen (changes the result: off by default)
+    persistDbMaxMB: 64, // ⑤ all chats together
+    memoHashKeys: false, // ③ keyed by hash64(input) + length instead of the input
+    autoMeasure: false,
+    loadHintMs: 3000,
+    fuse: false, // ⑦ changes the result: off by default
     fuseLen: 20000,
-    breaker: false, // ⑧ a script with breakerCount runs over breakerMs is skipped for the session (off by default)
+    breaker: false,
     breakerMs: 500,
     breakerCount: 3,
-    lint: true, // checks on the scripts (missing g, group references, double escapes, browser support, duplicates), shown only
-    listBadges: true, // a cost chip after each script's name in the Regex extension's own list
-    schema: 1, // the settings' shape: 1 since 0.5.2 (frameStats off by default). Settings saved without it are migrated once below.
+    lint: true,
+    listBadges: true,
+    schema: 1, // since 0.5.2; settings saved without it are migrated once below
 };
 
-// ST keeps this object for the whole session, so it is resolved once instead of on every replace.
+// SillyTavern keeps this object for the session, so it is resolved once.
 const settings = (extensionSettings.regex_perf_kit ||= {});
-// 0.5.2 turned the stutter option off by default: settings an older version saved (no schema yet) follow once; a user
-// who turns it on afterwards keeps it, since the schema is stored with it.
+// 0.5.2 turned the stutter option off by default: older saved settings follow once, later choices are kept.
 if (Object.keys(settings).length && !Object.hasOwn(settings, 'schema')) settings.frameStats = false;
 for (const [key, value] of Object.entries(defaultSettings)) {
     if (!Object.hasOwn(settings, key)) settings[key] = value;
 }
-// What the hot path reads. A measurement swaps in an object inheriting from settings with some features off, for the
-// duration of one message's formatting, so the saved settings are never touched (and never saved by mistake).
+// What the hot path reads. A measurement swaps in an object inheriting from settings for one message's formatting, so
+// the saved settings are never touched.
 let cfg = settings;
 
 // ---- Utilities ----
@@ -91,7 +85,7 @@ function fnv1a(str) {
     return (h >>> 0).toString(36);
 }
 
-/** Two independent 32-bit hashes of str in one pass (fnv1a and a multiply-xorshift mix), as one 64-bit key. */
+/** Two independent 32-bit hashes in one pass (fnv1a and a multiply-xorshift mix), as one 64-bit key. */
 function hash64(str) {
     let a = 0x811c9dc5;
     let b = 0x9e3779b9;
@@ -107,9 +101,8 @@ function hash64(str) {
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' };
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ESCAPES[c]);
 
-// Set from GENERATION_STARTED until GENERATION_ENDED / GENERATION_STOPPED, so the exact check (which builds the
-// whole getContext() object) only runs while a generation can be streaming: it would run per display script
-// otherwise, where the hooks read getContext() a few times per message. Without those events: always check.
+// True from GENERATION_STARTED to GENERATION_ENDED / STOPPED, so the exact check (which builds getContext()) runs only
+// while a stream is possible, not per display script. Without those events: always check.
 let generating = !(event_types.GENERATION_STARTED && event_types.GENERATION_ENDED && event_types.GENERATION_STOPPED);
 
 /** The streaming processor while a stream is live, else null. */
@@ -121,9 +114,8 @@ function liveStream() {
 
 // SillyTavern's macro syntax: {{...}} and the legacy <USER> <BOT> <CHAR> <GROUP> <CHARIFNOTGROUP> markers.
 const MACRO = /{{|<(?:user|bot|char(?:ifnotgroup)?|group)>/i;
-// Macros whose value holds for a whole message render: {{user}} {{char}} {{persona}} {{group}} and the legacy markers
-// SillyTavern maps to them. A replacement or trim string using only these is memoized per value set;
-// any other macro, known or not, keeps the script out of ③.
+// Macros whose value holds for a whole message render (and their legacy markers): scripts using only these are
+// memoized per value set; any other macro keeps a script out of ③.
 const STATIC_MACRO = /{{(?:user|char|persona|group)}}|<(?:user|bot|char|group)>/gi;
 
 let macroIn = null;
@@ -137,7 +129,7 @@ function hasMacro(str) {
     return macroOut;
 }
 
-// Escapes for macro values inside an ESCAPED (substituteRegex 2) pattern, as SillyTavern's sanitizeRegexMacro does.
+// Macro values inside an ESCAPED (substituteRegex 2) pattern, as SillyTavern's sanitizeRegexMacro escapes them.
 const REGEX_MACRO_ESCAPES = { '\n': '\\n', '\r': '\\r', '\t': '\\t', '\v': '\\v', '\f': '\\f', '\0': '\\0' };
 const sanitizeRegexMacro = (x) => (x && typeof x === 'string'
     ? x.replace(/[\n\r\t\v\f\0.^$*+?{}[\]\\/|()]/g, (c) => REGEX_MACRO_ESCAPES[c] ?? '\\' + c)
@@ -150,10 +142,10 @@ const ASCII_LETTER = /[a-zA-Z]/;
 const BAIL = Symbol('bail');
 const BRACE_QUANT = /^\{(\d+)(,(\d*))?\}/;
 const GROUP_PREFIX = /^(?:<?[=!]|[a-z]*(?:-[a-z]*)?:)/; // after "(?": a lookaround or a modifier group
-const MATCH_MACRO = /{{match}}/gi; // {{match}} in a replacement is $0, as runRegexScript() reads it
+const MATCH_MACRO = /{{match}}/gi; // $0, as runRegexScript() reads it
 const escapeRe = (s) => s.replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&');
 
-/** The quantifier at source[i], its lazy '?' included: {min, max, len} (len: the characters it spans) or null. */
+/** The quantifier at source[i], lazy '?' included: {min, max, len} or null. */
 function quantAt(source, i) {
     const c = source[i];
     let q = null;
@@ -177,10 +169,10 @@ function classEnd(source, i) {
     return j;
 }
 
-// ② Literal presence per input: each literal (or case-insensitive check) gets a small id and an input's answers are kept
-// by id, so a string flowing through every script is scanned once per literal. With keep (displayed messages, which
-// re-render) the litCacheMax() most recent inputs up to the memo's length limit are remembered; save-time inputs are not.
-let chatLen = 0; // messages in the current chat: a re-render brings each displayed one back, so the cache grows with it
+// ② Literal presence per input: each literal (or case-insensitive check) gets an id and an input's answers are kept by
+// id, so a string flowing through every script is scanned once per literal. With keep (displayed messages, which
+// re-render) the litCacheMax() most recent inputs are remembered.
+let chatLen = 0; // messages in the current chat: the cache grows with it
 const litCacheMax = () => Math.max(256, 2 * chatLen);
 const litIds = new Map(); // literal or "\0source/flags" -> id
 const litCache = new Map(); // input -> answers by id
@@ -214,14 +206,11 @@ const clearLitCache = () => {
 };
 
 /**
- * Parses a pattern once. Every match contains, for each of terms, at least one of its literals (a one-literal term
- * is a mandatory run, a longer one comes from an alternation) and is at least minLen UTF-16 units long; test(str, keep)
- * checks both (keep: remember this input's answers for a re-render). needles is the single best term, null with a
- * NEEDLE_REASONS code in reason when none is certain; nested flags an unbounded quantifier inside an unboundedly
- * repeated group, e.g. (a+)+.
- * Conservative: classes, class escapes, backreferences, lookarounds and modifier groups contribute no literal, and
- * patterns with the v flag or a case modifier ((?i:), (?-i:)) get nothing at all. Literals in groups that must match
- * join the surrounding run; an alternation yields one literal per branch, provided every branch has one.
+ * Parses a pattern once. Every match contains, for each of terms, at least one of its literals (a one-literal term is
+ * a mandatory run, a longer one an alternation) and is at least minLen UTF-16 units long; test(str, keep) checks both.
+ * needles is the single best term, or null with a NEEDLE_REASONS code in reason; nested flags (a+)+ shapes.
+ * Conservative: classes, escapes, backreferences, lookarounds and modifier groups contribute no literal, and patterns
+ * with the v flag or a case modifier ((?i:), (?-i:)) get nothing at all.
  * @param {string} source RegExp.source
  * @param {string} flags RegExp.flags
  * @returns {{needles: string[] | null, reason: string | null, terms: string[][], minLen: number, test: ((str: string, keep?: boolean) => boolean) | null, nested: boolean}}
@@ -250,8 +239,8 @@ export function extractNeedle(source, flags) {
         return sa > sb || (sa === sb && a.length < b.length);
     };
 
-    // {lit, len} for a literal character, {group, opaque, zero} for a group (zero: a lookaround, which consumes
-    // nothing), {lit: null, len} for anything else; len is the least number of UTF-16 units the atom matches.
+    // {lit, len} for a literal character, {group, opaque, zero} for a group (zero: a lookaround), {lit: null, len}
+    // otherwise; len is the least number of UTF-16 units the atom matches.
     const one = { lit: null, len: 1 };
     const none = { lit: null, len: 0 };
     const atom = () => {
@@ -338,9 +327,8 @@ export function extractNeedle(source, flags) {
         return { lit, len: lit.length };
     };
 
-    // Summary of a sequence: pre/suf = literal run at its start/end, full = the whole sequence is one literal run,
-    // best = best needle set inside it, terms = every term a match of it must satisfy, len = its least match
-    // length, inf = it contains an unbounded quantifier.
+    // A sequence: pre/suf = literal run at its start/end, full = one literal run throughout, best = best needle set,
+    // terms = what every match must satisfy, len = least match length, inf = has an unbounded quantifier.
     const sequence = () => {
         let cur = '';
         let pre = null;
@@ -418,8 +406,8 @@ export function extractNeedle(source, flags) {
     let top = null;
     let reason = null;
     try {
-        // (?i:) / (?-i:) groups: V8 (13.x) has been seen to match literals outside such a group case-insensitively
-        // after many regexes ran in the same page, which the spec does not allow. Such patterns are left to the engine.
+        // V8 13.x has been seen to match literals outside a (?i:) group case-insensitively after many regexes ran in
+        // the page, against the spec: such patterns are left to the engine.
         if (flags.includes('v')) reason = 'v-flag';
         else if (/\(\?[a-z-]*i[a-z-]*:/.test(source)) reason = 'case-modifier';
         if (reason) throw BAIL;
@@ -438,8 +426,7 @@ export function extractNeedle(source, flags) {
     if (!terms.length) {
         has = null;
     } else if (flags.includes('i')) {
-        // With the i flag, escaped copies of the literals under the pattern's i/u flags decide: they fold case exactly
-        // like the pattern itself (toLowerCase() does not: σ/ς/Σ, µ/μ, ſ/s ...).
+        // Escaped literals under the pattern's i/u flags fold case exactly like it (toLowerCase() does not: σ/ς/Σ, ſ/s).
         const res = terms.map(set => new RegExp(set.map(escapeRe).join('|'), u ? 'iu' : 'i'));
         const ids = res.map(re => litId('\0' + re.source + '/' + re.flags));
         has = res.length === 1 ? (str, keep) => litPresent(str, ids[0], null, res[0], keep) : (str, keep) => res.every((re, k) => litPresent(str, ids[k], null, re, keep));
@@ -451,7 +438,6 @@ export function extractNeedle(source, flags) {
         const ids = terms.map(set => set.map(litId));
         has = (str, keep) => terms.every((set, k) => set.some((lit, j) => litPresent(str, ids[k][j], lit, null, keep)));
     }
-    // test(str, keep): keep remembers the input's answers for its next render (see litPresent)
     const test = !minLen ? has : !has ? (str) => str.length >= minLen : (str, keep) => str.length >= minLen && has(str, keep);
     return { needles, reason, terms, minLen, test, nested };
 }
@@ -471,8 +457,7 @@ const NEEDLE_REASONS = {
 const needleReason = (r) => (r.needle?.reason ? NEEDLE_REASONS[r.needle.reason]() : '');
 
 /**
- * Drops terms another term implies (a literal inside a longer mandatory literal, an alternation one of whose
- * literals is inside a mandatory one) and caps the count, so a check stays a few scans.
+ * Drops terms another term implies and caps the count, so a check stays a few scans.
  * @param {string[][]} terms
  */
 function pruneTerms(terms) {
@@ -604,6 +589,15 @@ function parseRegex(source, flags) {
     if (i < n) throw BAIL;
     return alts;
 }
+/** parseRegex(), or null where it bails. */
+function tryParse(source, flags) {
+    try {
+        return parseRegex(source, flags);
+    } catch (e) {
+        if (e !== BAIL) throw e;
+        return null;
+    }
+}
 
 /** Sample characters a sequence can start with: the leading optional items' joined with the first mandatory one's. */
 function firstOfSeq(items, flags) {
@@ -629,23 +623,17 @@ const hasUnboundedInside = (alts) => alts.some(items => items.some(({ atom, q })
 
 const NO_REDOS = { severity: null, kind: null, snippet: null };
 /**
- * Static ReDoS analysis: nested unbounded quantifiers (x+)+ and an unbounded group whose branches can
- * start with the same character (a|ab)+ are exponential; adjacent unbounded atoms that can match the same characters
- * \s*\s* polynomial (exponential inside an unbounded group). Character overlap is sampled, so this is a verdict on the
- * pattern's shape, not a proof. kind names the shape (also 'dotalt' for the linear but slow (.|\n)*, which gets a
- * suggestion and no severity), snippet the piece of the pattern.
+ * Static ReDoS analysis: (x+)+ and an unbounded group whose branches can start with the same character, (a|ab)+, are
+ * exponential; adjacent unbounded atoms that can match the same characters, \s*\s*, polynomial (exponential inside an
+ * unbounded group). Overlap is sampled: a verdict on the pattern's shape, not a proof. kind 'dotalt' marks the linear
+ * but slow (.|\n)* (a suggestion, no severity).
  * @param {string} source
  * @param {string} flags
  * @returns {{severity: 'exp' | 'poly' | null, kind: 'nested' | 'alternation' | 'adjacent' | 'dotalt' | null, snippet: string | null}}
  */
 export function analyzeRedos(source, flags) {
-    let alts;
-    try {
-        alts = parseRegex(source, flags);
-    } catch (e) {
-        if (e !== BAIL) throw e;
-        return NO_REDOS;
-    }
+    const alts = tryParse(source, flags);
+    if (!alts) return NO_REDOS;
     let found = null;
     const report = (severity, kind, snippet) => {
         if (!found || (severity === 'exp' && found.severity !== 'exp')) found = { severity, kind, snippet };
@@ -681,25 +669,19 @@ export function analyzeRedos(source, flags) {
     return found ?? NO_REDOS;
 }
 /**
- * Whether no match of the pattern can contain or depend on a newline, so that running it on the text after a line
- * break gives the same replacements as running it on the whole text (④ incremental formatting). Conservative: every
- * character atom (lookarounds included) must be unable to match "\n", ^ and $ need the m flag, the g flag is required
- * and y refused; a pattern the parser does not understand is not line-local.
+ * Whether no match can contain or depend on a newline, so running the pattern on the text after a line break gives
+ * the same replacements as on the whole text (④ incremental). Conservative: no character atom (lookarounds included)
+ * may match "\n", ^ and $ need the m flag, g is required, y refused, unparsed patterns are not line-local.
  * @param {RegExp} re
  * @returns {boolean}
  */
 export function isLineLocal(re) {
     const { flags } = re;
     if (!flags.includes('g') || flags.includes('y')) return false;
-    let alts;
-    try {
-        alts = parseRegex(re.source, flags);
-    } catch (e) {
-        if (e !== BAIL) throw e;
-        return false;
-    }
-    // ^ and $ mean the text's ends without the m flag, and the new lines are not the text's start: checked on the
-    // source (classes removed), as parseRegex() keeps anchors without their kind. \b and \B are the same either way.
+    const alts = tryParse(re.source, flags);
+    if (!alts) return false;
+    // Without m, ^ and $ are the text's ends: checked on the source (classes removed), as parseRegex() keeps anchors
+    // without their kind.
     if (!flags.includes('m') && /(?:^|[^\\])(?:\\\\)*[$^]/.test(re.source.replace(/\[(?:\\.|[^\]])*\]/g, ''))) return false;
     const ok = (seqs) => seqs.every(items => items.every(({ atom }) => {
         if (atom.kind === 'back' || atom.kind === 'anchor') return true; // a backreference repeats a group, which cannot hold a newline either
@@ -733,9 +715,8 @@ const redosSuggestion = (r) => REDOS_SUGGESTIONS[r.kind]?.() ?? '';
 
 const keyOf = (re) => re.source + '\u0000' + re.flags;
 
-// A RAW/ESCAPED find pattern with macros ({{random}}, {{getvar::x}}) compiles to another string on every run, so the
-// compiled key misses its script. The raw pattern is matched instead: re-substituted (exact when the macro's value is
-// stable) or as a shape in which each macro stands for any text.
+// A RAW/ESCAPED find pattern with macros ({{random}}, {{getvar::x}}) compiles differently on every run, so the compiled
+// key misses its script: the raw pattern is re-substituted, else matched as a shape where each macro is any text.
 const MACRO_SPLIT = /{{[^{}]*}}|<(?:user|bot|char(?:ifnotgroup)?|group)>/gi;
 const shapeOf = (raw) => new RegExp('^' + raw.split(MACRO_SPLIT).map(escapeRe).join('[\\s\\S]*?') + '$');
 function resolveDynamic(regexString, dynamic) {
@@ -751,17 +732,15 @@ function resolveDynamic(regexString, dynamic) {
 
 // ---- ⑥ Fast path ----
 
-const VERIFY_RUNS = 3; // a script's first fast-path runs are compared with SillyTavern's own callback
-const fastPathOff = new Set(); // fast keys (pattern + replacement) that disagreed once: back to the callback for the session
-const INC_VERIFY_RUNS = 3; // ④ a script's first incremental runs are compared with a run on the whole text
+const VERIFY_RUNS = 3; // a script's first fast-path runs are compared with SillyTavern's callback
+const fastPathOff = new Set(); // fast keys that disagreed once: the callback for the session
+const INC_VERIFY_RUNS = 3; // ④ a script's first incremental runs are compared with a full run
 const incOff = new Set(); // pattern keys whose incremental run disagreed once: full runs for the session
 
 /**
- * SillyTavern's replacer (runRegexScript) as a native string template: {{match}} and $0 become $&, $n a two-digit $nn
- * (so a digit after it cannot join it) when the pattern has that many groups, $<name> stays when the pattern has named
- * groups and is '' otherwise (the callback finds no groups object then), every other $ is escaped. A $n beyond the
- * group count gives null: the callback then reads the match offset or the input from its arguments, which no template
- * can express (the lint reports such references). refs lists every reference for the lint.
+ * SillyTavern's replacer (runRegexScript) as a native string template: {{match}} and $0 become $&, $n a two-digit $nn,
+ * $<name> stays with named groups and is '' without, every other $ is escaped. A $n beyond the group count gives a
+ * null template (the callback would read the match offset or input there); refs lists every reference for the lint.
  * @param {string} replaceString
  * @param {RegExp} re
  * @returns {{template: string | null, groupCount: number, named: boolean, refs: {ref: string, ok: boolean}[]}}
@@ -852,14 +831,25 @@ function buildTrimReplacer(replaceString, trims, named) {
     };
 }
 
-/** @type {{map: Map<string, object>, dynamic: object[], counts: object, depthRules: number[][], version: string, displayVersion: string, checkedAt: number} | null} */
+/**
+ * A ⑥ fast path: the template, or a lean callback when there are trim strings. identity: a match can be its own
+ * replacement (otherwise an unchanged output means no match).
+ */
+const fastOf = (key, template, replaceString, trims, named, refs, re) => ({
+    key,
+    template: trims.length ? null : template,
+    replacer: trims.length ? buildTrimReplacer(replaceString, trims, named) : null,
+    verify: VERIFY_RUNS,
+    identity: refs.length > 0 || template.includes('$&') || matchesWhole(re, template.replace(/\$\$/g, '$')),
+});
+
+/** @type {{map: Map<string, object>, dynamic: object[], invalid: object[], counts: object, depthRules: number[][], version: string, displayVersion: string, fp: string, checkedAt: number} | null} */
 let infoCache = null; // null = rebuild on next use
 const markDirty = () => { infoCache = null; };
-let infoBuilds = 0; // how often the script info was rebuilt (in the JSON report)
+let infoBuilds = 0; // in the JSON report
 const FINGERPRINT_EVERY_MS = 16; // the script lists are fingerprinted at most once per frame
 
-// Parsed patterns, needles and templates outlive a rebuild: with hundreds of scripts, re-parsing all of them on every
-// rebuild was a parse storm.
+// Parsed patterns, needles and templates outlive a rebuild (re-parsing hundreds of scripts each time was a parse storm).
 const CACHE_MAX = 2000;
 const compiledCache = new Map(); // pattern string, as RegexProvider receives it -> RegExp | null
 const needleCache = new Map(); // "source\0flags" -> extractNeedle()
@@ -873,8 +863,7 @@ function cached(map, key, make, max = CACHE_MAX) {
     }
     return v;
 }
-// regexFromString() swallows the engine's error; the invalid-pattern list shows it, so the pattern is
-// compiled again the way SillyTavern splits it.
+// regexFromString() swallows the engine's error: compiled again, split the same way, for the invalid-pattern list.
 const compile = (pattern) => cached(compiledCache, pattern, () => {
     try {
         const re = regexFromString(pattern);
@@ -903,8 +892,8 @@ function readGroups() {
 }
 /** What an edit that fires no event changes: ids, switches, pattern and replacement lengths, the display flags. */
 const fingerprint = (groups) => groups.map(([, list]) => list.map(s => `${s?.id}|${s?.disabled ? 1 : 0}|${s?.findRegex?.length ?? 0}|${s?.replaceString?.length ?? 0}|${s?.markdownOnly ? 1 : 0}${s?.promptOnly ? 1 : 0}`).join()).join(';');
-// A replacement (with {{match}} as $0) and trim strings without macros, and without a group reference that could
-// complete one (<$1>, {$1}): the output then depends only on the input, so it can be memoized.
+// No macros in the replacement or trim strings, and no group reference that could complete one (<$1>, {$1}): the
+// output depends only on the input, so it can be memoized.
 const pureOf = (rep, trims) => !MACRO.test(rep) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(rep) && !trims.some(trim => MACRO.test(String(trim)));
 
 function ensureInfo() { // runs on every RegexProvider.get(): Date.now() is the cheaper clock
@@ -941,14 +930,13 @@ function buildInfo(groups) {
             let rs = s.findRegex;
             const substitute = Number(s.substituteRegex);
             const isDynamic = (substitute === 1 || substitute === 2) && MACRO.test(rs);
-            // a find pattern whose macros are all static ({{user}} {{char}} {{persona}} {{group}}) compiles the same
-            // way for a whole render and its values are in the ⑨/⑤ key; any other macro makes the pattern itself volatile
+            // static macros compile the same way for a whole render (their values are in the ⑨/⑤ key); others do not
             const dynamicVolatile = isDynamic && MACRO.test(rs.replace(STATIC_MACRO, ''));
             if (substitute === 1 || substitute === 2) { // RAW / ESCAPED, as runRegexScript() compiles them
                 try { rs = substituteParamsExtended(rs, {}, substitute === 2 ? sanitizeRegexMacro : undefined); } catch { /* keep the raw pattern */ }
             }
             const { re, error } = compile(rs);
-            if (!re) { // SillyTavern returns the input unchanged for such a script: listed, so it does not stay silent
+            if (!re) { // SillyTavern silently does nothing for such a script: listed in the panel
                 invalid.push({ id: s.id, name: s.scriptName || t`(no name)`, type: origin, error });
                 counts.invalid++;
                 continue;
@@ -969,7 +957,7 @@ function buildInfo(groups) {
 
             const replacement = replaceString.replace(MATCH_MACRO, '$0');
             const pure = pureOf(replacement, trims);
-            // semiPure: pure once the static macros are taken out, so the output depends on the input and their values
+            // semiPure: pure once the static macros are taken out (the output depends on the input and their values)
             const strippedTrims = trims.map(trim => String(trim).replace(STATIC_MACRO, ''));
             const semiPure = !pure && pureOf(replacement.replace(STATIC_MACRO, ''), strippedTrims);
             const info = {
@@ -977,8 +965,7 @@ function buildInfo(groups) {
                 markdownOnly: !!s.markdownOnly,
                 pure,
                 semiPure,
-                // the output can differ between two renders of the same text ({{random}}, {{getvar}}, a macro in the
-                // find pattern): a message such a script matched is not kept by ⑨ or ⑤
+                // two renders of the same text can differ ({{random}}, {{getvar}}): ⑨ and ⑤ keep no message it matched
                 volatile: dynamicVolatile || !(pure || semiPure),
                 dynamicVolatile,
                 semiPureTrims: semiPure && strippedTrims.some((trim, k) => trim !== String(trims[k])), // a trim string holds a static macro
@@ -986,10 +973,10 @@ function buildInfo(groups) {
                 needle,
                 redos,
                 ids: [s.id], // for the row actions in the table
-                statKey: isDynamic ? '\u0004' + s.findRegex : key, // a dynamic pattern's runs are counted under its raw pattern
+                statKey: isDynamic ? '\u0004' + s.findRegex : key, // dynamic patterns are counted under the raw pattern
                 raw: isDynamic ? s.findRegex : null,
             };
-            if (prev) { // scripts with the same pattern share one wrapper: keep only what holds for all of them
+            if (prev) { // scripts sharing a pattern share one wrapper: keep only what holds for all of them
                 info.name = prev.name + ', ' + info.name;
                 info.ids = [...prev.ids, s.id];
                 info.markdownOnly &&= prev.markdownOnly;
@@ -1004,36 +991,23 @@ function buildInfo(groups) {
             }
             map.set(key, info);
             if (isDynamic) dynamic.push({ raw: s.findRegex, substitute, shape: shapeOf(s.findRegex), info });
-            // ⑥: a pure replacement as a template (no trim strings) or a lean callback (trim strings), until a run disagrees
             const fastKey = key + '\u0001' + info.replaceSig;
             const tpl = cached(templateCache, fastKey, () => buildTemplate(replaceString, re));
             info.refs = tpl.refs; // for the lint
             info.find = s.findRegex;
             info.source = re.source;
             info.flags = re.flags;
-            info.fast = null;
-            if (info.pure && !fastPathOff.has(fastKey)) {
-                if (tpl.template !== null) {
-                    info.fast = {
-                        key: fastKey,
-                        template: trims.length ? null : tpl.template,
-                        replacer: trims.length ? buildTrimReplacer(replaceString, trims, tpl.named) : null,
-                        verify: VERIFY_RUNS,
-                        // can a match be replaced by itself? If not, an unchanged output means the pattern did not match
-                        identity: tpl.refs.length > 0 || tpl.template.includes('$&') || matchesWhole(re, tpl.template.replace(/\$\$/g, '$')),
-                    };
-                }
-            }
-            // ⑥ for a script whose only macros are the static ones: the template is finished per value set, in a display pass
+            info.fast = info.pure && tpl.template !== null && !fastPathOff.has(fastKey) ? fastOf(fastKey, tpl.template, replaceString, trims, tpl.named, tpl.refs, re) : null;
+            // ⑥ with static macros: the template is finished per value set, in a display pass (staticFastFor)
             info.fastStatic = info.semiPure && tpl.template !== null ? {
                 key: fastKey, template: tpl.template, replaceString, trims, named: tpl.named, refs: tpl.refs,
                 level: info.semiPureTrims ? 2 : 1, byKey: new Map(),
             } : null;
-            // ④ incremental formatting: a match of this pattern cannot cross a line, so new lines can be formatted alone
+            // ④ incremental: no match of this pattern crosses a line, so new lines can be formatted alone
             info.lineLocal = tpl.refs.every(r => r.ok) && needle.minLen > 0 && isLineLocalCached(re);
-            if (prev) info.lineLocal &&= prev.lineLocal; // one wrapper serves every script with this pattern
+            if (prev) info.lineLocal &&= prev.lineLocal;
 
-            // The same limits getRegexedString() applies; display scripts only, as those are what ⑤ stores.
+            // The depth limits getRegexedString() applies, for display scripts (what ⑤ stores).
             const min = !isNaN(s.minDepth) && s.minDepth !== null && s.minDepth >= -1 ? Number(s.minDepth) : -Infinity;
             const max = !isNaN(s.maxDepth) && s.maxDepth !== null && s.maxDepth >= 0 ? Number(s.maxDepth) : Infinity;
             if (s.markdownOnly && (min > -Infinity || max < Infinity)) depthRules.push([min, max]);
@@ -1050,19 +1024,18 @@ function buildInfo(groups) {
 
 // ---- Instrumented RegExp ----
 
-// Regex calls come in bursts (a chat opening renders every message back to back); the burst that ends at
-// CHAT_CHANGED is the chat's first render, and its length decides the "# Messages to Load" hint.
+// Regex calls come in bursts; the burst that ends at CHAT_CHANGED is the chat's first render (the load hint's length).
 const BURST_GAP_MS = 1000;
 let burstStart = 0;
 let lastCall = -Infinity;
-const SPIKE_MS = 50; // a single run slower than this is flagged, with a sample of its input
+const SPIKE_MS = 50; // a run slower than this is flagged, with a sample of its input
 const SPIKE_HEAD = 80; // characters of the input kept in the sample
 const SPIKE_KEEP = 20; // spikes kept per script
-let passMessageId = null; // the message a display pass formats (null outside one): spikes record it
+let passMessageId = null; // the message a display pass formats (null outside one)
 const SAMPLE_AFTER = 1000; // ① with profilerSampling, a script past this many runs is timed on 1 run in SAMPLE_EVERY
 const SAMPLE_EVERY = 8;
 let statsDirty = false; // the stats changed since the panel was last rendered
-let tripSeq = 0; // ⑧ ids for the Undo controls of tripped scripts
+let tripSeq = 0; // ⑧ ids for the Undo controls
 
 /** ⑧ Turns a script off for the session and says so, with Undo and Open script in the toast. */
 function trip(stat) {
@@ -1077,7 +1050,7 @@ function untrip(stat) {
     stat.slowRuns = 0;
     statsDirty = true;
 }
-/** The Undo / Open script controls of the breaker's toasts and badges, wherever they are shown. */
+/** The Undo / Open script controls of the breaker's toasts and badges. */
 function onTripControl(e) {
     const el = e.target.closest?.('.rpk-undo, .rpk-open');
     if (!el) return;
@@ -1090,38 +1063,37 @@ function onTripControl(e) {
 const stats = new Map(); // pattern key -> counters, see getStat()
 let statsSince = Date.now();
 const persistStats = { hits: 0, stores: 0 };
-let bypass = false; // set by the formatter hooks while a stored result is being shown
+let bypass = false; // the hooks are showing a stored result
 let skipStat = null; // the pattern a per-row measurement renders the chat without
-// The previous call: scripts run in sequence on one message, so when a call's input is the previous call's output
-// they are neighbours in that pass. Used to spot an earlier script removing what a later one looks for.
+// The previous call: when a call's input is the previous call's output, the two scripts are neighbours in one pass
+// (to spot an earlier script removing what a later one looks for).
 let prevStat = null;
 let prevIn = null;
 let prevOut = null;
-const conflicts = new Map(); // "earlierKey\0laterKey" -> {earlier, later, count, confirmed, sample}
-let streamApply = false; // set by the formatter hooks for a ④ compromise pass that does run the display scripts
-let streamSkippedMsg = null; // ④: the message whose display scripts were last skipped while it streamed, until its final render
-let displayPass = false; // set by the formatter hooks while a message is being formatted for display
-let passVolatile = false; // a volatile script ({{random}}, {{getvar}}, a macro in the find pattern) matched in this pass
+const conflicts = new Map(); // "earlierSrc\0laterSrc" -> {earlier, later, count, confirmed, sample}
+let streamApply = false; // a ④ compromise pass that does run the display scripts
+let streamSkippedMsg = null; // ④ the message whose display scripts were last skipped while streaming, until its final render
+let displayPass = false; // a message is being formatted for display
+let passVolatile = false; // a volatile script matched in this pass
 
-// ③ for static-macro scripts: what {{user}} {{char}} {{persona}} {{group}} resolve to in the display pass being
-// formatted (null outside one), as SillyTavern resolves them for a replacement and, with the message author as
-// {{char}}, for a trim string. Recomputed only when the names, group or persona behind them change.
-let passChName = null; // the message author of the display pass being formatted (null outside one)
+// ③ for static-macro scripts: what {{user}} {{char}} {{persona}} {{group}} resolve to in this display pass (null
+// outside one), for a replacement and, with the message author as {{char}}, for a trim string.
+let passChName = null; // the message author of the display pass (null outside one)
 let passStatic = null;
 let passStaticTrim = null;
 let staticFp = null;
 let staticVals = null;
-let staticChName = null; // the message author the trim-string values were resolved for
-const staticByFp = new Map(); // fingerprint -> values: authors alternate from message to message, so both stay resolved
+let staticChName = null; // the author the trim-string values were resolved for
+const staticByFp = new Map(); // fingerprint -> values: alternating authors both stay resolved
 /** The key for a static-macro script in this pass (level 2: a trim string holds one), resolved on first use. */
-function staticKeyFor(level) {
-    if (passStatic === null) setPassStatic(passChName);
+function staticKeyFor(level, context) {
+    if (passStatic === null) setPassStatic(passChName, context);
     return level === 2 ? passStaticTrim : passStatic;
 }
-function setPassStatic(chName) {
-    const { name1, name2, groupId, groups, characters, powerUserSettings, substituteParams } = ctx();
+function setPassStatic(chName, context = ctx()) {
+    const { name1, name2, groupId, groups, characters, powerUserSettings, substituteParams } = context;
     const group = groupId ? groups?.find?.(g => g.id === groupId) : null;
-    // {{group}} resolves to the members' names, so a renamed member changes the values while the avatars stay
+    // {{group}} resolves to the members' names, so a renamed member changes the values
     const memberNames = group?.members?.map(avatar => characters?.find?.(c => c?.avatar === avatar)?.name ?? avatar).join();
     const fp = [name1, name2, chName, groupId, group?.members?.join(), memberNames, group?.disabled_members?.join(), powerUserSettings?.persona_description].join('\u0000');
     if (fp !== staticFp) {
@@ -1138,10 +1110,9 @@ function setPassStatic(chName) {
     [passStatic, passStaticTrim] = staticVals;
 }
 /**
- * ⑥ for a static-macro script: the template with {{user}} {{char}} {{persona}} {{group}} replaced by their values
- * for this pass (as substituteParams() gives them for a replacement; a trim string's {{char}} is the message author,
- * as filterString() resolves it), built once per value set and verified against SillyTavern's callback like any
- * fast path. null when there is no display pass to take the values from.
+ * ⑥ for a static-macro script: the template with the static macros replaced by this pass's values (a trim string's
+ * {{char}} is the message author, as filterString() resolves it), built once per value set and verified like any fast
+ * path. null outside a display pass.
  */
 function staticFastFor(meta) {
     const fs = meta.fastStatic;
@@ -1153,28 +1124,21 @@ function staticFastFor(meta) {
         const { substituteParams } = ctx();
         const value = (m) => String(substituteParams(m) ?? '');
         const trimValue = (m) => String(substituteParams(m, { name2Override: staticChName }) ?? '');
-        // a $ in a value is text, never a group reference: doubled, as buildTemplate() does for the replacement's own
+        // a $ in a value is text, not a group reference
         const template = fs.template.replace(STATIC_MACRO, m => value(m).replace(/\$/g, '$$$$'));
         const replacement = fs.replaceString.replace(STATIC_MACRO, value);
         const trims = fs.trims.map(trim => String(trim).replace(STATIC_MACRO, trimValue));
-        f = {
-            key: fs.key + '\u0001' + key,
-            staticKey: key,
-            template: trims.length ? null : template,
-            replacer: trims.length ? buildTrimReplacer(replacement, trims, fs.named) : null,
-            verify: VERIFY_RUNS,
-            identity: fs.refs.length > 0 || template.includes('$&') || matchesWhole(meta.re, template.replace(/\$\$/g, '$')),
-        };
+        f = fastOf(fs.key + '\u0001' + key, template, replacement, trims, fs.named, fs.refs, meta.re);
+        f.staticKey = key;
         if (fs.byKey.size >= 8) fs.byKey.delete(fs.byKey.keys().next().value);
         fs.byKey.set(key, f);
     }
     return f;
 }
 
-// ③ Memo: memoPrefix -> Map(key -> entry). The key is the input itself (no key is built per call; V8 caches string
-// hashes) or, with memoHashKeys, its 64-bit hash and length, so the entry holds no input: half the memory, for the
-// cost of hashing every input and the chance of a collision returning another input's result. memoLru orders all
-// entries, least recently used first; memoBytes is their estimated size (2 bytes per UTF-16 unit).
+// ③ Memo: memoPrefix -> Map(key -> entry). The key is the input itself (no key built per call; V8 caches string
+// hashes) or, with memoHashKeys, its 64-bit hash and length (half the memory, at the cost of hashing every input).
+// memoLru orders all entries, least recently used first; memoBytes estimates their size (2 bytes per UTF-16 unit).
 const memo = new Map();
 const memoLru = new Set();
 let memoBytes = 0;
@@ -1204,20 +1168,20 @@ function getStat(key, re) {
             src: '/' + re.source + '/' + re.flags,
             calls: 0, totalMs: 0, maxMs: 0, replMs: 0, matched: 0, changed: 0,
             skipped: 0, hits: 0, streamSkipped: 0, bypass: 0, fast: 0,
-            incremental: 0, // ④ runs on the new lines of a streamed message only
-            seen: 0, // every run that executed, also the ones sampling left untimed
+            incremental: 0, // ④ runs on the new lines only
+            seen: 0, // every executed run, sampled or not
             spike: null, // {ms, len, head, messageId}: the newest run over SPIKE_MS
             spikes: [], // the SPIKE_KEEP newest such runs, newest first
-            moreMatches: 0, // runs of a pattern without g that would have matched again (lint "missing g")
-            needle: null, // the needle the wrapper uses (and its nested flag), set with its meta
-            redos: NO_REDOS, // the analyzer's verdict, set with its meta
-            fused: 0, // ⑦ inputs the fuse skipped
+            moreMatches: 0, // runs without g that would have matched again (lint "missing g")
+            needle: null, // set with the wrapper's meta
+            redos: NO_REDOS, // set with the wrapper's meta
+            fused: 0, // ⑦ inputs skipped
             broken: 0, // ⑧ runs skipped since the breaker tripped
             slowRuns: 0, // ⑧ runs over breakerMs
-            tripped: false, // ⑧ turned off for the session
-            tripId: ++tripSeq, // for the Undo controls
+            tripped: false,
+            tripId: ++tripSeq,
             ids: [], // scripts with this pattern
-            replaceSig: undefined, // the replacement the stat was last linked to, to notice an edit of this script (⑧)
+            replaceSig: undefined, // to notice an edit of this script (⑧)
         };
         stats.set(key, st);
     }
@@ -1227,9 +1191,9 @@ function getStat(key, re) {
 class PerfRegExp extends RegExp {
     constructor(source, flags) {
         super(source, flags);
-        this._meta = null; // set by RegexProvider.get() for each script-info version
+        this._meta = null; // set by RegexProvider.get() per script-info version
         this._version = null;
-        // V8 only takes its fast replace path on plain RegExps, so matching runs on an unsubclassed twin.
+        // V8 takes its fast replace path on plain RegExps only: matching runs on an unsubclassed twin.
         this._native = new RegExp(source, flags);
     }
 
@@ -1238,36 +1202,35 @@ class PerfRegExp extends RegExp {
         const { stat, markdownOnly, test, memoPrefix, memoStatic } = meta;
 
         if (stat === skipStat) return str;
-        if (bypass && displayPass) { // a stored ⑤ result is being shown for this message
+        if (bypass && displayPass) { // a stored ⑤/⑨ result is being shown
             stat.bypass++;
             statsDirty = true;
             return str;
         }
-        if (stat.tripped) { // ⑧ turned off by the circuit breaker for this session
+        if (stat.tripped) { // ⑧
             stat.broken++;
-            passVolatile = true; // ⑨ ⑤: a pass with a skipped script is not the message's result
+            passVolatile = true; // a pass with a skipped script is not the message's result
             return unchanged(stat, str);
         }
-        if (cfg.fuse && stat.redos.severity && str.length > cfg.fuseLen) { // ⑦ a risky pattern on a very long input
+        if (cfg.fuse && stat.redos.severity && str.length > cfg.fuseLen) { // ⑦
             stat.fused++;
             passVolatile = true;
             return unchanged(stat, str);
         }
         if (cfg.streamingSkip && markdownOnly && !streamApply) {
-            // the streamed message only, where the hooks say which message is being formatted (passMessageId); without
-            // them (older SillyTavern, transient previews) every display pass during a stream
+            // the streamed message only; without the hooks (passMessageId null) every display pass during a stream
             const sp = liveStream();
             if (sp && (passMessageId === null || sp.messageId === passMessageId)) {
                 stat.streamSkipped++;
-                if (passMessageId !== null) streamSkippedMsg = passMessageId; // rendered again should the stream end without its final render
+                if (passMessageId !== null) streamSkippedMsg = passMessageId; // see rerenderSkipped()
                 return unchanged(stat, str);
             }
         }
-        if (displayPass && meta.dynamic) passVolatile = true; // ⑨ ⑤: another render may compile another pattern
-        // ④ incremental formatting (compromise mode): a line-local script that already formatted a prefix of this
-        // streamed message, up to a line break, runs on the lines after it only; the rest of the output is reused.
+        if (displayPass && meta.dynamic) passVolatile = true; // another render may compile another pattern
+        // ④ incremental: a line-local script that formatted a prefix of this stream up to a line break runs on the
+        // lines after it only and reuses the rest of its output.
         const incremental = streamApply && cfg.streamingIncremental && meta.lineLocal;
-        // a displayed message comes back on every re-render: its literal answers are kept (save-time inputs do not)
+        // displayed messages re-render: their literal answers are kept
         const keep = markdownOnly || displayPass;
         if (cfg.prefilter && test && !test(str, keep)) {
             stat.skipped++;
@@ -1278,7 +1241,7 @@ class PerfRegExp extends RegExp {
         let inc = null; // the prefix already formatted, when the new text continues it after a line break
         let incIn = str; // what the regex really runs on
         if (incremental) {
-            const prev = meta.inc.get(streamKey); // per stream: the reasoning and the body of one message keep prefixes of their own
+            const prev = meta.inc.get(streamKey); // the reasoning and the body keep prefixes of their own
             if (prev && str.length > prev.in.length && prev.in.endsWith('\n') && str.startsWith(prev.in)) {
                 inc = prev;
                 incIn = str.slice(prev.in.length);
@@ -1287,9 +1250,8 @@ class PerfRegExp extends RegExp {
 
         let bucket;
         let memoKey;
-        let postHoc = false; // the input has macro syntax: memoized only if no match contains any (checked as the callback runs)
-        // Matched text with macros is substituted again after the groups are inserted, so it is not memoized. A script
-        // with static macros is keyed by their values, which are known inside a display pass only.
+        let postHoc = false; // the input has macro syntax: memoized only if no match contains any
+        // A static-macro script is keyed by their values, known inside a display pass only.
         const staticKey = memoStatic === 0 ? '' : cfg.memoStatic && passChName !== null ? staticKeyFor(memoStatic) : null;
         if (!inc && cfg.memo && memoPrefix && staticKey !== null && str.length <= cfg.memoMaxLen
             && (!hasMacro(str) || (postHoc = cfg.memoPostHoc && typeof replacer === 'function'))) {
@@ -1299,7 +1261,7 @@ class PerfRegExp extends RegExp {
             if (staticKey) memoKey = staticKey + '\u0000' + memoKey;
             const hit = bucket.get(memoKey);
             if (hit) {
-                memoLru.delete(hit); // mark as most recently used
+                memoLru.delete(hit); // most recently used
                 memoLru.add(hit);
                 stat.hits++;
                 return done(stat, str, hit.same ? str : hit.out);
@@ -1308,38 +1270,36 @@ class PerfRegExp extends RegExp {
 
         const native = this._native;
         native.lastIndex = 0;
-        // ① Past SAMPLE_AFTER runs of a script with sampling on, one run in SAMPLE_EVERY is timed and counted for all;
-        // when the regex stage is a negligible share of the renders (adaptive), one run in LIGHT_EVERY.
+        // ① sampling: 1 run in SAMPLE_EVERY past SAMPLE_AFTER runs, 1 in LIGHT_EVERY when adaptive; each timed run
+        // counts for all of them
         stat.seen++;
         const every = cfg.adaptive && adaptiveLight ? LIGHT_EVERY : cfg.profilerSampling && stat.seen > SAMPLE_AFTER ? SAMPLE_EVERY : 0;
         const profile = cfg.profiler && (!every || stat.seen % every === 0);
         const weight = every || 1;
         const timeRepl = profile && cfg.timeReplacer;
         let replMs = 0;
-        let matched = false; // the replacer ran, so the pattern matched (even if the text came out the same)
+        let matched = false; // the replacer ran (even if the text came out the same)
         let fn = replacer;
         let out;
         let fastRun = false;
-        let macroSeen = false; // a match contained macro syntax: SillyTavern substituted it, the result is not memoizable
+        let macroSeen = false; // a match held macro syntax SillyTavern substituted: not memoizable
         const t0 = profile || cfg.breaker ? performance.now() : 0;
-        // ⑥ With no macro syntax in the input, SillyTavern's per-match callback amounts to its template, which V8 applies
-        // without a JS call per match. Should group text assemble macro syntax anyway, the callback is used instead.
-        // A static-macro script gets a template per value set, finished in the display pass (staticFastFor).
+        // ⑥ Without macro syntax in the input, SillyTavern's per-match callback amounts to a template V8 applies without
+        // a JS call per match; should group text assemble macro syntax anyway, the callback runs instead.
         const fast = cfg.fastPath && typeof replacer === 'function' && !hasMacro(str) ? meta.fast ?? staticFastFor(meta) : null;
         let fastAlive = !!fast;
         if (fast && fast.verify <= 0) {
-            out = RegExp.prototype[Symbol.replace].call(native, incIn, fast.template ?? fast.replacer);
+            out = native[Symbol.replace](incIn, fast.template ?? fast.replacer);
             if (MACRO.test(out)) {
-                out = undefined; // group text assembled macro syntax: SillyTavern would substitute it
+                out = undefined;
                 native.lastIndex = 0;
             } else {
                 fastRun = true;
             }
         }
         if (!fastRun) {
-            // SillyTavern's replacer (groups, trim strings, macros) is timed apart from the matching itself. On a
-            // fast-path script's first runs, what the template gives for each match is compared with the callback's
-            // result (self-verification): one difference turns ⑥ off for the script.
+            // The replacer is timed apart from the matching. On a fast-path script's first runs each match's template
+            // result is compared with the callback's: one difference turns ⑥ off for the script.
             let checked = false;
             if (typeof replacer === 'function' && (profile || fast || postHoc)) {
                 fn = function () {
@@ -1350,8 +1310,8 @@ class PerfRegExp extends RegExp {
                     if (postHoc && !macroSeen && MACRO.test(arguments[0])) macroSeen = true;
                     if (fastAlive) {
                         const mine = fast.template !== null ? expandTemplate(fast.template, arguments) : fast.replacer.apply(this, arguments);
-                        if (MACRO.test(mine)) { // the fast path would have fallen back here: nothing to compare
-                            macroSeen = true; // and SillyTavern substituted the assembled macro: not memoizable either
+                        if (MACRO.test(mine)) { // the fast path would fall back here; SillyTavern substituted the macro
+                            macroSeen = true;
                             return r;
                         }
                         checked = true;
@@ -1366,16 +1326,15 @@ class PerfRegExp extends RegExp {
                     return r;
                 };
             }
-            out = RegExp.prototype[Symbol.replace].call(native, incIn, fn);
+            out = native[Symbol.replace](incIn, fn);
             if (checked && fastAlive) fast.verify--;
         }
-        const lastIndex = native.lastIndex; // what a native replace leaves (0 with g, the match end with y): the checks below move it
+        const lastIndex = native.lastIndex; // what a native replace leaves; the checks below move it
         if (inc) {
-            const tail = out;
-            out = inc.out + tail;
-            if (meta.incVerify > 0) { // a script's first incremental runs are checked against a run on the whole text
+            out = inc.out + out;
+            if (meta.incVerify > 0) {
                 native.lastIndex = 0;
-                const whole = RegExp.prototype[Symbol.replace].call(native, str, fastRun ? fast.template ?? fast.replacer : replacer);
+                const whole = native[Symbol.replace](str, fastRun ? fast.template ?? fast.replacer : replacer);
                 if (whole !== out) {
                     incOff.add(keyOf(native));
                     meta.lineLocal = false;
@@ -1405,19 +1364,19 @@ class PerfRegExp extends RegExp {
             }
             if (out !== str) stat.changed += weight;
             if (!matched) {
-                // A template changed the text or not: unchanged means no match unless a match can be its own replacement.
+                // a template: unchanged means no match unless a match can be its own replacement
                 if (fastRun) matched = out !== str || (fast.identity && native.test(incIn));
-                // A string replacer (not SillyTavern's) tells nothing: test short inputs, assume a match on long ones.
+                // a string replacer (not SillyTavern's): test short inputs, assume a match on long ones
                 else if (fn === replacer) matched = out !== str || incIn.length > 2000 || native.test(incIn);
             }
             if (matched) stat.matched += weight;
-            // lint "missing g": a pattern without g that would have matched again further on (short inputs only)
+            // lint "missing g" (short inputs only)
             if (matched && !native.global && str.length <= CONFLICT_TEST_MAX) {
                 const m = native.exec(str);
                 if (m && m.index + m[0].length < str.length && native.test(str.slice(m.index + m[0].length))) stat.moreMatches++;
             }
         }
-        // ⑨ ⑤: a volatile script that matched makes this pass's result one of many; the hooks then store nothing
+        // a volatile script that matched: ⑨ and ⑤ store nothing for this pass
         if (displayPass && meta.volatile && !passVolatile) {
             native.lastIndex = 0;
             if (out !== str || native.test(incIn)) passVolatile = true;
@@ -1426,10 +1385,10 @@ class PerfRegExp extends RegExp {
         this.lastIndex = native.lastIndex = lastIndex; // leave this regex as a native replace would
 
         if (bucket && !macroSeen) {
-            // an unchanged output is kept as a marker: V8 shares the string anyway, and counting it twice evicts early
+            // an unchanged output is a marker, so it is not counted twice
             const same = out === str;
             const size = (memoKey.length + (same ? 0 : out.length)) * 2;
-            if (size <= cfg.memoMaxMB * 1048576) { // an entry larger than the budget would flush the memo
+            if (size <= cfg.memoMaxMB * 1048576) { // a larger entry would flush the memo
                 const entry = { bucket, prefix: memoPrefix, key: memoKey, out: same ? null : out, same, size };
                 bucket.set(memoKey, entry);
                 memoLru.add(entry);
@@ -1451,14 +1410,14 @@ function done(stat, str, out) {
 }
 const unchanged = (stat, str) => done(stat, str, str);
 
-const CONFLICT_TEST_MAX = 4000; // the later pattern is really run on inputs up to this long to confirm a match
+const CONFLICT_TEST_MAX = 4000; // inputs up to this long are run to confirm a match
 
 /**
  * The later script was skipped on the earlier one's output although its needle was in the earlier one's input: the
- * earlier script removed it. Confirmed by running the later pattern on that input when it is short.
+ * earlier script removed it (confirmed by a run on short inputs).
  */
 function noteConflict(earlier, later, input, test, native, keep) {
-    const seen = [litIn, litSeen]; // the check looks at another input; the current one stays the fast path
+    const seen = [litIn, litSeen]; // the current input stays the ② fast path
     const had = test(input, keep);
     [litIn, litSeen] = seen;
     if (!had) return;
@@ -1481,8 +1440,8 @@ function noteConflict(earlier, later, input, test, native, keep) {
 /** @type {Map<string, PerfRegExp>} */
 const wrapped = new Map();
 let patched = false;
-let patchedGet = null; // our RegexProvider.instance.get, to notice a later replacement
-let wrapperWarning = ''; // shown once in the panel (and the console)
+let patchedGet = null; // to notice a later replacement
+let wrapperWarning = ''; // shown once in the panel and the console
 
 function patchProvider() {
     const inst = RegexProvider?.instance;
@@ -1493,7 +1452,7 @@ function patchProvider() {
     // SillyTavern's get() is the class method; an own property on the instance is another extension's wrapper.
     if (inst.get !== Object.getPrototypeOf(inst)?.get) warnWrapper(t`Another extension had already replaced the regex engine's get() when Regex Perf Kit loaded: its runs may be measured twice or not at all.`);
     const origGet = inst.get.bind(inst);
-    const origClear = typeof inst.clear === 'function' ? inst.clear.bind(inst) : null; // older providers may have no clear()
+    const origClear = typeof inst.clear === 'function' ? inst.clear.bind(inst) : null; // older providers lack it
 
     inst.get = patchedGet = function (regexString) {
         const base = origGet(regexString);
@@ -1510,7 +1469,7 @@ function patchProvider() {
             if (wrapped.size >= 1000) wrapped.delete(wrapped.keys().next().value);
             wrapped.set(regexString, w);
         }
-        // Script info is re-read whenever it changes, so an edited script takes effect without RegexProvider.clear().
+        // re-linked whenever the script info changes, so an edit takes effect without RegexProvider.clear()
         if (w._version !== version) {
             const key = keyOf(base);
             const info = map.get(key) ?? resolveDynamic(regexString, dynamic);
@@ -1522,7 +1481,7 @@ function patchProvider() {
             stat.needle = info?.needle ?? needleOf(base);
             stat.redos = info?.redos ?? redosOf(base);
             const replaceSig = info?.replaceSig ?? null;
-            if (stat.tripped && stat.replaceSig !== undefined && stat.replaceSig !== replaceSig) untrip(stat); // ⑧ an edit of this script resets its breaker (a changed pattern is another stat anyway); other scripts' edits do not
+            if (stat.tripped && stat.replaceSig !== undefined && stat.replaceSig !== replaceSig) untrip(stat); // ⑧ an edit of this script resets it
             stat.replaceSig = replaceSig;
             w._meta = {
                 stat,
@@ -1530,14 +1489,14 @@ function patchProvider() {
                 markdownOnly: !!info?.markdownOnly,
                 test: stat.needle.test,
                 memoPrefix: info?.pure || info?.semiPure ? key + '\u0001' + info.replaceSig + (info.pure ? '\u0001' : '\u0002') : null,
-                memoStatic: info?.semiPure ? (info.semiPureTrims ? 2 : 1) : 0, // 1: static macros in the replacement, 2: in a trim string too
+                memoStatic: info?.semiPure ? (info.semiPureTrims ? 2 : 1) : 0, // 2: a trim string holds a static macro
                 fast: info?.fast ?? null,
                 fastStatic: info?.fastStatic ?? null,
                 volatile: info ? info.volatile : true,
-                dynamic: !info || info.dynamicVolatile, // the find pattern itself can change between renders: volatile even without a match
+                dynamic: !info || info.dynamicVolatile, // the find pattern itself can change between renders
                 lineLocal: !!info?.lineLocal && !incOff.has(key),
-                inc: new Map(), // ④ incremental formatting: stream key -> {in, out}, the last streamed prefix this script saw in that stream
-                incVerify: w._meta?.incVerify ?? INC_VERIFY_RUNS, // incremental runs still to check against a full run
+                inc: new Map(), // ④ stream key -> {in, out}: the last prefix this script formatted in that stream
+                incVerify: w._meta?.incVerify ?? INC_VERIFY_RUNS,
             };
             w._version = version;
         }
@@ -1559,7 +1518,7 @@ function warnWrapper(text) {
     wrapperWarning = text;
     console.warn('[RegexPerf] ' + text);
 }
-/** Checked now and then: if another extension replaced get() after us, our features no longer apply. */
+/** If another extension replaced get() after us, our features no longer apply. */
 function checkWrapper() {
     if (patched && RegexProvider.instance?.get !== patchedGet) warnWrapper(t`Another extension replaced the regex engine's get() after Regex Perf Kit: the features may no longer apply. Check the extension load order.`);
 }
@@ -1569,28 +1528,27 @@ function checkWrapper() {
 // messageFormatting() runs, per message: BEFORE_REGEX hooks → regex scripts → AFTER_REGEX hooks → markdown fix-ups,
 // quotes, showdown → AFTER_MARKDOWN hooks → name strip → DOMPurify. Our hooks sit at the stage boundaries (last of
 // BEFORE_REGEX, first of AFTER_REGEX and AFTER_MARKDOWN) and DOMPurify.sanitize() is wrapped for the MESSAGE_SANITIZE
-// config messageFormatting() alone uses, so a display pass is timed in three parts. In a small setup the regex part
-// is a few percent of a render: the panel says so instead of promising savings that cannot be felt.
+// config only messageFormatting() uses, so a display pass is timed in four parts.
 const pipe = {
     passes: 0, // display passes timed end to end
-    hookMs: 0, // our BEFORE_REGEX hook: the ⑨/⑤ key (a hash of the message) and lookups — the extension's own cost
-    regexMs: 0, // end of our hook → AFTER_REGEX: the regex scripts (and ③ ② ④ ⑥ around them)
-    markdownMs: 0, // AFTER_REGEX → AFTER_MARKDOWN: SillyTavern's markdown fix-ups, quotes and showdown
+    hookMs: 0, // our BEFORE_REGEX hook: the ⑨/⑤ key and lookups (the extension's own cost)
+    regexMs: 0, // → AFTER_REGEX: the regex scripts
+    markdownMs: 0, // → AFTER_MARKDOWN: markdown fix-ups, quotes and showdown
     sanitizeMs: 0, // DOMPurify.sanitize()
-    htmlHits: 0, // ⑨ passes served from the HTML cache (regex and markdown skipped)
+    htmlHits: 0, // ⑨ passes served from the HTML cache
     htmlHitMs: 0, // what those passes still cost (placeholder markdown + sanitize)
     htmlStores: 0,
-    paraPasses: 0, // ④ paragraph cache: streaming renders whose markdown and sanitizing were split at a paragraph boundary
-    paraHits: 0, // of those, renders that reused the finished paragraphs' HTML (the last paragraph alone was converted)
-    paraFallbacks: 0, // messages whose split render differed from a whole one: whole renders for them
-    loadMs: 0, // the render burst that ended at the last CHAT_CHANGED: how long opening the chat took
+    paraPasses: 0, // ④ paragraph cache: streaming renders split at a paragraph boundary
+    paraHits: 0, // of those, renders that reused the finished paragraphs' HTML
+    paraFallbacks: 0, // messages whose split render differed from a whole one
+    loadMs: 0, // how long opening the chat rendered (the burst that ended at the last CHAT_CHANGED)
 };
-let passT0 = null; // performance.now() at our BEFORE_REGEX hook (null outside a timed pass)
-let passTk = null; // at the end of our BEFORE_REGEX hook
+let passT0 = null; // at our BEFORE_REGEX hook (null outside a timed pass)
+let passTk = null; // at the end of it
 let passT1 = null; // at our AFTER_REGEX hook
 let passT2 = null; // at our AFTER_MARKDOWN hook
-let passHtmlHit = false; // this pass is a ⑨ hit
-const resetPipe = () => { for (const k of Object.keys(pipe)) if (k !== 'loadMs') pipe[k] = 0; }; // loadMs belongs to the chat, not to the stats
+let passHtmlHit = false;
+const resetPipe = () => { for (const k of Object.keys(pipe)) if (k !== 'loadMs') pipe[k] = 0; }; // loadMs belongs to the chat
 const pipeTotal = () => pipe.hookMs + pipe.regexMs + pipe.markdownMs + pipe.sanitizeMs;
 /** Regex time as a share of the timed display renders (0..1), null before anything was timed. */
 const regexShare = () => {
@@ -1612,9 +1570,9 @@ function wrapSanitize() {
     purify.sanitize = function (dirty, config) {
         if (passT2 === null || !config?.MESSAGE_SANITIZE) return orig.apply(this, arguments);
         const t2 = passT2;
-        passT2 = null; // one sanitize per pass; a second call (another caller) is not ours
+        passT2 = null; // one sanitize per pass; a second call is another caller's
         const t3 = performance.now();
-        const view = paraSplit; // a ④ paragraph-cache pass: the finished paragraphs' HTML is sanitized once per generation
+        const view = paraSplit; // ④ paragraph cache: the finished paragraphs are sanitized once
         paraSplit = null;
         try {
             if (view !== null && paraHeadPre !== null && dirty.startsWith(paraHeadPre) && dirty.charCodeAt(paraHeadPre.length) === 10) return paragraphSanitize(this, orig, view, dirty, config);
@@ -1625,7 +1583,7 @@ function wrapSanitize() {
             const t1 = passT1 ?? t2;
             pipe.passes++;
             notePass(passT0, t4);
-            if (passHtmlHit) { // a ⑨ hit: the stage times are of a full pass only
+            if (passHtmlHit) { // stage times are of full passes only
                 pipe.htmlHits++;
                 pipe.htmlHitMs += t4 - passT0;
             } else {
@@ -1640,61 +1598,52 @@ function wrapSanitize() {
     };
     sanitizeWrapped = true;
 }
-// ① adaptive profiling: once the regex stage is under ADAPTIVE_SHARE of the timed renders (checked every
-// ADAPTIVE_EVERY_PASSES full passes), 1 run in LIGHT_EVERY is timed; the panel says the regex stage is not the cost.
+// ① adaptive: once the regex stage is under ADAPTIVE_SHARE of the timed renders (checked every ADAPTIVE_EVERY_PASSES
+// full passes), 1 run in LIGHT_EVERY is timed.
 const ADAPTIVE_SHARE = 0.02;
 const ADAPTIVE_EVERY_PASSES = 64;
 const LIGHT_EVERY = 64;
 let adaptiveLight = false;
 
-const MAKE_HTML_WRAPPED = Symbol('rpk.makeHtml'); // set on a wrapped makeHtml, so a converter is wrapped once
+const MAKE_HTML_WRAPPED = Symbol('rpk.makeHtml');
+let showdownWrapped = false; // the converter in use is wrapped (in the JSON report)
 /**
- * Wraps a converter's makeHtml(): on a ⑨ hit the converter receives the placeholder, whose conversion is thrown away at
- * AFTER_MARKDOWN anyway, so it is returned as it is. showdown's cost is largely per call (dozens of sub-parsers), not
- * per character, so without this a hit would still pay most of the markdown stage. In a ④ compromise pass the
- * paragraph cache converts the paragraph being written only (paragraphPass). Anything else passes through.
- * showdown defines makeHtml as an own property inside the Converter constructor (nothing on the prototype), so the
- * instance messageFormatting() uses, script.js's `converter`, is wrapped; SillyTavern makes a new one in
- * reloadMarkdownProcessor(), so the hooks check it before every markdown stage (ensureShowdownWrapped).
+ * Wraps makeHtml() of the converter messageFormatting() is about to call. showdown sets makeHtml as an own property of
+ * each Converter and SillyTavern remakes the converter in reloadMarkdownProcessor(), so this runs before every markdown
+ * stage. On a ⑨ hit the placeholder is returned unconverted (showdown's cost is mostly per call, so a hit would
+ * otherwise still pay most of the markdown stage); in a ④ compromise pass the paragraph cache converts the paragraph
+ * being written only. Everything else passes through.
  */
-function wrapMakeHtml(conv) {
-    if (!conv || typeof conv.makeHtml !== 'function' || conv.makeHtml[MAKE_HTML_WRAPPED]) return false;
-    const orig = conv.makeHtml;
-    const wrapped = function (text) {
-        if (htmlHit !== null && text === HTML_PLACEHOLDER) return text;
-        if (streamKey !== null && paraSplit === null && passT1 !== null && passT2 === null && cfg.streamingParagraphCache && sanitizeWrapped) {
-            const out = paragraphPass(this, orig, text);
-            if (out !== null) return out;
-        }
-        return orig.apply(this, arguments);
-    };
-    wrapped[MAKE_HTML_WRAPPED] = true;
-    conv.makeHtml = wrapped;
-    return true;
-}
-let showdownWrapped = false; // the converter in use is wrapped (the panel's ⑨ / ④ notes depend on it)
-/** The converter messageFormatting() is about to call: wrapped now if it is new or was never wrapped. */
 function ensureShowdownWrapped() {
     const conv = st.converter;
-    if (conv && !conv.makeHtml?.[MAKE_HTML_WRAPPED]) wrapMakeHtml(conv);
+    if (conv && typeof conv.makeHtml === 'function' && !conv.makeHtml[MAKE_HTML_WRAPPED]) {
+        const orig = conv.makeHtml;
+        const makeHtml = function (text) {
+            if (htmlHit !== null && text === HTML_PLACEHOLDER) return text;
+            if (streamKey !== null && paraSplit === null && passT1 !== null && passT2 === null && cfg.streamingParagraphCache && sanitizeWrapped) {
+                const out = paragraphPass(this, orig, text);
+                if (out !== null) return out;
+            }
+            return orig.apply(this, arguments);
+        };
+        makeHtml[MAKE_HTML_WRAPPED] = true;
+        conv.makeHtml = makeHtml;
+    }
     showdownWrapped = !!conv?.makeHtml?.[MAKE_HTML_WRAPPED];
 }
 
-// What a user feels: frames the page could not paint in time while a reply streams, and tasks long enough to
-// freeze the page (PerformanceObserver 'longtask', Chromium). Counted since the stats were reset; the frame sampler
-// runs only during a generation, so idle pages pay nothing.
+// What a user feels: frames painted late while a reply streams, and long tasks (PerformanceObserver, Chromium). The
+// frame sampler runs only during a generation, so idle pages pay nothing.
 const FRAME_BUDGET_MS = 1000 / 60;
 const FEEL_ZERO = { frames: 0, dropped: 0, frozen: 0, longTasks: 0, longTaskMs: 0, longTasks100: 0, streamLongTasks: 0, longTaskPipeMs: 0, lastLongTask: null };
 const feel = { ...FEEL_ZERO };
 const resetFeel = () => { Object.assign(feel, FEEL_ZERO); };
-// The display passes of the last few seconds, as [start, end] on the performance clock, so a long task can be split
-// into "the render pipeline" (what this extension can see and partly save) and "the rest" (SillyTavern's DOM work,
-// layout, other extensions): a stutter whose task holds little pipeline time is not this extension's to fix.
+// Recent display passes as [start, end] pairs, so a long task can be split into render pipeline time and the rest
+// (SillyTavern's DOM work, layout, other extensions).
 const recentPasses = [];
 const RECENT_PASSES_MS = 10000;
-const RECENT_PASSES_MAX = 1024; // pairs × 2: a bound in entries as well as in time
-// The burst of display passes that ends at CHAT_CHANGED is the chat's first render (see BURST_GAP_MS): counted from
-// every closed pass, ⑨/⑤ hits included, so a cached chat's opening is measured too.
+const RECENT_PASSES_MAX = 1024;
+// The pass burst that ends at CHAT_CHANGED is the chat's first render, ⑨/⑤ hits included.
 let passBurstStart = 0;
 let passLastEnd = -Infinity;
 function notePass(start, end) {
@@ -1704,7 +1653,7 @@ function notePass(start, end) {
     if (recentPasses.length > RECENT_PASSES_MAX || (recentPasses.length && end - recentPasses[0] > RECENT_PASSES_MS)) {
         let i = 0;
         while (i < recentPasses.length && end - recentPasses[i + 1] > RECENT_PASSES_MS) i += 2;
-        if (recentPasses.length - i > RECENT_PASSES_MAX) i = recentPasses.length - RECENT_PASSES_MAX; // thousands of passes in one burst: the oldest go anyway
+        if (recentPasses.length - i > RECENT_PASSES_MAX) i = recentPasses.length - RECENT_PASSES_MAX;
         recentPasses.splice(0, i);
     }
 }
@@ -1724,12 +1673,12 @@ function frameTick() {
         frameRaf = 0;
         return;
     }
-    const now = performance.now(); // when this frame's callbacks ran, not the frame's scheduled start: what was felt
+    const now = performance.now(); // when the callbacks ran, not the frame's scheduled start: what was felt
     if (frameLast) {
         const gap = now - frameLast;
         feel.frames++;
-        if (gap > FRAME_BUDGET_MS * 2) feel.dropped++; // more than a frame late: a visible stutter
-        if (gap > 100) feel.frozen++; // a freeze a user notices
+        if (gap > FRAME_BUDGET_MS * 2) feel.dropped++;
+        if (gap > 100) feel.frozen++;
     }
     frameLast = now;
     frameRaf = requestAnimationFrame(frameTick);
@@ -1739,11 +1688,9 @@ function startFrames() {
     frameLast = 0;
     frameRaf = requestAnimationFrame(frameTick);
 }
-// "Measure on this chat" renders the whole chat in chunks, each a long task of its own. The observer delivers its entries
-// after the measurement has finished (so after measureChat() restored the counters), so the tasks that overlap a
-// measurement (the first chunk runs in the task that started it) are recognized by their times and left out: they are
-// not what the user felt.
-const measureSpans = []; // [start, end] on the performance clock of the recent measurements, newest last
+// "Measure on this chat" renders in chunks, each a long task, whose entries arrive after measureChat() restored the
+// counters: tasks overlapping a measurement are recognized by their times and left out.
+const measureSpans = []; // [start, end] of recent measurements, newest last
 const MEASURE_SPANS_KEPT = 8;
 const inMeasurement = (start, end) => measureSpans.some(([a, b]) => start <= b && end >= a);
 let longTaskObserver = null;
@@ -1754,7 +1701,7 @@ function observeLongTasks() {
         longTaskObserver = new PerformanceObserver((list) => {
             if (!cfg.frameStats) return;
             for (const e of list.getEntries()) {
-                if (inMeasurement(e.startTime, e.startTime + e.duration)) continue; // this extension's own measurement, not the page's stutter
+                if (inMeasurement(e.startTime, e.startTime + e.duration)) continue;
                 feel.longTasks++;
                 feel.longTaskMs += e.duration;
                 if (e.duration >= 100) feel.longTasks100++;
@@ -1769,10 +1716,9 @@ function observeLongTasks() {
     } catch { longTaskObserver = null; }
 }
 
-// ⑨ HTML cache: key (see keyFor) -> the formatted HTML at our AFTER_MARKDOWN hook. A hit returns a placeholder at
-// BEFORE_REGEX, so the regex scripts (bypassed), the markdown fix-ups and showdown run on a few characters, and the
-// stored HTML takes over at AFTER_MARKDOWN; DOMPurify still runs on it (there is no stage after it). Least recently
-// used entries go first, by count and by estimated size.
+// ⑨ HTML cache: key (see keyFor) -> the HTML at our AFTER_MARKDOWN hook. A hit returns a placeholder at BEFORE_REGEX,
+// so regex is bypassed and markdown runs on a few characters; the stored HTML takes over at AFTER_MARKDOWN and
+// DOMPurify still runs on it. Least recently used entries go first, by count and by estimated size.
 const HTML_PLACEHOLDER = 'rpk';
 class Lru {
     constructor() {
@@ -1781,7 +1727,7 @@ class Lru {
     }
     get(key) {
         const e = this.map.get(key);
-        if (e) { // re-insert: a Map iterates in insertion order, so the first entry is the least recently used
+        if (e) { // re-insert: a Map iterates in insertion order
             this.map.delete(key);
             this.map.set(key, e);
         }
@@ -1809,43 +1755,40 @@ class Lru {
     }
 }
 const htmlMemo = new Lru();
-let htmlHit = null; // the HTML to return at AFTER_MARKDOWN for this pass (null: none)
-/** The power_user settings that change the markdown stage: part of the ⑨ key, so a toggle in User Settings misses. */
-function pipeVersion() {
-    const pu = ctx().powerUserSettings;
+let htmlHit = null; // the HTML to return at AFTER_MARKDOWN for this pass
+/** The power_user settings that change the markdown stage, for the ⑨ key. */
+function pipeVersion(pu) {
     if (!pu) return '';
-    const regexOff = extensionSettings.disabledExtensions?.includes?.('regex') ? 1 : 0; // getRegexedString() returns its input then
+    const regexOff = extensionSettings.disabledExtensions?.includes?.('regex') ? 1 : 0; // no scripts run then
     return fnv1a([pu.auto_fix_generated_markdown, pu.encode_tags, pu.reasoning?.prefix, pu.reasoning?.suffix, pu.markdown_escape_strings, pu.allow_name2_display, regexOff].map(String).join('\u0000'));
 }
 
-// ④ paragraph cache (compromise mode): while a reply streams, the HTML of its finished paragraphs is kept, so showdown
-// and DOMPurify run on the paragraph being written. showdown converts the two parts as it would the whole, joined by a
-// line break. A message's first split renders are compared with whole ones; on any difference it goes back to whole
-// renders (the self-check ⑥ and ④ incremental use too). Dropped when the generation ends.
+// ④ paragraph cache (compromise mode): while a reply streams, its finished paragraphs' HTML is kept, so showdown and
+// DOMPurify run on the paragraph being written (showdown joins blocks with a line break, so the parts equal the whole).
+// A message's first split renders are compared with whole ones; a difference sends it back to whole renders.
 const paraViews = new Map(); // stream key -> {messageId, sep, tailStart, head, html, pre, san, checks, sanChecks, off}
-const PARA_MARK = '\uE000'; // put between the two HTML parts by makeHtml, taken out again by our AFTER_MARKDOWN hook (the first)
+const PARA_MARK = '\uE000'; // between the two HTML parts, taken out by our AFTER_MARKDOWN hook
 const PARA_VERIFY = 3;
-let streamKey = null; // the ④ compromise key of the message this pass formats (null outside a compromise pass)
+let streamKey = null; // the ④ compromise key of the message this pass formats
 let paraSplit = null; // the paragraph-cache entry this pass split its markdown with, until the sanitizer
-let paraHeadPre = null; // the finished paragraphs' HTML as it left our AFTER_MARKDOWN hook: where the sanitizer splits
+let paraHeadPre = null; // the finished paragraphs' HTML after our AFTER_MARKDOWN hook: where the sanitizer splits
 const VOID_TAGS = new Set(['br', 'hr', 'img', 'input', 'meta', 'link', 'area', 'base', 'col', 'embed', 'source', 'track', 'wbr', 'param']);
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d+[.)])(?:\s|$)/;
-const INDENTED = /^[ \t]/; // a line starting with whitespace continues the block above it (a list item's paragraph, indented code)
+const INDENTED = /^[ \t]/; // continues the block above (a list item's paragraph, indented code)
 const TAG = /<(\/?)([a-zA-Z][\w-]*)[^<>]*?(\/?)>/g;
-const REF_DEF = /^ {0,3}\[[^\]]+\]:\s/; // a reference-style link definition resolves across paragraphs: never split such a text
+const REF_DEF = /^ {0,3}\[[^\]]+\]:\s/; // resolves across paragraphs: such a text is never split
 
 /**
- * The last paragraph boundary of a markdown text, scanning from `from` (0, or the start of a tail already known to
- * follow a boundary): {headEnd, tailStart} with head = text.slice(0, headEnd) and tail = text.slice(tailStart), null
- * when the scanned part has none, false when the text must not be split.
+ * The last paragraph boundary of a markdown text, scanning from `from` (a tail known to follow a boundary):
+ * {headEnd, tailStart}, null when the scanned part has none, false when the text must not be split.
  */
 function paragraphCut(text, from = 0) {
     let inFence = null; // the fence marker that has to close
-    let ticks = 0; // backticks outside fences: an odd count means an inline code span is open
+    let ticks = 0; // backticks outside fences: odd means an inline code span is open
     let depth = 0; // open raw HTML tags outside fences and inline code
-    let prev = 'blank'; // kind of the last non-blank line: para (also a heading) | list | quote | table | indent | fence
-    let pending = null; // headEnd of a blank line after a para / heading / closed fence, until the next non-blank line is seen
+    let prev = 'blank'; // the last non-blank line: para (or heading) | list | quote | table | indent | fence
+    let pending = null; // headEnd of a blank line after a para or closed fence, until the next non-blank line
     let cut = null;
     const n = text.length;
     for (let pos = from; pos < n;) {
@@ -1880,7 +1823,7 @@ function paragraphCut(text, from = 0) {
         }
         pos = nl + 1;
     }
-    return cut; // a blank line at the very end: the tail would be empty, so it is no cut
+    return cut; // a trailing blank line is no cut (the tail would be empty)
 }
 
 /** The paragraph-cache split of a compromise pass's makeHtml(): the HTML to return, or null to convert the whole text. */
@@ -1888,7 +1831,7 @@ function paragraphPass(conv, orig, text) {
     let view = paraViews.get(streamKey);
     if (view?.off || text.includes(PARA_MARK)) return null;
     let cut;
-    if (view && text.startsWith(view.sep)) { // the known boundary still stands: scan the part after it only
+    if (view && text.startsWith(view.sep)) { // the known boundary stands: scan after it only
         cut = paragraphCut(text, view.tailStart);
         if (cut === null) cut = { headEnd: view.head.length, tailStart: view.tailStart };
     } else {
@@ -1910,10 +1853,11 @@ function paragraphPass(conv, orig, text) {
         view.pre = view.san = null;
     }
     const tailHtml = orig.call(conv, tail);
-    if (view.checks > 0) { // the first split renders of a message are compared with a conversion of the whole text
+    if (view.checks > 0) {
         view.checks--;
         const whole = orig.call(conv, text);
-        if (whole !== view.html + '\n' + tailHtml) return paraOff(view, 'markdown', whole, view.html + '\n' + tailHtml);
+        const split = view.html + '\n' + tailHtml;
+        if (whole !== split) return paraOff(view, 'markdown', whole, split);
     }
     pipe.paraPasses++;
     if (hit) pipe.paraHits++;
@@ -1921,7 +1865,7 @@ function paragraphPass(conv, orig, text) {
     return view.html + PARA_MARK + '\n' + tailHtml;
 }
 
-/** The sanitizer side of a split pass: the finished paragraphs' HTML is sanitized once, the rest on every render. */
+/** The sanitizer side of a split pass: the finished paragraphs once, the rest on every render. */
 function paragraphSanitize(purify, orig, view, dirty, config) {
     const headPre = paraHeadPre;
     const tailPre = dirty.slice(headPre.length + 1);
@@ -1930,7 +1874,7 @@ function paragraphSanitize(purify, orig, view, dirty, config) {
         view.san = orig.call(purify, headPre, config);
     }
     const out = view.san + '\n' + orig.call(purify, tailPre, config);
-    if (view.sanChecks > 0) { // the first split renders are compared with a sanitizing of the whole HTML
+    if (view.sanChecks > 0) {
         view.sanChecks--;
         const whole = orig.call(purify, dirty, config);
         if (whole !== out) return paraOff(view, 'sanitizing', whole, out);
@@ -1938,7 +1882,7 @@ function paragraphSanitize(purify, orig, view, dirty, config) {
     return out;
 }
 
-/** A split render differed from a whole one: whole renders for this message from now on (with a console warning). */
+/** A split render differed from a whole one: whole renders for this message from now on. */
 function paraOff(view, stage, whole, got) {
     view.off = true;
     pipe.paraFallbacks++;
@@ -1949,16 +1893,16 @@ function paraOff(view, stage, whole, got) {
 // ---- MessageFormatter hooks: ⑤ persisted display cache, ⑨ HTML cache, ④ compromise mode ----
 
 let persistAvailable = false; // the hooks exist (recent SillyTavern)
-let htmlStageAvailable = false; // the AFTER_MARKDOWN stage exists too (⑨ and the pipeline timing need it)
-let pending = null; // {id, key, input, html}: message awaiting its after-regex result (id: ⑤'s row, null when nothing can be stored)
-const streamViews = new Map(); // ④ compromise: "<messageId><m|r>" -> {at, prefix, out} of the streamed message
-/** ④'s per-generation state: the compromise views and the paragraph cache (both hold the streamed message's text). */
+let htmlStageAvailable = false; // AFTER_MARKDOWN exists too (⑨ and the pipeline timing)
+let pending = null; // {id, key, input, html}: awaiting its result (id: ⑤'s row, null when nothing is stored)
+const streamViews = new Map(); // ④ compromise: "<messageId><m|r>" -> {at, prefix, out}
+/** ④'s per-generation state (both hold the streamed message's text). */
 const clearStreamCaches = () => { streamViews.clear(); paraViews.clear(); };
 let streamView = null; // the view this pass formats
 let streamTail = null; // raw text this pass appends after the regex stage
 
-// Depth of a message as messageFormatting() counts it (non-system messages after it), from one table per render burst:
-// built on first use, dropped by a microtask, so a synchronous run over the chat computes it once.
+// A message's depth as messageFormatting() counts it (non-system messages after it), from one table per synchronous
+// render burst (dropped by a microtask).
 let depthTable = null;
 function depthAt(chat, i) {
     if (depthTable?.chat !== chat || depthTable.len !== chat.length) {
@@ -1974,32 +1918,32 @@ function depthAt(chat, i) {
     return depthTable.d[i];
 }
 
-/** Clears the state the hooks share for one formatting pass (the timing too; see resetPassKeepTiming). */
+/** Clears the state the hooks share for one formatting pass, timing included. */
 function resetPass() {
     resetPassKeepTiming();
     passT0 = passTk = passT1 = passT2 = null;
     passHtmlHit = false;
     paraSplit = paraHeadPre = null;
 }
-/** What the regex stage used, cleared at AFTER_MARKDOWN; the pass timing stays for the sanitize wrapper. */
+/** Cleared at AFTER_MARKDOWN; the pass timing stays for the sanitize wrapper. */
 function resetPassKeepTiming() {
     bypass = streamApply = displayPass = passVolatile = false;
     pending = streamView = streamTail = streamKey = passChName = passStatic = passStaticTrim = passMessageId = htmlHit = null;
 }
 
 /**
- * ④ compromise mode, for the message being streamed: the display scripts format the completed lines at most every
- * streamingThrottleMs; in between, the last formatted lines are reused and the rest is shown as it streams.
+ * ④ compromise mode for the streamed message: display scripts format the completed lines at most every
+ * streamingThrottleMs; in between, the last formatted lines are reused and the rest is shown raw.
  */
 function streamPass(mes, c) {
     const key = c.messageId + (c.isReasoning ? 'r' : 'm');
     streamKey = key;
     const view = streamViews.get(key);
     const now = performance.now();
-    // the last line is still being written, along with any ``` / ~~~ fence SillyTavern appends to balance it
+    // the last line is still being written (and any ``` / ~~~ fence SillyTavern appends to balance it)
     const cut = mes.replace(/(?:\n(?:```|~~~))+$/, '').lastIndexOf('\n') + 1;
     if (view?.out != null && mes.startsWith(view.prefix) && (cut <= view.prefix.length || now - view.at < cfg.streamingThrottleMs)) {
-        streamTail = mes.slice(view.prefix.length); // the streaming skip leaves the reused part alone
+        streamTail = mes.slice(view.prefix.length);
         return view.out;
     }
     streamView = { at: now, prefix: mes.slice(0, cut), out: null };
@@ -2009,24 +1953,23 @@ function streamPass(mes, c) {
     return streamView.prefix;
 }
 
-/** The ⑤/⑨ key of a message as this pass sees it: its text, the display scripts, the names, the depth rules, the markdown settings. */
-function keyFor(mes, c, chat, msg) {
-    const { name1, name2 } = ctx();
-    // {{user}}/{{char}} in replacements and trim strings resolve to these names (ch_name: the message author).
+/**
+ * The ⑤/⑨ key of a message: a 64-bit hash of its text and its length, the display scripts, the names (ch_name: the
+ * author), which depth-limited scripts apply, the static macro values, the placement and the markdown settings.
+ */
+function keyFor(mes, c, msg, context) {
+    const { name1, name2, chat } = context;
     const names = fnv1a([c.ch_name ?? c.characterName, name1, name2].join('\u0000'));
     const { displayVersion, depthRules } = ensureInfo();
     let depths = '';
-    if (depthRules.length) { // which depth-limited scripts apply at this message's depth, as messageFormatting() counts it
+    if (depthRules.length) {
         const depth = depthAt(chat, c.messageId);
         depths = msg.is_system ? ':*' : ':' + depthRules.map(([min, max]) => (depth < min || depth > max ? 0 : 1)).join('');
     }
-    // 64 bits of the text: a 32-bit hash alone collides once in a few tens of thousands of same-length messages.
-    // Entries keyed the old way simply miss and are recomputed.
-    // the static macro values ({{user}} {{char}} {{persona}} {{group}}) that find patterns, replacements and trim strings can hold
-    const statics = staticKeyFor(2);
-    // the placement decides which scripts run: USER_INPUT for the user's messages, SLASH_COMMAND for narrator messages, else AI_OUTPUT
+    const statics = staticKeyFor(2, context);
+    // the placement decides which scripts run: USER_INPUT, SLASH_COMMAND (narrator) or AI_OUTPUT
     const placement = c.isReasoning ? ':r' : c.isUser ? ':u' : msg.extra?.type === 'narrator' ? ':n' : '';
-    return hash64(mes) + ':' + mes.length + ':' + displayVersion + ':' + names + depths + ':' + statics + placement + ':' + pipeVersion();
+    return hash64(mes) + ':' + mes.length + ':' + displayVersion + ':' + names + depths + ':' + statics + placement + ':' + pipeVersion(context.powerUserSettings);
 }
 
 /** A ⑨ hit: the regex stage is bypassed and the stored HTML takes over at AFTER_MARKDOWN. */
@@ -2043,55 +1986,47 @@ function installPersistHooks() {
     persistAvailable = true;
     htmlStageAvailable = !!mf.stage.AFTER_MARKDOWN;
 
-    // Before regex: ④ compromise mode for the streamed message; otherwise, on a ⑨ or ⑤ key match, serve the stored
-    // result and bypass every script for this message.
+    // Before regex: ④ compromise mode for the streamed message; otherwise serve a stored ⑨ or ⑤ result.
     mf.addHook((mes, c) => {
         resetPass();
         displayPass = true;
-        // messageFormatting() is synchronous: should it throw between the hooks, the next task starts clean
-        queueMicrotask(resetPass);
+        queueMicrotask(resetPass); // should messageFormatting() throw between the hooks, the next task starts clean
         if (c.messageId < 0 || c.isSystem) return mes;
         if (htmlStageAvailable) passT0 = performance.now();
         const out = beforeRegex(mes, c);
-        if (passT0 !== null) passTk = performance.now(); // the hook's own work (the ⑨/⑤ key) is counted apart from the scripts
+        if (passT0 !== null) passTk = performance.now();
         return out;
     }, { stage: mf.stage.BEFORE_REGEX, order: mf.order?.LATEST ?? 100 });
 
-    /** The BEFORE_REGEX hook's work for a message: ④ compromise mode, ⑨ and ⑤ lookups. */
     function beforeRegex(mes, c) {
-        passChName = c.ch_name ?? c.characterName ?? ''; // static-macro scripts resolve their key on first use
+        passChName = c.ch_name ?? c.characterName ?? '';
         passMessageId = c.messageId;
         const wantHtml = cfg.htmlMemo && htmlStageAvailable;
         const wantPersist = cfg.persist && !c.isReasoning;
         const sp = liveStream();
         if (!sp && c.messageId === streamSkippedMsg) streamSkippedMsg = null; // the streamed message's final render
-        // the streamed message: ④'s compromise mode or nothing (its text changes every tick); another message rendered
-        // during the stream (scrolling up, an edit) is served and stored as usual
+        // the streamed message changes every tick: ④'s compromise mode or nothing; other messages are served as usual
         if (sp && sp.messageId === c.messageId) return cfg.streamingSkip && cfg.streamingThrottle ? streamPass(mes, c) : mes;
         if (!wantHtml && !wantPersist) return mes;
-        const chat = ctx().chat;
-        const msg = chat?.[c.messageId];
+        const context = ctx(); // one snapshot for the whole hook
+        const msg = context.chat?.[c.messageId];
         if (!msg) return mes;
-        // SillyTavern prints a chat before it emits CHAT_CHANGED: the chat this pass belongs to is read here, so the
-        // rows go to the right chat and a chat not yet read starts loading at its first pass
-        if (wantPersist) loadPersisted();
-        const key = keyFor(mes, c, chat, msg);
+        // SillyTavern prints a chat before CHAT_CHANGED: the chat this pass belongs to is read here
+        if (wantPersist) loadPersisted(context);
+        const key = keyFor(mes, c, msg, context);
         const id = wantPersist && persistChatKey !== null ? persistIdOf(key) : null;
         if (wantHtml) {
             const hit = htmlMemo.get(key);
             if (hit) {
-                if (id !== null && persistMem.get(id)?.k !== key && hit.value.length <= cfg.persistMaxLen) { // ⑤ learns it too
-                    storePersisted(id, { k: key, h: hit.value });
-                    persistStats.stores++;
-                }
+                if (id !== null && persistMem.get(id)?.k !== key && hit.value.length <= cfg.persistMaxLen) storePersisted(id, { k: key, h: hit.value }); // ⑤ learns it too
                 return serveHtml(hit.value);
             }
         }
         if (wantPersist) {
-            // this chat's stored results, else what an older version wrote into the chat file (read, never written again)
+            // this chat's rows, else what an older version wrote into the chat file (read, never written)
             const e = (id !== null ? persistMem.get(id) : undefined) ?? msg.extra?.[EXTRA_KEY];
             if (e && e.k === key) {
-                if (e.h != null) { // a stored HTML result needs ⑨'s stage to take over; without it, recompute
+                if (e.h != null) { // stored HTML needs ⑨'s stage; without it, recompute
                     if (wantHtml) {
                         persistStats.hits++;
                         return serveHtml(String(e.h));
@@ -2107,14 +2042,14 @@ function installPersistHooks() {
         return mes;
     }
 
-    // After regex: append ④'s raw tail, or store the freshly computed text for ⑤ (the HTML is stored a stage later).
+    // After regex: append ④'s raw tail, or store the computed text for ⑤ (HTML is stored a stage later).
     mf.addHook((mes) => {
         if (passT0 !== null) passT1 = performance.now();
-        if (htmlStageAvailable) ensureShowdownWrapped(); // the markdown stage comes next: a converter remade by SillyTavern is wrapped here
+        if (htmlStageAvailable) ensureShowdownWrapped(); // the markdown stage comes next
         const tail = streamTail;
         const view = streamView;
-        const p = pending; // null after a hit (bypass)
-        if (htmlHit !== null) return mes; // the placeholder passes through to AFTER_MARKDOWN
+        const p = pending; // null after a hit
+        if (htmlHit !== null) return mes; // the placeholder passes through
         if (tail !== null) {
             if (view) view.out = mes;
             if (!htmlStageAvailable) resetPass();
@@ -2122,20 +2057,17 @@ function installPersistHooks() {
         }
         if (p && !p.html) {
             pending = null;
-            if (p.id !== null && !passVolatile && mes.length <= cfg.persistMaxLen) {
-                storePersisted(p.id, mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes });
-                persistStats.stores++;
-            }
+            if (p.id !== null && !passVolatile && mes.length <= cfg.persistMaxLen) storePersisted(p.id, mes === p.input ? { k: p.key, same: 1 } : { k: p.key, v: mes });
         }
         if (!htmlStageAvailable) resetPass();
         return mes;
     }, { stage: mf.stage.AFTER_REGEX, order: mf.order?.EARLIEST ?? 0 });
 
     if (!htmlStageAvailable) return;
-    // After markdown: serve the ⑨ hit, or store the HTML just made in memory (⑨) and in the chat (⑤).
+    // After markdown: serve the ⑨ hit, or store the HTML just made (⑨ in memory, ⑤ in IndexedDB).
     mf.addHook((mes) => {
         const now = performance.now();
-        if (paraSplit !== null) { // the paragraph cache's marker comes out before any other hook sees the HTML
+        if (paraSplit !== null) { // the paragraph marker comes out before other hooks see the HTML
             const i = mes.indexOf(PARA_MARK);
             if (i >= 0) {
                 paraHeadPre = mes.slice(0, i);
@@ -2158,10 +2090,7 @@ function installPersistHooks() {
                     pipe.htmlStores++;
                 }
             }
-            if (p.id !== null && cfg.persist && mes.length <= cfg.persistMaxLen) {
-                storePersisted(p.id, { k: p.key, h: mes });
-                persistStats.stores++;
-            }
+            if (p.id !== null && cfg.persist && mes.length <= cfg.persistMaxLen) storePersisted(p.id, { k: p.key, h: mes });
         }
         return mes;
     }, { stage: mf.stage.AFTER_MARKDOWN, order: mf.order?.EARLIEST ?? 0 });
@@ -2187,35 +2116,33 @@ async function clearPersistedCache() {
 
 // ---- Report ----
 
-const INEFFECTIVE_RUNS = 20; // a script that ran this often without ever matching is a candidate to disable
+const INEFFECTIVE_RUNS = 20; // runs without a match that make a script a candidate to disable
 
-/** Milliseconds for display: an exact zero is "0", otherwise 2 / 1 / 0 decimals as the value grows. */
+/** Milliseconds for display: "0", else 2 / 1 / 0 decimals as the value grows. */
 const fmtMs = (x) => (x === 0 ? '0' : x.toFixed(x >= 100 ? 0 : x >= 10 ? 1 : 2));
 const avgMs = (r) => (r.calls ? r.totalMs / r.calls : 0);
-/** The prefilter's terms as text: literals joined by & must all occur, those joined by | need one ("a" & ("b" | "c")). */
+/** The prefilter's terms as text: "a" & ("b" | "c"). */
 const fmtNeedles = (r) => {
     const terms = r.needle?.terms;
     if (!terms?.length) return undefined;
     const q = (set) => set.map(s => JSON.stringify(s)).join(' | ');
     return terms.map(set => (set.length > 1 && terms.length > 1 ? `(${q(set)})` : q(set))).join(' & ');
 };
-// every call the prefilter, the memo or the streaming skip avoided would have cost the script's average run
+// each call ②, ③ or ④ avoided would have cost the script's average run
 const avoided = (r) => r.skipped + r.hits + r.streamSkipped;
 const savedMs = (r) => avoided(r) * avgMs(r);
 const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.matched;
-/** Conflicts in which r is the later script (the one whose match an earlier script removed). */
+/** Conflicts in which r is the later script. */
 const conflictsOf = (r) => [...conflicts.values()].filter(c => c.later === r);
 const conflictText = (c) => (c.confirmed
     ? t`"${c.earlier.name}" runs first and removes what "${c.later.name}" would have matched: ${c.count} times`
     : t`"${c.earlier.name}" runs first and removes the literal "${c.later.name}" looks for: ${c.count} times (match not verified on long inputs)`);
-/** The sample kept from a run over SPIKE_MS: how long the input was and how it started. */
 const spikeText = (sp) => t`Last spike: ${fmtMs(sp.ms)} ms on ${sp.len} characters, starting ${JSON.stringify(sp.head)}`;
-/** How many runs ⑥ replaced without SillyTavern's callback. */
 const fastText = (n) => t`⑥ fast path: ${n} runs without SillyTavern's callback`;
-/** A pattern the extension has seen do anything: rows that never ran nor were skipped are left out of the table. */
+/** Rows that never ran nor were skipped are left out of the table. */
 const active = (r) => r.calls + avoided(r) + r.bypass > 0;
 const badge = (text, title, cls = '', attrs = '') => ` <span class="rpk-badge${cls ? ' ' + cls : ''}"${attrs} title="${esc(title)}">${text}</span>`;
-/** The older spikes of a script, for the ⚡ tooltip, and where a click goes. */
+/** The older spikes, for the ⚡ tooltip, and where a click goes. */
 const spikeHistory = (r) => r.spikes.slice(1, 5).map(sp => '\n' + t`${fmtMs(sp.ms)} ms on ${sp.len} characters` + (sp.messageId != null ? ` (#${sp.messageId})` : '')).join('')
     + (r.spike?.messageId != null ? '\n' + t`Click to scroll to message #${r.spike.messageId}` : '');
 /** A row's warnings: words for the report, or badges for the panel. */
@@ -2237,18 +2164,22 @@ function buildSummary() {
     const rows = [...stats.values()].filter(active).sort((a, b) => b.totalMs - a.totalMs || avoided(b) - avoided(a));
     const sum = (key) => rows.reduce((acc, r) => acc + r[key], 0);
     const total = sum('totalMs');
+    const skipped = sum('skipped');
+    const hits = sum('hits');
+    const streamSkipped = sum('streamSkipped');
     const top = rows.find(r => r.calls > 0);
     const { chat } = ctx();
-    const persist = persistAvailable ? { entries: persistAcct.entries, bytes: persistAcct.bytes, dbRows: persistDbRows, dbBytes: persistDbBytes, maxMB: settings.persistDbMaxMB, loaded: persistLoaded, pending: persistPending.size + persistInFlight, available: !persistDbFailed } : null; // ⑤ storage
+    const persist = persistAvailable ? { entries: persistMem.size, bytes: persistMemBytes, dbRows: persistDbRows, dbBytes: persistDbBytes, maxMB: settings.persistDbMaxMB, loaded: persistLoaded, pending: persistPending.size + persistInFlight, available: !persistDbFailed } : null;
     return {
         counts,
         invalid,
         rows,
         total,
         calls: sum('calls'),
-        skipped: sum('skipped'),
-        hits: sum('hits'),
-        streamSkipped: sum('streamSkipped'),
+        skipped,
+        hits,
+        streamSkipped,
+        skips: skipped + hits + streamSkipped,
         bypass: sum('bypass'),
         fast: sum('fast'),
         saved: rows.reduce((acc, r) => acc + savedMs(r), 0),
@@ -2302,28 +2233,32 @@ function feelText(f) {
 
 // ---- ⑤ storage: IndexedDB ----
 
-// One row per displayed message: id = chat key + "\0" + the message's hash and length (the first two fields of its ⑤/⑨
-// key), value = {id, chat, k (the whole key), h | v | same, at, n (estimated bytes)}. The hooks are synchronous, so
-// a chat's rows are read into persistMem when the chat opens and the hooks look there only; stores go to the memory
-// copy at once and to IndexedDB in one transaction a moment later. Beyond persistDbMaxMB (all chats) the rows stored
-// longest ago go first. What older versions wrote into chat files (extra.regex_perf_cache) is still read, never written.
+// One row per displayed message: id = chat key + "\0" + the message's hash and length (the first two fields of its key),
+// value = {id, chat, k (the whole key), h | v | same, at, n (estimated bytes)}. The hooks are synchronous, so a chat's
+// rows are read into persistMem when it opens; stores reach memory at once and IndexedDB in one transaction a moment
+// later. Beyond persistDbMaxMB (all chats) the oldest rows go first. Older versions' extra.regex_perf_cache entries in
+// chat files are read, never written.
 const DB_NAME = 'regex_perf_kit';
 const DB_STORE = 'results';
 const FLUSH_MS = 200;
-let persistDb = null; // the open database (null until opened, or when IndexedDB is unavailable)
+let persistDb = null;
 let persistDbOpening = null; // the opening promise
 let persistDbFailed = false; // IndexedDB could not be opened in this browser
-let persistDbBytes = 0; // estimated size of every stored row, all chats (measured once at the first open, kept up to date)
+let persistDbBytes = 0; // estimated size of all rows, all chats (measured at the first open, kept up to date)
 let persistDbRows = 0;
-let persistChatKey = null; // the chat persistMem holds (character avatar or group id + chat id), null when no chat is open
+let persistChatKey = null; // the chat persistMem holds, null when no chat is open
 const persistMem = new Map(); // this chat's rows by id
-const persistAcct = { entries: 0, bytes: 0 }; // this chat
+let persistMemBytes = 0;
 const persistPending = new Map(); // rows waiting for the next flush, by id
 let persistFlushTimer = 0;
-let persistInFlight = 0; // rows of the flush that is running (the JSON's `pending` counts them, so a test can wait for the write)
+let persistInFlight = 0; // rows of the running flush (the JSON's `pending` counts them)
 let persistLoaded = true; // this chat's rows have been read (or there is nothing to read)
-let persistLastAt = 0; // `at` is strictly increasing, so rows stored in the same millisecond still age in order
-let persistLoadGen = 0; // bumped by every read and by "Clear saved results", so a read that a clear overtook puts nothing back
+let persistLastAt = 0; // `at` is strictly increasing, so rows of the same millisecond still age in order
+let persistLoadGen = 0; // bumped by every read and clear, so an overtaken read puts nothing back
+const countDb = (bytes, rows) => {
+    persistDbBytes += bytes;
+    persistDbRows += rows;
+};
 
 const idbDone = (req) => new Promise((ok, no) => { req.onsuccess = () => ok(req.result); req.onerror = () => no(req.error); });
 /** Walks a key cursor request; each(cursor) returning false stops the walk. */
@@ -2347,10 +2282,10 @@ function openPersistDb() {
             req.onupgradeneeded = () => {
                 const store = req.result.createObjectStore(DB_STORE, { keyPath: 'id' });
                 store.createIndex('chat', 'chat');
-                store.createIndex('age', ['at', 'n']); // a key cursor over it gives sizes oldest first without reading the rows
+                store.createIndex('age', ['at', 'n']); // a key cursor gives sizes oldest first without reading rows
             };
             const db = await idbDone(req);
-            db.onversionchange = () => { db.close(); persistDb = persistDbOpening = null; }; // opened again on the next use
+            db.onversionchange = () => { db.close(); persistDb = persistDbOpening = null; }; // reopened on the next use
             persistDb = db;
             await measurePersistDb(db);
             return db;
@@ -2363,10 +2298,7 @@ function openPersistDb() {
     return persistDbOpening;
 }
 
-/**
- * Sums the stored rows' sizes (from the index keys, not the rows) into persistDbBytes / persistDbRows. Rows stored but
- * not written yet (pending: the flush waits for this open) are added, since the scan cannot see them.
- */
+/** Sums the stored rows' sizes from the index keys, plus the rows still pending (the scan cannot see them). */
 async function measurePersistDb(db) {
     let bytes = 0;
     let rows = 0;
@@ -2382,33 +2314,33 @@ async function measurePersistDb(db) {
     statsDirty = true;
 }
 
-/** The current chat as ⑤ keys it, or null without an open chat. */
-function persistChatKeyNow() {
-    const { chatId, groupId, characterId, characters } = ctx();
+/** The current chat as ⑤ keys it (character avatar or group id + chat id), or null without an open chat. */
+function persistChatKeyNow(context = ctx()) {
+    const { chatId, groupId, characterId, characters } = context;
     if (!chatId) return null;
     return groupId ? `g:${groupId}:${chatId}` : `c:${characters?.[characterId]?.avatar ?? characterId}:${chatId}`;
 }
 
-/** ⑤'s row id for a message: the chat, then the message's hash and length (the first two fields of its key). */
+/** ⑤'s row id for a message: the chat, then the first two fields of its key. */
 function persistIdOf(key) {
     return persistChatKey + '\u0000' + key.slice(0, key.indexOf(':', key.indexOf(':') + 1));
 }
 
 /**
- * Reads the current chat's rows into persistMem; nothing to do while the chat is the one already read or being read.
- * Called at the first display pass of a chat (SillyTavern prints a chat before CHAT_CHANGED), when #chat is emptied for
- * the next chat (the rows are read while the chat file is fetched), at CHAT_CHANGED and once at start.
+ * Reads the current chat's rows into persistMem, unless that chat is already read or being read. Called at a chat's
+ * first display pass (SillyTavern prints a chat before CHAT_CHANGED), when #chat is emptied for the next chat, at
+ * CHAT_CHANGED and once at start.
  */
-function loadPersisted() {
-    const chatKey = persistChatKeyNow();
+function loadPersisted(context) {
+    const chatKey = persistChatKeyNow(context);
     if (chatKey === persistChatKey) return;
     persistChatKey = chatKey;
     persistMem.clear();
-    persistAcct.entries = persistAcct.bytes = 0;
+    persistMemBytes = 0;
     persistLoaded = chatKey === null;
     if (chatKey === null) return;
     const gen = ++persistLoadGen;
-    const stale = () => persistChatKey !== chatKey || gen !== persistLoadGen; // another chat opened, or the rows were cleared meanwhile
+    const stale = () => persistChatKey !== chatKey || gen !== persistLoadGen;
     (async () => {
         const db = await openPersistDb();
         if (stale()) return;
@@ -2417,14 +2349,12 @@ function loadPersisted() {
                 const rows = await idbDone(db.transaction(DB_STORE).objectStore(DB_STORE).index('chat').getAll(chatKey));
                 if (stale()) return;
                 for (const row of rows) {
-                    if (persistMem.has(row.id)) { // stored again while the read ran: the new row replaced this one in the database too
-                        persistDbBytes -= row.n;
-                        persistDbRows--;
+                    if (persistMem.has(row.id)) { // stored again during the read: the new row replaced it in the database
+                        countDb(-row.n, -1);
                         continue;
                     }
                     persistMem.set(row.id, row);
-                    persistAcct.entries++;
-                    persistAcct.bytes += row.n;
+                    persistMemBytes += row.n;
                 }
             } catch (e) { console.warn('[RegexPerf] ⑤ could not read the stored results', e); }
         }
@@ -2434,8 +2364,8 @@ function loadPersisted() {
 }
 
 /**
- * SillyTavern empties #chat (clearChat) and sets the next chat's id before it fetches and prints that chat: reading the
- * rows then lets them serve the first render, as far as IndexedDB answers before the chat file arrives.
+ * SillyTavern empties #chat and sets the next chat's id before it fetches and prints that chat: reading the rows then
+ * lets them serve the first render, as far as IndexedDB answers before the chat file arrives.
  */
 function watchChatClear() {
     const el = globalThis.document?.getElementById('chat');
@@ -2443,28 +2373,17 @@ function watchChatClear() {
     new MutationObserver(() => { if (!el.firstElementChild) setTimeout(loadPersisted, 0); }).observe(el, { childList: true });
 }
 
-/** Keeps a message's result: in the memory copy at once, in IndexedDB at the next flush. */
+/** Keeps a message's result: in memory at once, in IndexedDB at the next flush. */
 function storePersisted(id, fields) {
     const at = persistLastAt = Math.max(Date.now(), persistLastAt + 1);
     const row = { id, chat: persistChatKey, at, n: 0, ...fields };
     row.n = (id.length + row.k.length + (row.h?.length ?? 0) + (row.v?.length ?? 0) + 40) * 2;
     const old = persistMem.get(id);
-    if (old) {
-        persistAcct.entries--;
-        persistAcct.bytes -= old.n;
-    }
     persistMem.set(id, row);
-    persistAcct.entries++;
-    persistAcct.bytes += row.n;
-    if (!persistDbFailed) { // without IndexedDB the row stays in memory for the session and is never stored: not storage
-        if (old) {
-            persistDbBytes -= old.n;
-            persistDbRows--;
-        }
-        persistDbBytes += row.n;
-        persistDbRows++;
-    }
+    persistMemBytes += row.n - (old?.n ?? 0);
+    if (!persistDbFailed) countDb(row.n - (old?.n ?? 0), old ? 0 : 1); // without IndexedDB nothing is ever stored
     persistPending.set(id, row);
+    persistStats.stores++;
     if (!persistFlushTimer) persistFlushTimer = setTimeout(flushPersisted, FLUSH_MS);
 }
 
@@ -2472,11 +2391,8 @@ function storePersisted(id, fields) {
 async function flushPersisted() {
     persistFlushTimer = 0;
     const db = await openPersistDb();
-    if (!db) { // the rows were counted as storage before the open failed: they will never be written
-        for (const row of persistPending.values()) {
-            persistDbBytes -= row.n;
-            persistDbRows--;
-        }
+    if (!db) { // counted as storage before the open failed: never written
+        for (const row of persistPending.values()) countDb(-row.n, -1);
         persistPending.clear();
         statsDirty = true;
         return;
@@ -2509,13 +2425,11 @@ async function evictPersisted(db) {
         await eachKey(store.index('age').openKeyCursor(), (cur) => {
             if (persistDbBytes <= target) return false;
             store.delete(cur.primaryKey);
-            persistDbBytes -= cur.key[1];
-            persistDbRows--;
+            countDb(-cur.key[1], -1);
             const mine = persistMem.get(cur.primaryKey);
             if (mine && mine.at === cur.key[0]) { // a newer row in memory is pending and will be written again
                 persistMem.delete(cur.primaryKey);
-                persistAcct.entries--;
-                persistAcct.bytes -= mine.n;
+                persistMemBytes -= mine.n;
             }
         });
         await txDone(tx);
@@ -2529,13 +2443,10 @@ async function clearPersistedDb() {
     const wasLoaded = persistLoaded;
     persistLoadGen++; // a read still running puts nothing back
     persistLoaded = true;
-    for (const [id, row] of persistPending) if (row.chat === chatKey) persistPending.delete(id); // another chat's last rows may still be pending
-    if (!persistDbFailed) {
-        persistDbBytes -= persistAcct.bytes;
-        persistDbRows -= persistMem.size;
-    }
+    for (const [id, row] of persistPending) if (row.chat === chatKey) persistPending.delete(id); // another chat's rows may be pending too
+    if (!persistDbFailed) countDb(-persistMemBytes, -persistMem.size);
     persistMem.clear();
-    persistAcct.entries = persistAcct.bytes = 0;
+    persistMemBytes = 0;
     if (chatKey === null) return removed;
     const db = await openPersistDb();
     if (!db) return removed;
@@ -2544,23 +2455,22 @@ async function clearPersistedDb() {
         const store = tx.objectStore(DB_STORE);
         await eachKey(store.index('chat').openKeyCursor(IDBKeyRange.only(chatKey)), (cur) => { store.delete(cur.primaryKey); });
         await txDone(tx);
-        if (!wasLoaded) await measurePersistDb(db); // rows not read yet were deleted too: the estimate is re-measured
+        if (!wasLoaded) await measurePersistDb(db); // rows not read yet were deleted too
     } catch (e) { console.warn('[RegexPerf] ⑤ could not clear the stored results', e); }
     statsDirty = true;
     return removed;
 }
 
 let measured = null; // last "Measure on this chat" result
-const rowMeasures = new Map(); // stat -> {with, without}: per-row measurements of this session
+const rowMeasures = new Map(); // stat -> {with, without}
 
 const SLOWEST_MESSAGES = 5;
-/** "#12 (4321 chars) 85 ms, ..." for the slowest messages of a measurement. */
 const slowestText = (m) => t`Slowest messages (features off): ${m.slowest.map(x => t`#${x.i} (${x.len} chars) ${fmtMs(x.ms)} ms`).join(', ')}`;
 const measureText = (m) => t`This chat (${m.messages} messages): ${fmtMs(m.off)} ms with the features off, ${fmtMs(m.on)} ms on — ${fmtMs(m.off - m.on)} ms saved (${m.off > 0 ? Math.round((m.off - m.on) / m.off * 100) : 0}%)`;
 /** The table's columns, in the text report and the CSV. */
 const reportHeader = () => t`Rank | Script | Runs | Total ms | Avg ms | Max ms | Replacer ms | Matched | Changed | Skips | Hits | Stream skips | Literal | Min length | Warnings`;
 
-/** "global 3/40 · preset 2/8 · scoped 0/0": active/total per script origin. */
+/** "global 3/40, preset 2/8, scoped 0/0": active/total per script origin. */
 const typeCounts = (c) => {
     const [g, p, s] = ['global', 'preset', 'scoped'].map(k => c.types[k] ?? { active: 0, total: 0 });
     return [t`global ${g.active}/${g.total}`, t`preset ${p.active}/${p.total}`, t`scoped ${s.active}/${s.total}`].join(', ');
@@ -2569,14 +2479,13 @@ const typeCounts = (c) => {
 function buildReportText() {
     const s = buildSummary();
     const c = s.counts;
-    const skips = s.skipped + s.hits + s.streamSkipped;
     const lines = [
         `Regex Perf Kit report (${new Date().toLocaleString()})`,
         t`Since: ${new Date(statsSince).toLocaleTimeString()} / chat messages: ${s.chatLen}`,
         t`Scripts: ${c.total} total, ${c.active} active (${typeCounts(c)}), no literal ${c.noNeedle}, backtracking risk ${c.redos} (exponential ${c.redosExp})`,
-        t`Ran ${s.calls} times / ${fmtMs(s.total)} ms total | skipped ${skips} (prefilter ${s.skipped}, cache hits ${s.hits}, streaming ${s.streamSkipped}) | persistent cache bypasses ${s.bypass} (hits ${persistStats.hits}, stored ${persistStats.stores})`,
+        t`Ran ${s.calls} times / ${fmtMs(s.total)} ms total | skipped ${s.skips} (prefilter ${s.skipped}, cache hits ${s.hits}, streaming ${s.streamSkipped}) | persistent cache bypasses ${s.bypass} (hits ${persistStats.hits}, stored ${persistStats.stores})`,
         s.calls
-            ? t`Estimated time saved: ≈${fmtMs(s.saved)} ms (${skips} skipped runs × each script's average run time)`
+            ? t`Estimated time saved: ≈${fmtMs(s.saved)} ms (${s.skips} skipped runs × each script's average run time)`
             : t`Estimated time saved: not available yet (no measured runs)`,
         s.usage,
     ];
@@ -2684,10 +2593,7 @@ async function turnOffByName(name) {
 
 // ---- Lint and saving through the engine ----
 
-/**
- * Saves a change to the scripts with these ids through the engine (no Regex drawer involved) and re-reads the script
- * info; false when this SillyTavern cannot (no saveScriptsByType).
- */
+/** Saves a change to the scripts with these ids through the engine; false where SillyTavern lacks saveScriptsByType. */
 async function saveScript(ids, patch) {
     if (typeof engine.saveScriptsByType !== 'function' || typeof getScriptsByType !== 'function' || !SCRIPT_TYPES) return false;
     let saved = false;
@@ -2701,7 +2607,7 @@ async function saveScript(ids, patch) {
     return saved;
 }
 
-/** The lint findings for every active script: {rule, info, text, fix}, fix = {label, patch} where it is mechanical. */
+/** Lint findings for every active script: {rule, info, text, fix}, fix = {label, patch} where it is mechanical. */
 function lintRows() {
     if (!settings.lint) return [];
     const rows = [];
@@ -2741,7 +2647,7 @@ const LIST_IDS = ['saved_regex_scripts', 'saved_scoped_scripts', 'saved_preset_s
 const observedLists = new WeakSet();
 const statById = new Map(); // script id -> its stat, for the chips
 let chipTimer = 0;
-/** Watches the Regex drawer's lists (SillyTavern rebuilds them) once they exist; called from the refresh interval. */
+/** Watches the Regex drawer's lists (SillyTavern rebuilds them) once they exist. */
 function installListBadges() {
     for (const id of LIST_IDS) {
         const box = document.getElementById(id);
@@ -2796,21 +2702,17 @@ function updateListBadges() {
 }
 
 const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'incremental', 'seen', 'fused', 'broken', 'slowRuns', 'moreMatches', 'spike', 'spikes'];
-const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, htmlMemo: false, persist: false, fastPath: false, breaker: false, adaptive: false }; // what a measurement turns off
-
-const CACHES_OFF = { profiler: false, memo: false, htmlMemo: false, persist: false, breaker: false, adaptive: false }; // a per-row measurement keeps the prefilter as set
+const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, htmlMemo: false, persist: false, fastPath: false, breaker: false, adaptive: false };
+const CACHES_OFF = { profiler: false, memo: false, htmlMemo: false, persist: false, breaker: false, adaptive: false }; // per row: ② as set
 
 const MEASURE_CHUNK = 10; // messages formatted between two yields to the page
-let measureBusy = false; // a measurement is running (it yields, so other code runs in between)
+let measureBusy = false;
 
 /**
- * Renders every message of the current chat as SillyTavern displays it (messageFormatting), first with the
- * prefilter, the memo and ⑤ off, then with the user's settings, and returns both times. With a stat, both passes
- * run with the caches off, the second one without that pattern: {with, without}. The chat was rendered when it
- * opened, so this is a re-render, as on swipes, edits and reloads. Chunked: every MEASURE_CHUNK
- * messages it yields to the page, so the page stays usable. The features are turned off through cfg only while a
- * message is being formatted, so a render that happens in between gets the user's settings and nothing temporary can
- * be saved; the stats are restored afterwards.
+ * Re-renders every message of the current chat as SillyTavern displays it, first with the features off, then with the
+ * user's settings, and returns both times. With a stat, both passes run with the caches off and the second without
+ * that pattern: {with, without}. Yields every MEASURE_CHUNK messages; the features are off through cfg only while a
+ * message is formatted, so renders in between get the user's settings, and the stats are restored afterwards.
  */
 async function measureChat(without = null) {
     const { chat, messageFormatting } = ctx();
@@ -2819,13 +2721,13 @@ async function measureChat(without = null) {
     const pause = () => globalThis.scheduler?.yield?.() ?? new Promise(resolve => setTimeout(resolve, 0));
     const over = (changes) => Object.assign(Object.create(settings), changes);
     const stageSnap = () => [pipe.regexMs, pipe.markdownMs, pipe.sanitizeMs, pipe.htmlHitMs, pipe.htmlHits, pipe.hookMs];
-    const render = async (times, skip, config) => { // times: per-message {i, len, ms} are pushed when given
+    const render = async (times, skip, config) => { // times: receives per-message {i, len, ms}
         let total = 0;
         const before = stageSnap();
-        let over16 = 0; // messages that took more than a frame on their own
+        let over16 = 0; // messages over a frame on their own
         for (let i = 0; i < chat.length; i++) {
             const m = chat[i];
-            const text = m?.extra?.display_text ?? m?.mes; // what SillyTavern shows (a translation, for one)
+            const text = m?.extra?.display_text ?? m?.mes; // what SillyTavern shows (a translation, say)
             cfg = config;
             skipStat = skip;
             const t1 = performance.now();
@@ -2856,11 +2758,11 @@ async function measureChat(without = null) {
     const savedLight = adaptiveLight;
     const times = [];
     let first, second;
-    const span = [performance.now(), Infinity]; // long tasks that start in here are the measurement's, see inMeasurement()
+    const span = [performance.now(), Infinity]; // see inMeasurement()
     measureSpans.push(span);
     if (measureSpans.length > MEASURE_SPANS_KEPT) measureSpans.shift();
     try {
-        first = await render(without ? null : times, null, over(without ? CACHES_OFF : FEATURES_OFF)); // the raw cost of each message
+        first = await render(without ? null : times, null, over(without ? CACHES_OFF : FEATURES_OFF));
         second = await render(null, without, over(without ? CACHES_OFF : { profiler: false, adaptive: false }));
     } finally {
         span[1] = performance.now();
@@ -2877,36 +2779,34 @@ async function measureChat(without = null) {
     if (without) return { with: first.total, without: second.total };
     return {
         messages: chat.length, off: first.total, on: second.total, slowest: times.sort((a, b) => b.ms - a.ms).slice(0, SLOWEST_MESSAGES),
-        over16: { off: first.over16, on: second.over16 }, // messages over a frame budget each: what shows as a hitch
+        over16: { off: first.over16, on: second.over16 },
         stages: first.stages && second.stages ? { off: first.stages, on: second.stages } : null,
     };
 }
 
 /**
- * The verdict of a measurement, in words a user can act on: whether the saving can be felt (a render under a frame,
- * fewer messages over a frame), what the regex stage is as a share of the render, and what to change when it is not
- * the cost (SillyTavern's own settings).
+ * A measurement's verdict in words a user can act on: whether the saving can be felt, the regex stage's share of the
+ * render, and SillyTavern's own settings when regex is not the cost.
  */
 export function measureVerdict(m) {
     const savedMs = m.off - m.on;
     const share = m.off > 0 ? savedMs / m.off : 0;
     const perMsg = m.messages ? m.on / m.messages : 0;
     const lines = [];
-    let regexShare = null; // the regex stage's share of the render with the features off (what ②③④⑥ can save at most)
+    let regexPart = null; // the regex stage's share with the features off: what ②③④⑥ can save at most
     if (m.stages) {
         const s = m.stages.off;
         const total = s.regex + s.markdown + s.sanitize + s.hook;
         if (total > 0) {
-            regexShare = s.regex / total;
-            lines.push(t`Of the render with the features off, the regex stage was ${Math.round(s.regex / total * 100)}%, markdown ${Math.round(s.markdown / total * 100)}%, sanitizing ${Math.round(s.sanitize / total * 100)}%.`);
+            regexPart = s.regex / total;
+            lines.push(t`Of the render with the features off, the regex stage was ${Math.round(regexPart * 100)}%, markdown ${Math.round(s.markdown / total * 100)}%, sanitizing ${Math.round(s.sanitize / total * 100)}%.`);
         }
     }
     if (m.over16) lines.push(t`Messages over a frame (${Math.round(FRAME_BUDGET_MS)} ms) on their own: ${m.over16.off} → ${m.over16.on}.`);
     const sameOver16 = m.over16?.on === m.over16?.off;
     const unfelt = savedMs < FRAME_BUDGET_MS && sameOver16;
-    // The saved time of two renders a few ms apart is noise; the stage split is not: when the regex stage was a
-    // negligible share and no message crossed a frame either way, the saving (if any) came from ⑨, not from regex.
-    const negligible = regexShare !== null && regexShare < ADAPTIVE_SHARE && sameOver16;
+    // A saving of a few ms is noise, the stage split is not: with a negligible regex share, any saving came from ⑨.
+    const negligible = regexPart !== null && regexPart < ADAPTIVE_SHARE && sameOver16;
     if (unfelt) {
         lines.push(t`The saving is under one frame for the whole chat: nothing a user can feel here. The extension costs nothing either; the profiler is what remains useful.`);
     } else if (share < 0.1 && perMsg > FRAME_BUDGET_MS) {
@@ -2914,14 +2814,14 @@ export function measureVerdict(m) {
     } else if (negligible) {
         lines.push(t`The regex stage was under 2% of the render with the features off: ②③④⑥ have little to save here; what was saved came from ⑨.`);
     }
-    // With an unfelt saving the share is noise on a fast machine (a few ms either way), so the settings hint goes with it.
+    // an unfelt saving makes the share noise, so the settings hint goes with it
     if (unfelt || negligible || perMsg > FRAME_BUDGET_MS || share < 0.1) {
         lines.push(t`What helps more: User Settings → "# Messages to Load" at 50–100 (fewer renders when a chat opens) and "Streaming FPS" at 10–15 (fewer renders while streaming).`);
     }
     return lines;
 }
 
-/** "Measure on this chat": the new result, kept as the last one (an empty chat leaves the previous result). */
+/** "Measure on this chat" (an empty chat keeps the previous result). */
 async function measureNow() {
     measured = (await measureChat()) ?? measured;
     renderPanel();
@@ -2943,9 +2843,8 @@ function resetStats() {
 
 // ---- UI ----
 
-// UI text is English; locales/<locale>.json holds the translations (ko-kr today), loaded before the panel is built.
-// addLocaleData() never overrides SillyTavern's own translations, so a key SillyTavern already translates differently
-// gets its own id (translate(text, id)).
+// UI text is English; locales/<locale>.json holds the translations, loaded before the panel is built. addLocaleData()
+// never overrides SillyTavern's own translations, so a key it translates differently gets its own id (translate(text, id)).
 const LOCALES = ['ko-kr'];
 const locale = getCurrentLocale();
 const localeFile = LOCALES.find(l => l === locale) ?? LOCALES.find(l => l.split('-')[0] === locale.split('-')[0]);
@@ -2962,10 +2861,10 @@ const feature = (id, name, desc, { labelId = '', sub = false } = {}) => `
           <span class="rpk-feature-text"><span class="rpk-feature-name">${name}</span><span class="rpk-feature-desc">${desc}</span></span>
         </label>`;
 
-/** A row of the Limits grid: a number field for LIMITS[key] or a checkbox for TOGGLES; bindUi() finds it as #rpk_<key>. */
+/** A row of the Limits grid: a number field for LIMITS[key] or a checkbox for TOGGLES, as #rpk_<key>. */
 const limit = (key, name, title, type = 'number') => `<label${title ? ` title="${esc(title)}"` : ''}><span>${name}</span><input type="${type}"${type === 'number' ? ' class="text_pole"' : ''} id="rpk_${key}"></label>`;
 
-// Sorting and the name filter are per session (not saved). Clicking a header sorts by it, again flips the direction.
+// Sorting and the name filter are per session (not saved).
 const SORT_KEYS = {
     rank: (r, i) => i, name: (r) => r.name.toLowerCase(), runs: (r) => r.calls, total: (r) => r.totalMs, avg: avgMs, max: (r) => r.maxMs,
     repl: (r) => r.replMs, matched: (r) => r.matched, changed: (r) => r.changed, skips: (r) => r.skipped, hits: (r) => r.hits, lit: (r) => fmtNeedles(r) ?? '',
@@ -2974,7 +2873,7 @@ let sortBy = null;
 let sortDesc = true;
 let nameFilter = '';
 
-// Table cells carry a column class (the narrow layout pins the Script column, the tests read cells by it); headers explain themselves on hover.
+// Cells carry a column class (the narrow layout pins the Script column; tests read cells by it).
 const th = (col, text, title) => `<th class="rpk-col-${col}${SORT_KEYS[col] ? ' rpk-sortable' : ''}${sortBy === col ? ' rpk-sorted' : ''}" data-col="${col}"${title ? ` title="${esc(title)}"` : ''}>${text}${sortBy === col ? (sortDesc ? ' ▾' : ' ▴') : ''}</th>`;
 const td = (col, value, cls = '', title = '') => `<td class="rpk-col-${col}${cls ? ' ' + cls : ''}"${title ? ` title="${esc(title)}"` : ''}>${value}</td>`;
 
@@ -3101,21 +3000,21 @@ const settingsHtml = () => `
 </div>`;
 
 const TOGGLES = { rpk_profiler: 'profiler', rpk_profilerSampling: 'profilerSampling', rpk_timeReplacer: 'timeReplacer', rpk_adaptive: 'adaptive', rpk_frameStats: 'frameStats', rpk_prefilter: 'prefilter', rpk_memo: 'memo', rpk_memoStatic: 'memoStatic', rpk_memoPostHoc: 'memoPostHoc', rpk_fastPath: 'fastPath', rpk_fastPathStatic: 'fastPathStatic', rpk_htmlMemo: 'htmlMemo', rpk_streaming: 'streamingSkip', rpk_stream_throttle: 'streamingThrottle', rpk_streamingIncremental: 'streamingIncremental', rpk_streamingParagraphCache: 'streamingParagraphCache', rpk_persist: 'persist', rpk_fuse: 'fuse', rpk_breaker: 'breaker', rpk_memoHashKeys: 'memoHashKeys', rpk_autoMeasure: 'autoMeasure', rpk_lint: 'lint', rpk_listBadges: 'listBadges' };
-// editable limits: setting -> [min, max]
+// setting -> [min, max]
 const LIMITS = { memoMaxEntries: [0, 1e6], memoMaxLen: [0, 1e7], memoMaxMB: [0, 4096], htmlMemoMaxEntries: [0, 1e6], htmlMemoMaxMB: [0, 4096], persistMaxLen: [0, 1e8], persistDbMaxMB: [1, 4096], streamingThrottleMs: [50, 60000], fuseLen: [1000, 1e7], breakerMs: [50, 60000], breakerCount: [1, 100], loadHintMs: [100, 600000] };
 
-const RENDER_MIN_MS = 500; // the panel is re-rendered at most this often while stats keep changing
+const RENDER_MIN_MS = 500; // the panel re-renders at most this often
 let ui = null; // panel elements, cached by bindUi()
 const rendered = new WeakMap();
 
-/** Assigns el[prop] only when the value changed, so periodic refreshes leave an unchanged panel alone. */
+/** Assigns el[prop] only when the value changed. */
 function setContent(el, value, prop = 'innerHTML') {
     if (rendered.get(el) === value) return;
     rendered.set(el, value);
     el[prop] = value;
 }
 
-/** The Literal cell's tooltip: why there is no literal (lit = fmtNeedles(r)), and the shortest possible match. */
+/** The Literal cell's tooltip: why there is no literal, and the shortest possible match. */
 const litTitle = (r, lit) => [
     !lit && needleReason(r),
     r.needle?.minLen && t`Shortest possible match: ${r.needle.minLen} characters. ② skips shorter messages.`,
@@ -3123,7 +3022,7 @@ const litTitle = (r, lit) => [
 /** A key figure in the summary; the tests read it by its key. */
 const fig = (key, value) => `<b data-k="${key}">${value}</b>`;
 
-/** The display pipeline as a stacked bar: regex | markdown | sanitize, with their shares; empty until something was timed. */
+/** The display pipeline as a stacked bar; empty until something was timed. */
 function pipeBarHtml(p) {
     if (!p.available || !p.full || p.totalMs <= 0) return '';
     const seg = (cls, pct, ms, label) => `<span class="rpk-pipe-seg rpk-pipe-${cls}" style="width:${pct}%" title="${esc(`${label}: ${fmtMs(ms)} ms (${pct}%)`)}" data-k="pipe-${cls}" data-pct="${pct}">${pct >= 12 ? `${esc(label)} ${pct}%` : ''}</span>`;
@@ -3135,20 +3034,19 @@ function renderPanel() {
     if (!ui) return;
     const s = buildSummary();
     const c = s.counts;
-    const skips = s.skipped + s.hits + s.streamSkipped;
     const lines = [];
     lines.push(t`${c.active} of ${c.total} scripts active (${typeCounts(c)}). ${s.chatLen} messages in this chat.`);
     if (c.noNeedle || c.redos) {
         lines.push(`<span class="rpk-dim">${t`Patterns to look at: no fixed text ${c.noNeedle}, backtracking risk ${c.redos} (exponential ${c.redosExp}).`}</span>`);
     }
     const breakdown = t`prefilter ${s.skipped}, cache ${s.hits}, streaming ${s.streamSkipped}` + (persistAvailable ? ', ' + t`saved results ${s.bypass}` : '');
-    if (!s.calls && !skips && !s.bypass) {
+    if (!s.calls && !s.skips && !s.bypass) {
         lines.push(`<span class="rpk-dim">${t`No runs measured yet. Render a message or reopen the chat.`}</span>`);
     } else {
         lines.push(t`Regex ran ${fig('runs', s.calls)} times, ${fig('ms', fmtMs(s.total) + ' ms')} in total.`);
         lines.push(s.calls
-            ? t`${fig('skipped', skips + s.bypass)} runs were skipped (${breakdown}), saving about ${fig('saved', fmtMs(s.saved) + ' ms')}.`
-            : t`${fig('skipped', skips + s.bypass)} runs were skipped (${breakdown}). The time saved is known once some runs have been measured.`);
+            ? t`${fig('skipped', s.skips + s.bypass)} runs were skipped (${breakdown}), saving about ${fig('saved', fmtMs(s.saved) + ' ms')}.`
+            : t`${fig('skipped', s.skips + s.bypass)} runs were skipped (${breakdown}). The time saved is known once some runs have been measured.`);
         if (s.fast) lines.push(`<span class="rpk-dim">${fastText(s.fast)}</span>`);
     }
     if (s.pipe.available && s.pipe.full) {
@@ -3221,9 +3119,8 @@ function renderPanel() {
 }
 
 /**
- * Turning a script off goes through the engine (saveScriptsByType); opening it in the editor
- * has no API, so the Regex drawer's own list is used: each script row has the script's id and an .edit_existing_regex
- * button (and a .regex-toggle-on switch, the fallback for turning it off on an engine without saveScriptsByType).
+ * Turns a script off through the engine, or opens it in the editor. Opening has no API, so the Regex drawer's rows are
+ * used (id = the script's, .edit_existing_regex), as is their .regex-toggle-on switch without saveScriptsByType.
  */
 async function scriptAction(r, off) {
     if (!off || !await saveScript(r.ids, { disabled: true })) {
@@ -3255,12 +3152,12 @@ function bindUi() {
         const el = find('#' + id);
         el.addEventListener('change', () => {
             settings[key] = el.checked;
-            ctx().saveSettingsDebounced();
+            saveSettingsDebounced();
             if ((key === 'memo' && !el.checked) || key === 'memoHashKeys') clearMemo(); // entries keyed the other way are useless
             if (key === 'htmlMemo' && !el.checked) htmlMemo.clear();
             if (key === 'breaker' && !el.checked) for (const s of stats.values()) if (s.tripped) untrip(s); // off: nothing stays skipped
-            if (key === 'frameStats' && !el.checked) resetFeel(); // off: the figures leave the summary instead of standing still
-            if (key === 'listBadges') updateListBadges(); // off: the chips leave the Regex list at once, not at its next rebuild
+            if (key === 'frameStats' && !el.checked) resetFeel(); // off: the figures leave the summary
+            if (key === 'listBadges') updateListBadges(); // off: the chips leave at once, not at the list's next rebuild
             renderPanel();
         });
     }
@@ -3274,7 +3171,7 @@ function bindUi() {
             const v = Number(el.value);
             if (el.value.trim() !== '' && Number.isFinite(v)) settings[key] = Math.min(max, Math.max(min, Math.round(v)));
             el.value = settings[key];
-            ctx().saveSettingsDebounced();
+            saveSettingsDebounced();
             trimMemo();
             htmlMemo.trim(settings.htmlMemoMaxEntries, settings.htmlMemoMaxMB * 1048576);
             if (key === 'persistDbMaxMB' && !persistFlushTimer) persistFlushTimer = setTimeout(flushPersisted, 0); // evicts beyond the new limit
@@ -3292,7 +3189,7 @@ function bindUi() {
         d.addEventListener('toggle', () => {
             if (uiState[name] === d.open) return;
             uiState[name] = d.open;
-            ctx().saveSettingsDebounced();
+            saveSettingsDebounced();
         });
     }
 
@@ -3301,7 +3198,7 @@ function bindUi() {
         syncControls();
         clearMemo();
         htmlMemo.clear();
-        ctx().saveSettingsDebounced();
+        saveSettingsDebounced();
         renderPanel();
         toastr.info(t`Settings restored to their defaults.`);
     });
@@ -3315,7 +3212,7 @@ function bindUi() {
         toastr.info(t`Removed ${n} persistent cache entries.`);
         renderPanel();
     });
-    /** Runs fn (a measurement) after the toast had a moment to paint; not during a stream, not twice at a time. */
+    /** Runs a measurement after the toast had a moment to paint; not during a stream, not twice at a time. */
     const measuring = async (fn) => {
         if (liveStream()) {
             toastr.warning(t`Wait until the generation finishes.`);
@@ -3373,8 +3270,8 @@ function bindUi() {
         }
     });
 
-    // auto-refresh: when the stats changed, on the next frame, at most every RENDER_MIN_MS, only while the drawer is open;
-    // the cost chips in the Regex drawer's lists follow the same beat
+    // auto-refresh when the stats changed, at most every RENDER_MIN_MS, only while the drawer is open; the cost chips
+    // follow the same beat
     const content = find('.inline-drawer-content');
     setInterval(() => {
         installListBadges();
@@ -3450,13 +3347,13 @@ for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPE
     eventSource.on(event, () => {
         generating = false;
         clearStreamCaches();
-        for (const w of wrapped.values()) w._meta?.inc.clear(); // ④ incremental state holds the streamed text
+        for (const w of wrapped.values()) w._meta?.inc.clear(); // ④ holds the streamed text
         rerenderSkipped();
     });
 }
 /**
- * ④: a stream that ended in an error has no final render (onErrorStreaming only stops it), so the message would keep
- * the raw text its live renders showed. Rendered once more, after the generation's own clean-up.
+ * ④: a stream that ended in an error has no final render, so the message would keep its raw live text: rendered once
+ * more, after the generation's own clean-up.
  */
 function rerenderSkipped() {
     const id = streamSkippedMsg;
@@ -3464,8 +3361,8 @@ function rerenderSkipped() {
     setTimeout(() => {
         if (streamSkippedMsg !== id) return; // its final render came after all
         streamSkippedMsg = null;
-        const { chat } = ctx();
-        const update = ctx().updateMessageBlock ?? st.updateMessageBlock;
+        const { chat, updateMessageBlock } = ctx();
+        const update = updateMessageBlock ?? st.updateMessageBlock;
         if (chat?.[id] && typeof update === 'function') {
             try { update(id, chat[id]); } catch (e) { console.warn('[RegexPerf] ④ could not render the stopped message again', e); }
         }
@@ -3479,10 +3376,11 @@ for (const event of [event_types.CHARACTER_MESSAGE_RENDERED, event_types.USER_ME
 eventSource.on(event_types.CHAT_CHANGED, () => {
     markDirty();
     clearStreamCaches();
-    loadPersisted();
-    chatLen = ctx().chat?.length ?? 0;
+    const context = ctx();
+    loadPersisted(context);
+    chatLen = context.chat?.length ?? 0;
     const now = performance.now();
-    // the render burst that just ended: display passes where the hooks time them, else the profiled regex calls
+    // the render burst that just ended: timed display passes, else profiled regex calls
     const [burstEnd, burstFrom] = htmlStageAvailable ? [passLastEnd, passBurstStart] : [lastCall, burstStart];
     const loadMs = now - burstEnd < BURST_GAP_MS ? burstEnd - burstFrom : 0;
     pipe.loadMs = loadMs;
@@ -3496,10 +3394,10 @@ eventSource.on(event_types.CHAT_CHANGED, () => {
         }, 500);
     }
 });
-// ⑤ the last renders before the tab closes or goes to the background: best effort, a transaction started here usually
-// completes, but a tab killed at once can lose the rows of the last 200 ms
-globalThis.addEventListener?.('pagehide', () => { if (persistPending.size) flushPersisted(); });
-globalThis.document?.addEventListener?.('visibilitychange', () => { if (document.visibilityState === 'hidden' && persistPending.size) flushPersisted(); });
+// ⑤ best effort before the tab closes or hides: a tab killed at once can lose the last 200 ms of rows
+const flushNow = () => { if (persistPending.size) flushPersisted(); };
+globalThis.addEventListener?.('pagehide', flushNow);
+globalThis.document?.addEventListener?.('visibilitychange', () => { if (document.visibilityState === 'hidden') flushNow(); });
 eventSource.on(event_types.SETTINGS_UPDATED, markDirty);
 if (event_types.PRESET_CHANGED) eventSource.on(event_types.PRESET_CHANGED, markDirty);
 eventSource.on(event_types.APP_READY, () => {
@@ -3513,7 +3411,7 @@ eventSource.on(event_types.APP_READY, () => {
         if (container) {
             container.insertAdjacentHTML('beforeend', settingsHtml());
             bindUi();
-            document.addEventListener('click', onTripControl); // ⑧ Undo / Open script, in toasts and in the table
+            document.addEventListener('click', onTripControl); // ⑧ Undo / Open script, in toasts and the table
             renderPanel();
         }
     } catch (e) { console.warn('[RegexPerf] UI init failed', e); }
