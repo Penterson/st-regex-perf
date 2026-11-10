@@ -40,9 +40,14 @@
     font-variant-numeric: tabular-nums;
 }
 
-/* ---- the display pipeline: one stacked bar, regex | markdown | sanitize ---- */
+.regex-perf-kit .rpk-since {
+    font-size: 0.85em;
+}
 
-.regex-perf-kit .rpk-pipe:empty {
+/* ---- the display pipeline: one stacked bar, regex | markdown | sanitize | cache lookups ---- */
+
+.regex-perf-kit .rpk-pipe:empty,
+.regex-perf-kit .rpk-note:empty {
     display: none;
 }
 
@@ -87,14 +92,6 @@
 .regex-perf-kit .rpk-pipe-legend {
     margin-top: 2px;
     font-size: 0.9em;
-}
-
-.regex-perf-kit .rpk-measured .rpk-verdict {
-    opacity: 0.85;
-}
-
-.regex-perf-kit .rpk-since {
-    font-size: 0.85em;
 }
 
 /* ---- sections ---- */
@@ -168,10 +165,6 @@
     margin: 8px 0 0;
 }
 
-.regex-perf-kit .rpk-note:empty {
-    display: none;
-}
-
 /* ---- limits ---- */
 
 .regex-perf-kit .rpk-limits {
@@ -230,12 +223,17 @@
     opacity: 0.8;
 }
 
-.regex-perf-kit .rpk-measured:not(:empty) {
+/* full strength, unlike other notes */
+.regex-perf-kit .rpk-measured {
     opacity: 1;
 }
 
 .regex-perf-kit .rpk-measured p {
     margin: 0 0 2px;
+}
+
+.regex-perf-kit .rpk-measured .rpk-verdict {
+    opacity: 0.85;
 }
 
 /* ---- table ---- */
