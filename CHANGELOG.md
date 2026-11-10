@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Lean pass (no change in behavior)
+
+- Shared helpers where two copies existed: one parse-or-bail wrapper for `analyzeRedos()` and `isLineLocal()` (`tryParse`), one builder for ⑥'s pattern-level and per-value-set fast paths (`fastOf`), and one counter helper for ⑤'s storage accounting. The converter wrapper lives in `ensureShowdownWrapped()` alone, and ⑤'s per-chat entry counter is gone (it always equalled the row map's size).
+- The BEFORE_REGEX hook reads `getContext()` once per message instead of four or five times (SillyTavern builds an object of about 200 properties on each call); `saveSettingsDebounced` is read once at load.
+- About a sixth fewer comment lines: repeated and obsolete ones out, and the pipeline note now says four timed parts instead of three.
+- READMEs: the MessageFormatter requirement is stated once (Install), the two caveats about other extensions' hooks are one, the paragraph-cache notes sit together, and the pre-0.5.3 settings note lives in this changelog only.
+- `docs/` screenshots recompressed losslessly (2.3 MB → 1.4 MB, pixel-identical); one redundant CSS declaration removed (`td.rpk-empty` already gets its opacity from `.rpk-dim`).
+
 ## 0.5.4 — 2026-11-07
 
 Why this release: an audit of 0.5.3 against the code, the READMEs and SillyTavern's pinned sources. One user-visible defect, one flaky test with a logic gap behind it, and small inconsistencies; each fixed, with a test where one fits.
