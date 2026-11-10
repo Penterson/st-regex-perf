@@ -34,6 +34,22 @@ export async function useScripts(h, scripts) {
 const msg = (mes, props = {}) => ({ name: 'Char', is_user: false, is_system: false, mes, extra: {}, ...props });
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
+/**
+ * A generation as SillyTavern's Generate() starts one: GENERATION_STARTED, its slash commands, GENERATION_AFTER_COMMANDS,
+ * then (not for a dry run) deactivateSendButtons() marks the page with body[data-generating].
+ */
+export async function generationStart(h, type = 'normal', dryRun = false) {
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, type, {}, dryRun);
+    await h.eventSource.emit(h.event_types.GENERATION_AFTER_COMMANDS, type, {}, dryRun);
+    if (!dryRun) document.body.dataset.generating = 'true';
+}
+/** Its end: GENERATION_ENDED (or GENERATION_STOPPED), and activateSendButtons() takes the mark off the page. */
+export async function generationEnd(h, event = 'GENERATION_ENDED', ...args) {
+    const emitted = h.eventSource.emit(h.event_types[event], ...args);
+    delete document.body.dataset.generating;
+    await emitted;
+}
+
 /** The extension's panel (null without the extension), refreshed first when asked, so it shows the current stats. */
 function panel(refresh = false) {
     const root = document.getElementById('regex_perf_kit');
@@ -124,7 +140,7 @@ export async function equivalence(h, { profile }) {
     const last = chat.length - 1;
     const full = chat[last].mes;
     const sp = { messageId: last, isFinished: false, isStopped: false };
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'swipe', {}, false);
+    await generationStart(h, 'swipe');
     h.st.setState({ streamingProcessor: sp });
     for (let n = 7; n < full.length; n += 13) {
         chat[last].mes = full.slice(0, n);
@@ -135,7 +151,7 @@ export async function equivalence(h, { profile }) {
     chat[last].mes = full;
     rec('stream final', h.st.messageFormatting(full, chat[last].name, false, false, last));
     h.st.setState({ streamingProcessor: null });
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, chat.length);
+    await generationEnd(h, 'GENERATION_ENDED', chat.length);
     renderAll(h, rec, 'after stream');
     return { records: out, nativeReplaces: counted.stop() };
 }
@@ -257,11 +273,11 @@ export async function escapedSubst(h) {
     const second = executionsBySource(display)[source] ?? 0;
     // Unknown patterns (compiled outside any script) still get a needle; the literal column must show it.
     'xx abc yy'.replace(h.engine.RegexProvider.instance.get('/abc/g'), 'z');
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     h.st.setState({ streamingProcessor: { messageId: 0, isFinished: false, isStopped: false } });
     const live = display();
     h.st.setState({ streamingProcessor: null });
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    await generationEnd(h, 'GENERATION_ENDED', 1);
     return { first, second, live, report: await report(h) };
 }
 
@@ -363,9 +379,9 @@ export async function streamingCheck(h) {
     const r = {};
     display(); // builds the script info once after the chat change
     [r.idle, r.idleContexts] = contexts(display);
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, true); // a dry run never streams
+    await generationStart(h, 'normal', true); // a dry run never streams
     [r.dryRun, r.dryRunContexts] = contexts(display);
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     h.st.setState({ streamingProcessor: { messageId: 0, isFinished: false, isStopped: false } });
     r.live = display();
     h.st.streamingProcessor.isFinished = true;
@@ -373,7 +389,7 @@ export async function streamingCheck(h) {
     // An aborted stream can leave a processor that is neither finished nor stopped; once the generation has
     // ended, display scripts must still apply.
     h.st.streamingProcessor.isFinished = false;
-    await h.eventSource.emit(h.event_types.GENERATION_STOPPED);
+    await generationEnd(h, 'GENERATION_STOPPED');
     r.afterStop = display();
     return r;
 }
@@ -389,11 +405,11 @@ export async function sharedPattern(h) {
     ]);
     const mes = 'A <thinking>x</thinking> B';
     const out = [h.engine.getRegexedString(mes, P.AI, { isPrompt: true }), h.engine.getRegexedString(mes, P.AI, { isMarkdown: true })];
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     h.st.setState({ streamingProcessor: { messageId: 0, isFinished: false, isStopped: false } });
     out.push(h.engine.getRegexedString('foo', P.AI)); // what cleanUpMessage() runs on every streamed chunk
     h.st.setState({ streamingProcessor: null });
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    await generationEnd(h, 'GENERATION_ENDED', 1);
     return out;
 }
 
@@ -883,7 +899,7 @@ export async function streamThrottle(h, { throttle }) {
     const ticks = [[0, 'A **one**\nB **t'], [100, 'A **one**\nB **two**\nC **th'], [600, 'A **one**\nB **two**\nC **three**\nD **f'], [700, 'A **one**\nB **two**\nC **three**\nD **fou']];
     const out = [];
     try {
-        await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+        await generationStart(h);
         const sp = { messageId: 0, isFinished: false, isStopped: false };
         h.st.setState({ streamingProcessor: sp });
         for (const [at, text] of ticks) {
@@ -898,7 +914,7 @@ export async function streamThrottle(h, { throttle }) {
         h.st.chat[0].mes = final;
         out.push(h.st.messageFormatting(final, 'Char', false, false, 0));
         h.st.setState({ streamingProcessor: null });
-        await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+        await generationEnd(h, 'GENERATION_ENDED', 1);
     } finally {
         performance.now = realNow;
     }
@@ -1011,11 +1027,11 @@ export async function dynamicFind(h) {
     const render = () => h.st.messageFormatting(h.st.chat[0].mes, h.st.chat[0].name, false, false, 0);
     const outs = [];
     for (let i = 0; i < 6; i++) outs.push(render());
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     h.st.setState({ streamingProcessor: { messageId: 0, isFinished: false, isStopped: false } });
     const live = render();
     h.st.setState({ streamingProcessor: null });
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    await generationEnd(h, 'GENERATION_ENDED', 1);
     const json = h.commands.regexperf ? JSON.parse(await h.commands.regexperf.callback({}, 'json')) : null;
     return { outs, live, report: await report(h), rows: json?.rows.map(r => ({ name: r.name, runs: r.runs, hits: r.hits, streamSkips: r.streamSkips })) ?? [] };
 }
@@ -1675,7 +1691,7 @@ export async function streamIncremental(h, { incremental }) {
     const sources = Object.fromEntries([['Bold', bold], ['Who', who], ['Block', block]].map(([k, s]) => [k, h.engine.RegexProvider.instance.get(s.findRegex).source]));
     const outs = [];
     const runs = [];
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     const sp = { messageId: 0, isFinished: false, isStopped: false };
     h.st.setState({ streamingProcessor: sp });
     for (let n = 1; n <= lines.length; n++) {
@@ -1689,7 +1705,7 @@ export async function streamIncremental(h, { incremental }) {
     h.st.chat[0].mes = final;
     const finalOut = h.st.messageFormatting(final, 'Cat', false, false, 0);
     h.st.setState({ streamingProcessor: null });
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    await generationEnd(h, 'GENERATION_ENDED', 1);
     const j = await json(h);
     return { outs, runs, finalOut, incrementalRuns: Object.fromEntries(j?.rows.map(r => [r.name, r.incrementalRuns]) ?? []), warnings: h.warnings.filter(w => w.includes('incremental')) };
 }
@@ -1713,7 +1729,7 @@ export async function streamParagraphs(h, { on, converter = 'para' }) {
     const outs = [];
     const chars = [];
     const sanChars = [];
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     const sp = { messageId: 0, isFinished: false, isStopped: false };
     h.st.setState({ streamingProcessor: sp });
     for (const text of steps) {
@@ -1727,7 +1743,7 @@ export async function streamParagraphs(h, { on, converter = 'para' }) {
     sp.isFinished = true;
     const finalOut = h.st.messageFormatting(full, 'Char', false, false, 0);
     h.st.setState({ streamingProcessor: null });
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    await generationEnd(h, 'GENERATION_ENDED', 1);
     const j = await json(h);
     return { steps, outs, chars, sanChars, finalOut, paragraph: j?.pipeline.paragraph ?? null, warnings: h.warnings.filter(w => w.includes('paragraph cache')), text: await report(h) };
 }
@@ -1787,12 +1803,12 @@ export async function frameStats(h) {
     applyProfile(h, { frameStats: true }); // off by default
     await useScripts(h, [script({ findRegex: '/a/g', replaceString: 'b', markdownOnly: true })]);
     const before = (await json(h)).felt;
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     await new Promise(r => setTimeout(r, 120)); // a few frames
     const busyEnd = performance.now() + 120; // one long task while streaming: a frame late and a freeze
     while (performance.now() < busyEnd) { /* busy */ }
     await new Promise(r => setTimeout(r, 60));
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    await generationEnd(h, 'GENERATION_ENDED', 1);
     const during = (await json(h)).felt;
     await new Promise(r => setTimeout(r, 100));
     const after = (await json(h)).felt;
@@ -1809,13 +1825,13 @@ export async function longTaskPipe(h) {
     const text = Array.from({ length: 60 }, (_, i) => `line ${i} about me and **them** and me again`).join('\n');
     h.st.setState({ chat: [msg(text)] });
     h.st.setConverter('para');
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     const t0 = performance.now();
     let renders = 0;
     while (performance.now() - t0 < 60) { h.st.messageFormatting(text, 'Char', false, false, 0); renders++; } // renders inside the task
     while (performance.now() - t0 < 130) { /* the rest of the task: not the pipeline */ }
     await new Promise(r => setTimeout(r, 60));
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 1);
+    await generationEnd(h, 'GENERATION_ENDED', 1);
     await new Promise(r => setTimeout(r, 150));
     const felt = (await json(h)).felt;
     return { renders, felt, text: await report(h) };
@@ -1975,7 +1991,7 @@ export async function streamOtherMessage(h) {
     const c = h.st.counters;
     const r = {};
     const sp = { messageId: 1, isFinished: false, isStopped: false };
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     h.st.setState({ streamingProcessor: sp });
     r.other = render(0);
     r.streamed = render(1);
@@ -1983,19 +1999,19 @@ export async function streamOtherMessage(h) {
     sp.isStopped = true;
     h.st.setState({ streamingProcessor: null });
     const before = c.updateMessageBlock;
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 2);
+    await generationEnd(h, 'GENERATION_ENDED', 2);
     await sleep(30);
     r.rerendersAfterError = c.updateMessageBlock - before;
     // a stream that finishes: the final render comes before GENERATION_ENDED
     const sp2 = { messageId: 1, isFinished: false, isStopped: false };
-    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false);
+    await generationStart(h);
     h.st.setState({ streamingProcessor: sp2 });
     render(1);
     sp2.isFinished = true;
     r.final = render(1);
     h.st.setState({ streamingProcessor: null });
     const before2 = c.updateMessageBlock;
-    await h.eventSource.emit(h.event_types.GENERATION_ENDED, 2);
+    await generationEnd(h, 'GENERATION_ENDED', 2);
     await sleep(30);
     r.rerendersAfterFinish = c.updateMessageBlock - before2;
     return r;
@@ -2040,4 +2056,294 @@ export async function limitTitles(h) {
     if (!root) return null;
     const label = root.querySelector('#rpk_autoMeasure').closest('label');
     return { title: label.getAttribute('title'), extraAttributes: [...label.attributes].map(a => a.name).filter(n => n !== 'title') };
+}
+
+// ---- 0.5.5: the 0.5.4 audit's findings ----
+
+/**
+ * A start SillyTavern abandons emits no end event: a slash command typed in the chat box (GENERATION_STARTED, then the
+ * command interrupts Generate()), or no backend connection after GENERATION_AFTER_COMMANDS (Generate() returns before
+ * it marks the page). Neither may cost a getContext() per display script, count idle frames or leave the generation
+ * state on; a start that gets underway late (a slow server) is still picked up.
+ */
+export async function abandonedStarts(h) {
+    applyProfile(h, { frameStats: true, htmlMemo: false, persist: false });
+    await useScripts(h, [
+        script({ findRegex: '/a/g', replaceString: 'A', markdownOnly: true }),
+        script({ findRegex: '/b/g', replaceString: 'B', markdownOnly: true }),
+    ]);
+    const display = () => h.engine.getRegexedString('ab', P.AI, { isMarkdown: true });
+    const contexts = () => {
+        const before = h.calls.getContext;
+        for (let i = 0; i < 10; i++) display();
+        return h.calls.getContext - before;
+    };
+    const felt = async () => (await json(h)).felt;
+    const busy = (ms) => { const end = performance.now() + ms; while (performance.now() < end) { /* a long task */ } };
+    display();
+    const r = {};
+    await h.eventSource.emit(h.event_types.GENERATION_STARTED, 'normal', {}, false); // a slash command
+    r.commandContexts = contexts();
+    let f0 = (await felt()).frames;
+    await sleep(300);
+    r.commandFrames = (await felt()).frames - f0;
+    await h.eventSource.emit(h.event_types.GENERATION_AFTER_COMMANDS, 'normal', {}, false); // no backend connection
+    f0 = (await felt()).frames;
+    await sleep(300);
+    r.noBackendFrames = (await felt()).frames - f0;
+    await sleep(3400); // past the grace period
+    const longTasks = (await felt()).longTasks;
+    busy(120);
+    await sleep(100);
+    const after = await felt();
+    r.idleLongTask = after.longTasks > longTasks ? after.lastLongTask : null; // null where the browser reports none
+    document.body.dataset.generating = 'true'; // a start that got underway late: SillyTavern marks the page
+    await sleep(0);
+    h.st.setState({ streamingProcessor: { messageId: 0, isFinished: false, isStopped: false } });
+    r.lateLive = display();
+    r.liveContexts = contexts(); // the streaming processor is read without getContext()
+    h.st.streamingProcessor.isFinished = true;
+    r.lateFinished = display();
+    h.st.setState({ streamingProcessor: null });
+    await generationEnd(h);
+    return r;
+}
+
+/** ① with adaptive sampling (1 run in 64 timed): a script that matches now and then is not reported as never matching. */
+export async function adaptiveMatches(h) {
+    h.st.setConverter('para');
+    await useScripts(h, [script({ scriptName: 'Phone numbers', findRegex: '/\\d{7}/g', replaceString: '[number]', markdownOnly: true })]);
+    applyProfile(h, { htmlMemo: false, memo: false, persist: false });
+    const body = ('**bold** and more text, "quoted" too.\n\n').repeat(240);
+    const renderAll = () => h.st.chat.forEach((x, i) => h.st.messageFormatting(x.mes, x.name, false, false, i));
+    h.st.setState({ chat: Array.from({ length: 70 }, (_, i) => msg(`${i} ${body}`)) });
+    renderAll();
+    await h.commands.regexperf.callback({}, 'reset');
+    renderAll();
+    const light = (await json(h)).pipeline.light;
+    // the next 120 messages: one in ten has a 7-digit number
+    h.st.setState({ chat: Array.from({ length: 120 }, (_, i) => msg(`${i}${i % 10 === 3 ? ' call 5551234' : ''} ${body}`)) });
+    renderAll();
+    const j = await json(h);
+    const row = j.rows.find(x => x.name === 'Phone numbers');
+    return { light, sampled: row.sampled, warnings: row.warnings, candidates: j.candidatesToDisable, shown: h.st.chat.filter((_, i) => i % 10 === 3).length };
+}
+
+/** /regexperf off <name> turns off that script only, also when another script shares its find pattern. */
+export async function offSharedPattern(h) {
+    await useScripts(h, [
+        script({ scriptName: 'Alpha', findRegex: '/x/g', replaceString: 'A' }),
+        script({ scriptName: 'Beta', findRegex: '/x/g', replaceString: 'B' }),
+    ]);
+    h.engine.getRegexedString('x', P.AI);
+    const reply = await h.commands.regexperf.callback({}, 'off Alpha');
+    return { reply, disabled: Object.fromEntries(h.extension_settings.regex.map(s => [s.scriptName, !!s.disabled])) };
+}
+
+/**
+ * The Regex drawer's rows keep the script objects they were rendered with (renderScript()), and saveRegexScript() writes
+ * that object back at its index: what the extension saved (a lint fix, off) must be in that object, or a later click
+ * in the drawer reverts it.
+ */
+export async function drawerKeepsSaves(h) {
+    const s = script({ scriptName: 'Escaped', findRegex: '/a\\\\nb/g', replaceString: 'x' });
+    await useScripts(h, [s]);
+    const { SCRIPT_TYPES, getScriptsByType, saveScriptsByType } = h.engine;
+    const template = await (await fetch('/scripts/extensions/regex/scriptTemplate.html')).text();
+    const rowScript = getScriptsByType(SCRIPT_TYPES.GLOBAL)[0];
+    const row = $(template).attr('id', rowScript.id);
+    const save = async () => { // saveRegexScript(script, index, type)
+        const array = getScriptsByType(SCRIPT_TYPES.GLOBAL);
+        array[0] = rowScript;
+        await saveScriptsByType(array, SCRIPT_TYPES.GLOBAL);
+    };
+    row.find('.disable_regex').prop('checked', !!rowScript.disabled).on('input', async function () {
+        rowScript.disabled = !!$(this).prop('checked');
+        await save();
+    });
+    row.find('.regex-toggle-on').on('click', () => row.find('.disable_regex').prop('checked', true).trigger('input'));
+    row.find('.regex-toggle-off').on('click', () => row.find('.disable_regex').prop('checked', false).trigger('input'));
+    $('#saved_regex_scripts').append(row);
+    h.engine.getRegexedString('a\\nb', P.AI);
+    panel(true).querySelector('li[data-rule="double-escape"] .rpk-fix').click(); // confirmed in its popup at once here
+    await sleep(30);
+    const fixed = h.extension_settings.regex[0].findRegex;
+    const offReply = await h.commands.regexperf.callback({}, 'off Escaped');
+    const switchAfterOff = row.find('.disable_regex').prop('checked');
+    row.find('.regex-toggle-off').trigger('click'); // turned back on in the drawer
+    await sleep(30);
+    const saved = h.extension_settings.regex[0];
+    return { fixed, offReply, switchAfterOff, after: { findRegex: saved.findRegex, disabled: !!saved.disabled } };
+}
+
+/** ④ paragraph cache: no boundary inside a multi-line HTML comment or inside a tag whose attributes span lines. */
+export async function paragraphCutHtml(h) {
+    const { paragraphCut } = await extension();
+    const samples = {
+        comment: 'She looks up.\n\n<!-- state\n\nmood: tense\n\ntrust: 3\n-->\n\nShe smiles.',
+        tag: 'Intro.\n\n<div class="status"\n  style="color: red">\n\nHP: 10\n\nMP: 4\n\n</div>\n\nOutro.',
+    };
+    const heads = {};
+    for (const [name, full] of Object.entries(samples)) {
+        const seen = new Set();
+        for (let n = 1; n <= full.length; n++) {
+            const text = full.slice(0, n);
+            const cut = paragraphCut(text);
+            if (cut && cut.tailStart < text.length) seen.add(text.slice(0, cut.headEnd));
+        }
+        heads[name] = [...seen];
+    }
+    return heads;
+}
+
+/** "Reset settings" does what unticking does: ⑧ off lets a tripped script run again, the stutter figures are cleared. */
+export async function resetSettingsEffects(h) {
+    const rpk = applyProfile(h, { breaker: true, breakerMs: 1, breakerCount: 1, frameStats: true, htmlMemo: false, persist: false });
+    await useScripts(h, [script({ scriptName: 'Slow', findRegex: '/a/g', replaceString: '{{slow}}' })]);
+    h.engine.getRegexedString('aaaa', P.AI); // 4 runs of a 2 ms macro: tripped at once
+    await generationStart(h);
+    await sleep(200);
+    await generationEnd(h, 'GENERATION_ENDED', 1);
+    const state = async () => {
+        const j = await json(h);
+        return { out: h.engine.getRegexedString('a', P.AI), tripped: j.rows.find(r => r.name === 'Slow').tripped, frames: j.felt.frames };
+    };
+    const before = await state();
+    panel().querySelector('#rpk_reset_settings').click();
+    return { before, after: { ...await state(), breaker: rpk.breaker, frameStats: rpk.frameStats } };
+}
+
+/** "Measure on this chat": the features-off pass is SillyTavern as it is, which runs a script ⑧ turned off. */
+export async function measureTripped(h) {
+    applyProfile(h, { breaker: true, breakerMs: 1, breakerCount: 1, htmlMemo: false, persist: false, memo: false });
+    await useScripts(h, [script({ scriptName: 'Slow', findRegex: '/a/g', replaceString: '{{slow}}', markdownOnly: true })]);
+    h.st.setState({ chat: Array.from({ length: 10 }, (_, i) => msg(`${i} ${'a'.repeat(20)}`)) });
+    h.st.messageFormatting(h.st.chat[0].mes, 'Char', false, false, 0); // 20 runs of a 2 ms macro: tripped
+    const tripped = (await json(h)).rows.find(r => r.name === 'Slow').tripped;
+    await h.commands.regexperf.callback({}, 'measure');
+    const m = (await json(h)).measured;
+    return { tripped, off: m?.off ?? null, on: m?.on ?? null };
+}
+
+/** ⑤ rows: two messages with the same text (a user's and a character's) keep a row each, and re-renders store nothing. */
+export async function persistEqualTexts(h) {
+    await useScripts(h, [script({ findRegex: '/Same/g', replaceString: 'Same!', markdownOnly: true, placement: [P.USER, P.AI] })]);
+    const run = async (chat) => {
+        h.st.setState({ chat });
+        const all = () => chat.forEach((m, i) => h.st.messageFormatting(m.mes, m.name, false, m.is_user, i));
+        all();
+        all();
+        await sleep(400);
+        const j0 = await json(h);
+        for (let k = 0; k < 5; k++) all();
+        await sleep(400);
+        const j1 = await json(h);
+        return { stores: j1.totals.persistStores - j0.totals.persistStores, rows: j1.memo.persist.entries };
+    };
+    const equal = await run([msg('Same text', { name: 'User', is_user: true }), msg('Same text')]);
+    h.st.setState({ chatId: 'other-' + Math.random() });
+    await h.eventSource.emit(h.event_types.CHAT_CHANGED);
+    const distinct = await run([msg('Same text', { name: 'User', is_user: true }), msg('Same text.')]);
+    return { equal, distinct };
+}
+
+/** "Measure on this chat" renders the whole chat array but stores nothing for ⑤ or ⑨. */
+export async function measureStoresNothing(h) {
+    await useScripts(h, [script({ findRegex: '/a/g', replaceString: 'b', markdownOnly: true })]);
+    const chat = Array.from({ length: 40 }, (_, i) => msg(`message ${i} a`));
+    h.st.setState({ chat });
+    for (let i = 35; i < 40; i++) h.st.messageFormatting(chat[i].mes, 'Char', false, false, i); // "# Messages to Load" = 5
+    await sleep(400);
+    const stored = async () => {
+        const j = await json(h);
+        return { rows: j.memo.persist.entries, html: j.memo.html.entries };
+    };
+    const before = await stored();
+    const reply = await h.commands.regexperf.callback({}, 'measure');
+    await sleep(400);
+    return { before, measured: /^This chat \(40 messages\)/.test(reply), after: await stored() };
+}
+
+/** A RAW find pattern's macros are evaluated by SillyTavern per run, and by the extension once per script-list read. */
+export async function findMacroEvaluations(h) {
+    await useScripts(h, [script({ findRegex: '/x{{random}}/g', replaceString: 'y', substituteRegex: 1 })]);
+    h.st.reseed();
+    for (let i = 0; i < 10; i++) h.engine.getRegexedString(`x${i}`, P.AI);
+    return Number(h.st.substituteParams('{{random}}')); // the harness's {{random}} counts its evaluations
+}
+
+/** A RAW find pattern with {{user}}: after a persona rename, the pattern compiled with the new name is applied. */
+export async function findMacroRename(h) {
+    await useScripts(h, [script({ scriptName: 'Name', findRegex: '/{{user}}/g', replaceString: '<$&>', substituteRegex: 1 })]);
+    const before = h.engine.getRegexedString('Hello User', P.AI);
+    h.st.setState({ name1: 'Renamed' }); // no event the extension rebuilds on
+    return { before, afterRename: h.engine.getRegexedString('Hello Renamed', P.AI) };
+}
+
+/** ③ with ⑥ off: group text that assembles a macro with the replacement is substituted by SillyTavern: never cached. */
+export async function memoAssembledMacro(h) {
+    applyProfile(h, { fastPath: false });
+    await useScripts(h, [script({ findRegex: '/(\\{)-(\\{user\\}\\})/g', replaceString: '$1$2' })]);
+    const first = h.engine.getRegexedString('{-{user}}', P.AI);
+    h.st.setState({ name1: 'Renamed' });
+    return { first, afterRename: h.engine.getRegexedString('{-{user}}', P.AI) };
+}
+
+/** A wrapper copied with its constructor (new re.constructor(re.source, re.flags)) replaces like a plain RegExp. */
+export async function wrapperClone(h) {
+    const w = h.engine.RegexProvider.instance.get('/a/g');
+    const clone = new w.constructor(w.source, w.flags);
+    let replaced;
+    try {
+        replaced = 'aaa'.replace(clone, 'b');
+    } catch (e) {
+        replaced = 'throws: ' + e.message;
+    }
+    return { replaced, lastIndex: clone.lastIndex, split: 'xax'.split(w) };
+}
+
+/** A renamed script shows its new name in the table and the report, and /regexperf off finds it by that name. */
+export async function renamedScript(h) {
+    const s = script({ scriptName: 'Old name', findRegex: '/x/g', replaceString: 'y' });
+    await useScripts(h, [s]);
+    h.engine.getRegexedString('x', P.AI);
+    h.extension_settings.regex = [{ ...s, scriptName: 'New name' }]; // what the editor saves
+    await h.eventSource.emit(h.event_types.SETTINGS_UPDATED);
+    h.engine.getRegexedString('x x', P.AI);
+    const j = await json(h);
+    return {
+        names: j.rows.map(r => r.name),
+        report: (await report(h)).includes('New name'),
+        offOld: await h.commands.regexperf.callback({}, 'off Old name'),
+        offNew: await h.commands.regexperf.callback({}, 'off New name'),
+    };
+}
+
+/** The summary names what skipped a run: ⑨'s HTML cache and ⑤'s saved results apart (here ⑤ is off). */
+export async function bypassBreakdown(h) {
+    applyProfile(h, { persist: false });
+    await useScripts(h, [script({ findRegex: '/a/g', replaceString: 'b', markdownOnly: true })]);
+    h.st.setState({ chat: [msg('a a')] });
+    for (let i = 0; i < 3; i++) h.st.messageFormatting('a a', 'Char', false, false, 0);
+    const summary = panel(true).querySelector('#rpk_summary').textContent;
+    return { breakdown: summary.match(/runs were skipped \(([^)]*)\)/)?.[1] ?? null, report: (await report(h)).split('\n').find(l => l.startsWith('Ran ')) ?? null };
+}
+
+/** Text that ends up in the panel's HTML is escaped: the name filter, and translated tooltips with a double quote. */
+export async function panelEscapes(h) {
+    await useScripts(h, [script({ scriptName: 'Alpha', findRegex: '/x/g', replaceString: 'A' })]);
+    h.engine.getRegexedString('x', P.AI);
+    const { addLocaleData, getCurrentLocale } = await import('/scripts/i18n.js');
+    addLocaleData(getCurrentLocale(), { 'Turn this script off': 'Turn "this" script off' });
+    const root = panel(true);
+    const off = root.querySelector('#rpk_table .rpk-off');
+    const box = root.querySelector('#rpk_filter');
+    box.value = '<b id=rpk_probe>';
+    box.dispatchEvent(new Event('input'));
+    return {
+        offTitle: off?.getAttribute('title') ?? null,
+        offAttributes: off ? [...off.attributes].map(a => a.name) : [],
+        injected: !!document.querySelector('#rpk_table b#rpk_probe'),
+        empty: root.querySelector('#rpk_table .rpk-empty')?.textContent ?? null,
+    };
 }

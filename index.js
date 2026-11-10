@@ -7,7 +7,8 @@
  * cache) and per-stage timing of the display pipeline. No SillyTavern core file is modified.
  */
 
-// Namespace imports: a named export an older SillyTavern lacks would fail the whole module.
+// The engine through a namespace: a named export an older SillyTavern lacks would fail the whole module
+// (regexFromString is safe: the engine imports it too).
 import * as engine from '../../regex/engine.js';
 import { regexFromString } from '../../../utils.js';
 // For what getContext() lacks: the showdown converter instance and updateMessageBlock().
@@ -104,14 +105,17 @@ function hash64(str) {
 const ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', '\'': '&#39;' };
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ESCAPES[c]);
 
-// True from GENERATION_STARTED to GENERATION_ENDED / STOPPED, so the exact check (which builds getContext()) runs only
-// while a stream is possible, not per display script. Without those events: always check.
-let generating = !(event_types.GENERATION_STARTED && event_types.GENERATION_ENDED && event_types.GENERATION_STOPPED);
+// True from a generation's start to GENERATION_ENDED / STOPPED (see startGeneration()); without those events, always.
+// It starts at GENERATION_AFTER_COMMANDS: a slash command typed in the chat box emits GENERATION_STARTED and no end.
+const START_EVENT = event_types.GENERATION_AFTER_COMMANDS ?? event_types.GENERATION_STARTED;
+let generating = !(START_EVENT && event_types.GENERATION_ENDED && event_types.GENERATION_STOPPED);
 
+// script.js exports the processor: read without building getContext() per display script
+const exportsStream = 'streamingProcessor' in st;
 /** The streaming processor while a stream is live, else null. */
 function liveStream() {
     if (!generating) return null;
-    const sp = ctx().streamingProcessor;
+    const sp = exportsStream ? st.streamingProcessor : ctx().streamingProcessor;
     return sp && !sp.isFinished && !sp.isStopped ? sp : null;
 }
 
@@ -710,17 +714,21 @@ const redosSuggestion = (r) => REDOS_SUGGESTIONS[r.kind]?.() ?? '';
 
 const keyOf = (re) => re.source + '\u0000' + re.flags;
 
-// A RAW/ESCAPED find pattern with macros ({{random}}, {{getvar::x}}) compiles differently on every run, so the compiled
-// key misses its script: the raw pattern is re-substituted, else matched as a shape where each macro is any text.
+// A RAW/ESCAPED find pattern with macros compiles differently when their values change ({{user}} after a rename,
+// {{random}} on every run), so the compiled key misses its script: a pattern with the name macros only is substituted
+// again (side-effect free), any other is matched as a shape where each macro is any text (its macros run once a run,
+// in SillyTavern).
 const MACRO_SPLIT = /{{[^{}]*}}|<(?:user|bot|char(?:ifnotgroup)?|group)>/gi;
 const shapeOf = (raw) => new RegExp('^' + raw.split(MACRO_SPLIT).map(escapeRe).join('[\\s\\S]*?') + '$');
 function resolveDynamic(regexString, dynamic) {
-    if (!dynamic.length) return undefined;
-    const { substituteParamsExtended } = ctx();
-    for (const d of dynamic) {
-        try {
-            if (substituteParamsExtended(d.raw, {}, d.substitute === 2 ? sanitizeRegexMacro : undefined) === regexString) return d.info;
-        } catch { /* try the shape */ }
+    const exact = dynamic.filter(d => d.exact);
+    if (exact.length) {
+        const { substituteParamsExtended } = ctx();
+        for (const d of exact) {
+            try {
+                if (substituteParamsExtended(d.raw, {}, d.substitute === 2 ? sanitizeRegexMacro : undefined) === regexString) return d.info;
+            } catch { /* try the shape */ }
+        }
     }
     return dynamic.find(d => d.shape.test(regexString))?.info;
 }
@@ -891,6 +899,10 @@ const fingerprint = (groups) => groups.map(([, list]) => list.map(s => `${s?.id}
 // No macros in the replacement or trim strings, and no group reference that could complete one (<$1>, {$1}): the
 // output depends only on the input, so it can be memoized.
 const pureOf = (rep, trims) => !MACRO.test(rep) && !/[{<]\$(?:\d|<)|\$(?:\d+|<[^>]+>)[}>]/.test(rep) && !trims.some(trim => MACRO.test(String(trim)));
+// Group text can still join into macro syntax (SillyTavern substitutes it) where two references meet ($1$2), a brace
+// follows one ($1{user}}) or trim strings cut out what stood between two braces: ③ checks such a script's matches.
+const GROUP_REF = /\$(?:\d+|<[^>]+>)/;
+const assemblesOf = (rep, trims) => /\$(?:\d+|<[^>]+>)[{$]/.test(rep) || (trims.length > 0 && GROUP_REF.test(rep));
 
 function ensureInfo() { // runs on every RegexProvider.get(): Date.now() is the cheaper clock
     if (!infoCache) return (infoCache = buildInfo(readGroups()));
@@ -963,6 +975,7 @@ function buildInfo(groups) {
                 markdownOnly: !!s.markdownOnly,
                 pure,
                 semiPure,
+                assembles: (pure || semiPure) && assemblesOf(replacement, trims),
                 // two renders of the same text can differ ({{random}}, {{getvar}}): ⑨ and ⑤ keep no message it matched
                 volatile: dynamicVolatile || !(pure || semiPure),
                 dynamicVolatile,
@@ -981,6 +994,7 @@ function buildInfo(groups) {
                 info.pure &&= prev.pure && prev.replaceSig === info.replaceSig;
                 info.semiPure &&= prev.semiPure && prev.replaceSig === info.replaceSig;
                 info.semiPureTrims &&= info.semiPure;
+                info.assembles ||= prev.assembles;
                 info.volatile ||= prev.volatile;
                 info.dynamicVolatile ||= prev.dynamicVolatile;
                 info.statKey = prev.statKey;
@@ -988,7 +1002,7 @@ function buildInfo(groups) {
                 for (const d of dynamic) if (d.info === prev) d.info = info;
             }
             map.set(key, info);
-            if (isDynamic) dynamic.push({ raw: s.findRegex, substitute, shape: shapeOf(s.findRegex), info });
+            if (isDynamic) dynamic.push({ raw: s.findRegex, substitute, shape: shapeOf(s.findRegex), info, exact: !dynamicVolatile });
             const fastKey = key + '\u0001' + info.replaceSig;
             const tpl = cached(templateCache, fastKey, () => buildTemplate(replaceString, re));
             info.refs = tpl.refs; // for the lint
@@ -1017,6 +1031,14 @@ function buildInfo(groups) {
     }
     const version = fnv1a(versionParts.join('\u0003'));
     if (version !== infoCache?.version) clearLitCache(); // other scripts, other literals
+    // a rename changes no version, so no wrapper is linked again: the stats take the scripts' names here
+    for (const info of map.values()) {
+        const stat = stats.get(info.statKey);
+        if (!stat) continue;
+        stat.name = info.name;
+        stat.ids = info.ids;
+        for (const id of info.ids) statById.set(id, stat);
+    }
     return { map, dynamic, invalid, counts, depthRules, version, displayVersion: fnv1a(displayParts.join('\u0003')), fp: fingerprint(groups), checkedAt: Date.now() };
 }
 
@@ -1062,7 +1084,7 @@ function onTripControl(e) {
 const stats = new Map(); // pattern key -> counters, see getStat()
 let statsSince = Date.now();
 const persistStats = { hits: 0, stores: 0 };
-let bypass = false; // the hooks are showing a stored result
+let bypass = null; // the hooks are showing a stored result: 'html' (⑨) or 'persist' (⑤)
 let skipStat = null; // the pattern a per-row measurement renders the chat without
 // The previous call: when a call's input is the previous call's output, the two scripts are neighbours in one pass
 // (to spot an earlier script removing what a later one looks for).
@@ -1164,9 +1186,12 @@ function getStat(key, re) {
             name: t`(unknown)`,
             src: '/' + re.source + '/' + re.flags,
             calls: 0, totalMs: 0, maxMs: 0, replMs: 0, matched: 0, changed: 0,
-            skipped: 0, hits: 0, streamSkipped: 0, bypass: 0, fast: 0,
+            skipped: 0, hits: 0, streamSkipped: 0, fast: 0,
+            bypass: 0, // runs skipped while a stored result was shown (⑤ or ⑨)
+            htmlBypass: 0, // the part of them ⑨ served from memory
             incremental: 0, // ④ runs on the new lines only
             seen: 0, // every executed run, sampled or not
+            seenMatched: 0, // executed runs known to have matched (changed the text, or seen matching), sampled or not
             spike: null, // {ms, len, head, messageId}: the newest run over SPIKE_MS
             spikes: [], // the SPIKE_KEEP newest such runs, newest first
             moreMatches: 0, // runs without g that would have matched again (lint "missing g")
@@ -1195,15 +1220,17 @@ class PerfRegExp extends RegExp {
 
     [Symbol.replace](str, replacer) {
         const meta = this._meta;
+        if (!meta) return super[Symbol.replace](str, replacer); // a copy made with this constructor: a plain RegExp
         const { stat, markdownOnly, test, memoPrefix, memoStatic } = meta;
 
         if (stat === skipStat) return str;
         if (bypass && displayPass) { // a stored ⑤/⑨ result is being shown
             stat.bypass++;
+            if (bypass === 'html') stat.htmlBypass++;
             statsDirty = true;
             return str;
         }
-        if (stat.tripped) { // ⑧
+        if (stat.tripped && cfg.breaker) { // ⑧ (off, as in a measurement's features-off pass: nothing is skipped)
             stat.broken++;
             passVolatile = true; // a pass with a skipped script is not the message's result
             return unchanged(stat, str);
@@ -1281,8 +1308,11 @@ class PerfRegExp extends RegExp {
         let macroSeen = false; // a match held macro syntax SillyTavern substituted: not memoizable
         const t0 = profile || cfg.breaker ? performance.now() : 0;
         // ⑥ Without macro syntax in the input, SillyTavern's per-match callback amounts to a template V8 applies without
-        // a JS call per match; should group text assemble macro syntax anyway, the callback runs instead.
-        const fast = cfg.fastPath && typeof replacer === 'function' && !hasMacro(str) ? meta.fast ?? staticFastFor(meta) : null;
+        // a JS call per match; should group text assemble macro syntax anyway, the callback runs instead. With ⑥ off,
+        // the template still checks each match of a script whose groups can assemble it, before ③ keeps the output.
+        const tpl = typeof replacer === 'function' && !hasMacro(str) && (cfg.fastPath || (bucket && meta.assembles)) ? meta.fast ?? staticFastFor(meta) : null;
+        if (bucket && meta.assembles && !tpl) bucket = undefined; // nothing to check the matches with: not kept
+        const fast = cfg.fastPath ? tpl : null;
         let fastAlive = !!fast;
         if (fast && fast.verify <= 0) {
             out = native[Symbol.replace](incIn, fast.template ?? fast.replacer);
@@ -1297,19 +1327,20 @@ class PerfRegExp extends RegExp {
             // The replacer is timed apart from the matching. On a fast-path script's first runs each match's template
             // result is compared with the callback's: one difference turns ⑥ off for the script.
             let checked = false;
-            if (typeof replacer === 'function' && (profile || fast || postHoc)) {
+            if (typeof replacer === 'function' && (profile || tpl || postHoc)) {
                 fn = function () {
                     matched = true;
                     const t1 = timeRepl ? performance.now() : 0;
                     const r = replacer.apply(this, arguments);
                     if (timeRepl) replMs += performance.now() - t1;
                     if (postHoc && !macroSeen && MACRO.test(arguments[0])) macroSeen = true;
-                    if (fastAlive) {
-                        const mine = fast.template !== null ? expandTemplate(fast.template, arguments) : fast.replacer.apply(this, arguments);
+                    if (fastAlive || (tpl && !macroSeen)) {
+                        const mine = tpl.template !== null ? expandTemplate(tpl.template, arguments) : tpl.replacer.apply(this, arguments);
                         if (MACRO.test(mine)) { // the fast path would fall back here; SillyTavern substituted the macro
                             macroSeen = true;
                             return r;
                         }
+                        if (!fastAlive) return r;
                         checked = true;
                         if (mine !== r) {
                             fastAlive = false;
@@ -1372,6 +1403,7 @@ class PerfRegExp extends RegExp {
                 if (m && m.index + m[0].length < str.length && native.test(str.slice(m.index + m[0].length))) stat.moreMatches++;
             }
         }
+        if (matched || out !== str) stat.seenMatched++; // on unsampled runs too: ∅ is a verdict, not an estimate
         // a volatile script that matched: ⑨ and ⑤ store nothing for this pass
         if (displayPass && meta.volatile && !passVolatile) {
             native.lastIndex = 0;
@@ -1467,14 +1499,18 @@ function patchProvider() {
         // re-linked whenever the script info changes, so an edit takes effect without RegexProvider.clear()
         if (w._version !== version) {
             const key = keyOf(base);
-            const info = map.get(key) ?? resolveDynamic(regexString, dynamic);
+            let info = map.get(key);
+            // a dynamic pattern compiled with other macro values than its script info: the literal prefilter is this
+            // pattern's own, and ⑥ and ④'s incremental runs, analysed on the other, stay off
+            const form = !info;
+            if (form) info = resolveDynamic(regexString, dynamic);
             const stat = getStat(info?.statKey ?? key, base);
             if (info) stat.name = info.name;
             if (info?.raw) stat.src = info.raw;
             stat.ids = info?.ids ?? [];
             for (const id of stat.ids) statById.set(id, stat);
-            stat.needle = info?.needle ?? needleOf(base);
-            stat.redos = info?.redos ?? redosOf(base);
+            stat.needle = form ? needleOf(base) : info.needle;
+            stat.redos = form ? redosOf(base) : info.redos;
             const replaceSig = info?.replaceSig ?? null;
             if (stat.tripped && stat.replaceSig !== undefined && stat.replaceSig !== replaceSig) untrip(stat); // ⑧ an edit of this script resets it
             stat.replaceSig = replaceSig;
@@ -1485,11 +1521,12 @@ function patchProvider() {
                 test: stat.needle.test,
                 memoPrefix: info?.pure || info?.semiPure ? key + '\u0001' + info.replaceSig + (info.pure ? '\u0001' : '\u0002') : null,
                 memoStatic: info?.semiPure ? (info.semiPureTrims ? 2 : 1) : 0, // 2: a trim string holds a static macro
-                fast: info?.fast ?? null,
-                fastStatic: info?.fastStatic ?? null,
+                fast: form ? null : info.fast,
+                fastStatic: form ? null : info.fastStatic,
+                assembles: !!info?.assembles,
                 volatile: info ? info.volatile : true,
                 dynamic: !info || info.dynamicVolatile, // the find pattern itself can change between renders
-                lineLocal: !!info?.lineLocal && !incOff.has(key),
+                lineLocal: !form && info.lineLocal && !incOff.has(key),
                 inc: new Map(), // ④ stream key -> {in, out}: the last prefix this script formatted in that stream
                 incVerify: w._meta?.incVerify ?? INC_VERIFY_RUNS,
             };
@@ -1669,13 +1706,17 @@ function frameTick() {
         return;
     }
     const now = performance.now(); // when the callbacks ran, not the frame's scheduled start: what was felt
-    if (frameLast) {
-        const gap = now - frameLast;
-        feel.frames++;
-        if (gap > FRAME_BUDGET_MS * 2) feel.dropped++;
-        if (gap > 100) feel.frozen++;
+    if (!underway()) {
+        frameLast = 0; // not before SillyTavern marks the page
+    } else {
+        if (frameLast) {
+            const gap = now - frameLast;
+            feel.frames++;
+            if (gap > FRAME_BUDGET_MS * 2) feel.dropped++;
+            if (gap > 100) feel.frozen++;
+        }
+        frameLast = now;
     }
-    frameLast = now;
     frameRaf = requestAnimationFrame(frameTick);
 }
 function startFrames() {
@@ -1771,17 +1812,57 @@ const VOID_TAGS = new Set(['br', 'hr', 'img', 'input', 'meta', 'link', 'area', '
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 const LIST_ITEM = /^ {0,3}(?:[-*+]|\d+[.)])(?:\s|$)/;
 const INDENTED = /^[ \t]/; // continues the block above (a list item's paragraph, indented code)
-const TAG = /<(\/?)([a-zA-Z][\w-]*)[^<>]*?(\/?)>/g;
+const TAG_START = /<(\/?)([a-zA-Z][\w-]*)/y;
 const REF_DEF = /^ {0,3}\[[^\]]+\]:\s/; // resolves across paragraphs: such a text is never split
+
+/**
+ * Raw HTML on one line (outside fences and inline code), carried to the next: html.depth counts the tags left open,
+ * html.comment is an open comment, html.tag a tag whose attributes go on to the next line. A paragraph boundary needs
+ * all of them closed.
+ */
+function scanHtml(line, html) {
+    if (html.tag) html.tag.fresh = false;
+    for (let i = 0; i < line.length;) {
+        if (html.comment) {
+            const end = line.indexOf('-->', i);
+            if (end < 0) return;
+            html.comment = false;
+            i = end + 3;
+        } else if (html.tag) {
+            const end = line.indexOf('>', i);
+            if (end < 0) {
+                // it goes on to the next line if it did on this one, or its name ends the line, or an attribute value
+                // follows (<div class="x"): "a<b then" is text
+                if (html.tag.fresh && line.slice(i).trim() && !line.includes('=', i)) html.tag = null;
+                return;
+            }
+            if (line[end - 1] !== '/' && !VOID_TAGS.has(html.tag.name)) html.depth = Math.max(0, html.depth + (html.tag.close ? -1 : 1));
+            html.tag = null;
+            i = end + 1;
+        } else {
+            const lt = line.indexOf('<', i);
+            if (lt < 0) return;
+            if (line.startsWith('<!--', lt)) {
+                html.comment = true;
+                i = lt + 4;
+                continue;
+            }
+            TAG_START.lastIndex = lt;
+            const m = TAG_START.exec(line);
+            if (m) html.tag = { close: !!m[1], name: m[2].toLowerCase(), fresh: true };
+            i = m ? TAG_START.lastIndex : lt + 1;
+        }
+    }
+}
 
 /**
  * The last paragraph boundary of a markdown text, scanning from `from` (a tail known to follow a boundary):
  * {headEnd, tailStart}, null when the scanned part has none, false when the text must not be split.
  */
-function paragraphCut(text, from = 0) {
+export function paragraphCut(text, from = 0) {
     let inFence = null; // the fence marker that has to close
     let ticks = 0; // backticks outside fences: odd means an inline code span is open
-    let depth = 0; // open raw HTML tags outside fences and inline code
+    const html = { depth: 0, comment: false, tag: null }; // raw HTML outside fences and inline code, see scanHtml()
     let prev = 'blank'; // the last non-blank line: para (or heading) | list | quote | table | indent | fence
     let pending = null; // headEnd of a blank line after a para or closed fence, until the next non-blank line
     let cut = null;
@@ -1795,7 +1876,7 @@ function paragraphCut(text, from = 0) {
             if (m && m[1][0] === inFence[0] && m[1].length >= inFence.length && line.slice(m[0].length).trim() === '') inFence = null;
             prev = 'fence';
         } else if (line.trim() === '') {
-            if (pending === null && (prev === 'para' || prev === 'fence') && ticks % 2 === 0 && depth === 0) pending = pos - 1;
+            if (pending === null && (prev === 'para' || prev === 'fence') && ticks % 2 === 0 && !html.depth && !html.comment && !html.tag) pending = pos - 1;
         } else {
             if (pending !== null) {
                 if (!INDENTED.test(line) && !/^ {0,3}(?:=+|-+)\s*$/.test(line)) cut = { headEnd: pending, tailStart: pos }; // not a continuation or a setext underline
@@ -1809,11 +1890,7 @@ function paragraphCut(text, from = 0) {
             } else {
                 prev = INDENTED.test(line) ? 'indent' : LIST_ITEM.test(line) ? 'list' : line.charCodeAt(line.search(/\S/)) === 62 ? 'quote' : line.includes('|') ? 'table' : 'para';
                 for (let i = line.indexOf('`'); i >= 0; i = line.indexOf('`', i + 1)) ticks++;
-                for (const m of line.replace(/`[^`]*`/g, '').matchAll(TAG)) {
-                    if (m[3] || VOID_TAGS.has(m[2].toLowerCase())) continue;
-                    depth += m[1] ? -1 : 1;
-                }
-                if (depth < 0) depth = 0;
+                scanHtml(line.replace(/`[^`]*`/g, ''), html);
             }
         }
         pos = nl + 1;
@@ -1922,7 +1999,8 @@ function resetPass() {
 }
 /** Cleared at AFTER_MARKDOWN; the pass timing stays for the sanitize wrapper. */
 function resetPassKeepTiming() {
-    bypass = streamApply = displayPass = passVolatile = false;
+    bypass = null;
+    streamApply = displayPass = passVolatile = false;
     pending = streamView = streamTail = streamKey = passChName = passStatic = passStaticTrim = passMessageId = htmlHit = null;
 }
 
@@ -1964,12 +2042,14 @@ function keyFor(mes, c, msg, context) {
     const statics = staticKeyFor(2, context);
     // the placement decides which scripts run: USER_INPUT, SLASH_COMMAND (narrator) or AI_OUTPUT
     const placement = c.isReasoning ? ':r' : c.isUser ? ':u' : msg.extra?.type === 'narrator' ? ':n' : '';
-    return hash64(mes) + ':' + mes.length + ':' + displayVersion + ':' + names + depths + ':' + statics + placement + ':' + pipeVersion(context.powerUserSettings);
+    // before the |, ⑤'s row id: the text, its placement and speaker tell apart the messages of a chat; what follows
+    // (scripts, names, depth, settings) replaces a message's row when it changes
+    return hash64(mes) + ':' + mes.length + placement + ':' + fnv1a(String(c.ch_name ?? c.characterName)) + '|' + displayVersion + ':' + names + depths + ':' + statics + ':' + pipeVersion(context.powerUserSettings);
 }
 
-/** A ⑨ hit: the regex stage is bypassed and the stored HTML takes over at AFTER_MARKDOWN. */
-function serveHtml(html) {
-    bypass = true;
+/** A ⑨ hit (or ⑤'s stored HTML): the regex stage is bypassed and the stored HTML takes over at AFTER_MARKDOWN. */
+function serveHtml(html, source = 'html') {
+    bypass = source;
     htmlHit = html;
     passHtmlHit = true;
     return HTML_PLACEHOLDER;
@@ -2013,7 +2093,7 @@ function installPersistHooks() {
         if (wantHtml) {
             const hit = htmlMemo.get(key);
             if (hit) {
-                if (id !== null && persistMem.get(id)?.k !== key && hit.value.length <= cfg.persistMaxLen) storePersisted(id, { k: key, h: hit.value }); // ⑤ learns it too
+                if (id !== null && !measurePass && persistMem.get(id)?.k !== key && hit.value.length <= cfg.persistMaxLen) storePersisted(id, { k: key, h: hit.value }); // ⑤ learns it too
                 return serveHtml(hit.value);
             }
         }
@@ -2024,16 +2104,16 @@ function installPersistHooks() {
                 if (e.h != null) { // stored HTML needs ⑨'s stage; without it, recompute
                     if (wantHtml) {
                         persistStats.hits++;
-                        return serveHtml(String(e.h));
+                        return serveHtml(String(e.h), 'persist');
                     }
                 } else {
-                    bypass = true;
+                    bypass = 'persist';
                     persistStats.hits++;
                     return e.same ? mes : String(e.v ?? mes);
                 }
             }
         }
-        pending = { id, key, input: mes, html: wantHtml };
+        pending = measurePass ? null : { id, key, input: mes, html: wantHtml };
         return mes;
     }
 
@@ -2126,7 +2206,7 @@ const fmtNeedles = (r) => {
 // each call ②, ③ or ④ avoided would have cost the script's average run
 const avoided = (r) => r.skipped + r.hits + r.streamSkipped;
 const savedMs = (r) => avoided(r) * avgMs(r);
-const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.matched;
+const ineffective = (r) => r.calls >= INEFFECTIVE_RUNS && !r.seenMatched;
 /** Conflicts in which r is the later script. */
 const conflictsOf = (r) => [...conflicts.values()].filter(c => c.later === r);
 const conflictText = (c) => (c.confirmed
@@ -2178,6 +2258,7 @@ function buildSummary() {
         streamSkipped,
         skips: skipped + hits + streamSkipped,
         bypass: sum('bypass'),
+        htmlBypass: sum('htmlBypass'),
         fast: sum('fast'),
         saved: rows.reduce((acc, r) => acc + savedMs(r), 0),
         ineffective: rows.filter(ineffective).map(r => r.name),
@@ -2319,9 +2400,9 @@ function persistChatKeyNow(context = ctx()) {
     return groupId ? `g:${groupId}:${chatId}` : `c:${characters?.[characterId]?.avatar ?? characterId}:${chatId}`;
 }
 
-/** ⑤'s row id for a message: the chat, then the first two fields of its key. */
+/** ⑤'s row id for a message: the chat, then its key up to the |. */
 function persistIdOf(key) {
-    return persistChatKey + '\u0000' + key.slice(0, key.indexOf(':', key.indexOf(':') + 1));
+    return persistChatKey + '\u0000' + key.slice(0, key.indexOf('|'));
 }
 
 /**
@@ -2346,13 +2427,23 @@ function loadPersisted(context) {
             try {
                 const rows = await idbDone(storeOf(db).index('chat').getAll(chatKey));
                 if (stale()) return;
+                const old = [];
                 for (const row of rows) {
+                    if (!String(row.k).includes('|')) { // keyed by a version before 0.5.5: never served again
+                        old.push(row.id);
+                        countDb(-row.n, -1);
+                        continue;
+                    }
                     if (persistMem.has(row.id)) { // stored again during the read: the new row replaced it in the database
                         countDb(-row.n, -1);
                         continue;
                     }
                     persistMem.set(row.id, row);
                     persistMemBytes += row.n;
+                }
+                if (old.length) {
+                    const store = storeOf(db, 'readwrite');
+                    for (const id of old) store.delete(id);
                 }
             } catch (e) { console.warn('[RegexPerf] ⑤ could not read the stored results', e); }
         }
@@ -2478,7 +2569,8 @@ function buildReportText() {
         `Regex Perf Kit report (${new Date().toLocaleString()})`,
         t`Since: ${new Date(statsSince).toLocaleTimeString()} / chat messages: ${s.chatLen}`,
         t`Scripts: ${c.total} total, ${c.active} active (${typeCounts(c)}), no literal ${c.noNeedle}, backtracking risk ${c.redos} (exponential ${c.redosExp})`,
-        t`Ran ${s.calls} times / ${fmtMs(s.total)} ms total | skipped ${s.skips} (prefilter ${s.skipped}, cache hits ${s.hits}, streaming ${s.streamSkipped}) | persistent cache bypasses ${s.bypass} (hits ${persistStats.hits}, stored ${persistStats.stores})`,
+        t`Ran ${s.calls} times / ${fmtMs(s.total)} ms total | skipped ${s.skips} (prefilter ${s.skipped}, cache hits ${s.hits}, streaming ${s.streamSkipped}) | persistent cache bypasses ${s.bypass - s.htmlBypass} (hits ${persistStats.hits}, stored ${persistStats.stores})`
+            + (htmlStageAvailable ? ' | ' + t`HTML cache bypasses ${s.htmlBypass}` : ''),
         s.calls
             ? t`Estimated time saved: ≈${fmtMs(s.saved)} ms (${s.skips} skipped runs × each script's average run time)`
             : t`Estimated time saved: not available yet (no measured runs)`,
@@ -2541,7 +2633,7 @@ function buildReportData() {
         since: new Date(statsSince).toISOString(),
         chatMessages: s.chatLen,
         scripts: { ...s.counts, infoBuilds },
-        totals: { calls: s.calls, totalMs: s.total, skipped: s.skipped, hits: s.hits, streamSkipped: s.streamSkipped, bypass: s.bypass, fastRuns: s.fast, persistHits: persistStats.hits, persistStores: persistStats.stores, savedMs: s.calls ? s.saved : null },
+        totals: { calls: s.calls, totalMs: s.total, skipped: s.skipped, hits: s.hits, streamSkipped: s.streamSkipped, bypass: s.bypass, htmlBypass: s.htmlBypass, fastRuns: s.fast, persistHits: persistStats.hits, persistStores: persistStats.stores, savedMs: s.calls ? s.saved : null },
         memo: { entries: memoLru.size, bytes: memoBytes, maxMB: settings.memoMaxMB, persist: s.persist, html: { entries: htmlMemo.map.size, bytes: htmlMemo.bytes, maxMB: settings.htmlMemoMaxMB } },
         pipeline: s.pipe,
         felt: s.feel,
@@ -2573,13 +2665,14 @@ function buildReportCsv() {
     return lines.join('\r\n');
 }
 
-/** Turns off the scripts whose name matches (exactly, else as the only one containing it); the message to show. */
+/** Turns off the script whose name matches (exactly, else as the only one containing it); the message to show. */
 async function turnOffByName(name) {
     const want = name.trim().toLowerCase();
     if (!want) return t`Usage: /regexperf off <script name>`;
-    const infos = [...ensureInfo().map.values()];
-    const found = infos.filter(r => r.name.toLowerCase() === want);
-    const hits = found.length ? found : infos.filter(r => r.name.toLowerCase().includes(want));
+    // each script by its own name: scripts sharing a pattern share a table row, not this command
+    const scripts = readGroups().flatMap(([, list]) => list).filter(s => s?.findRegex && !s.disabled).map(s => ({ ids: [s.id], name: s.scriptName || t`(no name)` }));
+    const found = scripts.filter(r => r.name.toLowerCase() === want);
+    const hits = found.length ? found : scripts.filter(r => r.name.toLowerCase().includes(want));
     if (hits.length !== 1) return hits.length ? t`"${name}" matches several scripts: ${hits.map(r => r.name).join(', ')}` : t`"${name}" is not in the Regex extension's list.`;
     await scriptAction(hits[0], true);
     renderPanel();
@@ -2588,18 +2681,30 @@ async function turnOffByName(name) {
 
 // ---- Lint and saving through the engine ----
 
-/** Saves a change to the scripts with these ids through the engine; false where SillyTavern lacks saveScriptsByType. */
+/**
+ * Saves a change to the scripts with these ids through the engine; false where SillyTavern lacks saveScriptsByType.
+ * The script objects change in place: the Regex drawer's rows hold them and save them back as they are.
+ */
 async function saveScript(ids, patch) {
     if (typeof engine.saveScriptsByType !== 'function' || typeof getScriptsByType !== 'function' || !SCRIPT_TYPES) return false;
     let saved = false;
     for (const type of Object.values(SCRIPT_TYPES)) {
         const list = getScriptsByType(type, { allowedOnly: false }) ?? [];
-        if (!list.some(s => ids.includes(s?.id))) continue;
-        await engine.saveScriptsByType(list.map(s => (ids.includes(s?.id) ? { ...s, ...patch } : s)), type);
+        const mine = list.filter(s => ids.includes(s?.id));
+        if (!mine.length) continue;
+        for (const s of mine) Object.assign(s, patch);
+        await engine.saveScriptsByType(list, type);
         saved = true;
     }
-    if (saved) markDirty();
-    return saved;
+    if (!saved) return false;
+    if ('disabled' in patch) { // the drawer's switch for each script, as its own click would leave it
+        for (const id of ids) {
+            const box = document.getElementById(id)?.querySelector('.disable_regex');
+            if (box) box.checked = !!patch.disabled;
+        }
+    }
+    markDirty();
+    return true;
 }
 
 /** Lint findings for every active script: {rule, info, text, fix}, fix = {label, patch} where it is mechanical. */
@@ -2694,12 +2799,13 @@ function updateListBadges() {
     }
 }
 
-const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'fast', 'incremental', 'seen', 'fused', 'broken', 'slowRuns', 'moreMatches', 'spike', 'spikes'];
+const COUNTERS = ['calls', 'totalMs', 'maxMs', 'replMs', 'matched', 'changed', 'skipped', 'hits', 'streamSkipped', 'bypass', 'htmlBypass', 'fast', 'incremental', 'seen', 'seenMatched', 'fused', 'broken', 'slowRuns', 'moreMatches', 'spike', 'spikes'];
 const FEATURES_OFF = { profiler: false, prefilter: false, memo: false, htmlMemo: false, persist: false, fastPath: false, breaker: false, adaptive: false };
 const CACHES_OFF = { profiler: false, memo: false, htmlMemo: false, persist: false, breaker: false, adaptive: false }; // per row: ② as set
 
 const MEASURE_CHUNK = 10; // messages formatted between two yields to the page
 let measureBusy = false;
+let measurePass = false; // a measurement is formatting a message: ⑤ and ⑨ serve it but store nothing
 
 /**
  * Re-renders every message of the current chat as SillyTavern displays it, first with the features off, then with the
@@ -2723,6 +2829,7 @@ async function measureChat(without = null) {
             const text = m?.extra?.display_text ?? m?.mes; // what SillyTavern shows (a translation, say)
             cfg = config;
             skipStat = skip;
+            measurePass = true;
             const t1 = performance.now();
             try {
                 if (text) messageFormatting(text, m.name, m.is_system, m.is_user, i);
@@ -2730,6 +2837,7 @@ async function measureChat(without = null) {
             } finally {
                 cfg = settings;
                 skipStat = null;
+                measurePass = false;
             }
             const ms = performance.now() - t1;
             total += ms;
@@ -2886,7 +2994,7 @@ const settingsHtml = () => `
     </div>
     <div class="inline-drawer-content">
       <div class="rpk-summary" id="rpk_summary">${t`Measuring...`}</div>
-      <div class="rpk-pipe" id="rpk_pipe" title="${t`Where the time of a display render goes: the regex scripts (what this extension can save), SillyTavern's markdown conversion, and the HTML sanitizer. Timed since the stats were reset.`}"></div>
+      <div class="rpk-pipe" id="rpk_pipe" title="${esc(t`Where the time of a display render goes: the regex scripts (what this extension can save), SillyTavern's markdown conversion, and the HTML sanitizer. Timed since the stats were reset.`)}"></div>
 
       <h4 class="rpk-section">${t`Features`}</h4>
       <div class="rpk-features">
@@ -2944,20 +3052,20 @@ const settingsHtml = () => `
       </details>
 
       <div class="rpk-buttons">
-        <div class="menu_button" id="rpk_measure" title="${t`Re-renders this chat twice, with the features off and on, and shows the real difference. Runs in small steps, so the page stays usable.`}">${t`Measure on this chat`}</div>
+        <div class="menu_button" id="rpk_measure" title="${esc(t`Re-renders this chat twice, with the features off and on, and shows the real difference. Runs in small steps, so the page stays usable.`)}">${t`Measure on this chat`}</div>
         <div class="menu_button" id="rpk_copy">${t`Copy report`}</div>
-        <div class="menu_button rpk-minor" id="rpk_copy_json" title="${t`Copy the report as JSON`}">JSON</div>
-        <div class="menu_button rpk-minor" id="rpk_copy_csv" title="${t`Copy the table as CSV`}">CSV</div>
+        <div class="menu_button rpk-minor" id="rpk_copy_json" title="${esc(t`Copy the report as JSON`)}">JSON</div>
+        <div class="menu_button rpk-minor" id="rpk_copy_csv" title="${esc(t`Copy the table as CSV`)}">CSV</div>
         <div class="menu_button" id="rpk_reset">${t`Reset stats`}</div>
         <div class="menu_button" id="rpk_refresh">${translate('Refresh', 'rpk_refresh')}</div>
         <div class="menu_button" id="rpk_clear_persist">${t`Clear saved results (this chat)`}</div>
-        <div class="menu_button" id="rpk_reset_settings" title="${t`Turns every feature and limit back to its default.`}">${t`Reset settings`}</div>
+        <div class="menu_button" id="rpk_reset_settings" title="${esc(t`Turns every feature and limit back to its default.`)}">${t`Reset settings`}</div>
       </div>
       <div class="rpk-note rpk-measured" id="rpk_measure_result"></div>
 
       <div class="rpk-table-head">
         <h4 class="rpk-section">${t`Per-script measurements (slowest first)`}</h4>
-        <input type="text" class="text_pole" id="rpk_filter" placeholder="${t`Filter by name`}" title="${t`Shows only the scripts whose name contains this. Click a column header to sort by it, again to flip the direction.`}">
+        <input type="text" class="text_pole" id="rpk_filter" placeholder="${esc(t`Filter by name`)}" title="${esc(t`Shows only the scripts whose name contains this. Click a column header to sort by it, again to flip the direction.`)}">
       </div>
       <div class="rpk-table-wrap">
         <table class="rpk-table" id="rpk_table">
@@ -3017,7 +3125,7 @@ const litTitle = (r, lit) => [
 /** A key figure in the summary; the tests read it by its key. */
 const fig = (key, value) => `<b data-k="${key}">${value}</b>`;
 const dim = (html) => `<span class="rpk-dim">${html}</span>`;
-const editIcon = () => ` <span class="rpk-edit fa-solid fa-pencil" title="${t`Open in the Regex extension`}"></span>`;
+const editIcon = () => ` <span class="rpk-edit fa-solid fa-pencil" title="${esc(t`Open in the Regex extension`)}"></span>`;
 
 /** The display pipeline as a stacked bar; empty until something was timed. */
 function pipeBarHtml(p) {
@@ -3036,7 +3144,8 @@ function renderPanel() {
     if (c.noNeedle || c.redos) {
         lines.push(dim(t`Patterns to look at: no fixed text ${c.noNeedle}, backtracking risk ${c.redos} (exponential ${c.redosExp}).`));
     }
-    const breakdown = t`prefilter ${s.skipped}, cache ${s.hits}, streaming ${s.streamSkipped}` + (persistAvailable ? ', ' + t`saved results ${s.bypass}` : '');
+    const breakdown = t`prefilter ${s.skipped}, cache ${s.hits}, streaming ${s.streamSkipped}`
+        + (htmlStageAvailable ? ', ' + t`HTML cache ${s.htmlBypass}` : '') + (persistAvailable ? ', ' + t`saved results ${s.bypass - s.htmlBypass}` : '');
     if (!s.calls && !s.skips && !s.bypass) {
         lines.push(dim(t`No runs measured yet. Render a message or reopen the chat.`));
     } else {
@@ -3087,9 +3196,9 @@ function renderPanel() {
         const lit = fmtNeedles(r);
         const m = rowMeasures.get(r);
         const actions = (m ? `<span class="rpk-row-ms" title="${esc(t`Without this script the chat renders in ${fmtMs(m.without)} ms instead of ${fmtMs(m.with)} ms (③, ⑤ and ⑨ off)`)}">${m.with >= m.without ? '−' : '+'}${fmtMs(Math.abs(m.with - m.without))} ms</span>` : '')
-            + `<span class="rpk-measure-row fa-solid fa-stopwatch" title="${t`Measure this chat without this script`}"></span>`
-            + (r.spike ? ` <span class="rpk-repro fa-solid fa-copy" title="${t`Copy a repro of the newest spike (pattern, input length and head) for a bug report`}"></span>` : '')
-            + (r.ids.length ? editIcon() + ` <span class="rpk-off fa-solid fa-power-off" title="${t`Turn this script off`}"></span>` : '');
+            + `<span class="rpk-measure-row fa-solid fa-stopwatch" title="${esc(t`Measure this chat without this script`)}"></span>`
+            + (r.spike ? ` <span class="rpk-repro fa-solid fa-copy" title="${esc(t`Copy a repro of the newest spike (pattern, input length and head) for a bug report`)}"></span>` : '')
+            + (r.ids.length ? editIcon() + ` <span class="rpk-off fa-solid fa-power-off" title="${esc(t`Turn this script off`)}"></span>` : '');
         return `<tr class="${cls}${r.ids.length ? ' rpk-script' : ''}" title="${esc(r.src)}" data-i="${i}">
           ${td('rank', ranks.get(r))}${td('name', esc(r.name) + warnings(r, true).join(''))}
           ${td('runs', r.calls)}${td('total', fmtMs(r.totalMs))}${td('avg', fmtMs(avgMs(r)))}${td('max', fmtMs(r.maxMs))}
@@ -3097,7 +3206,7 @@ function renderPanel() {
           ${td('skips', r.skipped)}${td('hits', r.hits)}${td('lit', lit ? esc(lit) : dim(t`none`), 'rpk-lit', litTitle(r, lit))}
           ${td('act', actions, 'rpk-act')}
         </tr>`;
-    }).join('') || `<tr><td colspan="13" class="rpk-dim rpk-empty">${nameFilter && s.rows.length ? t`No script name contains "${nameFilter}".` : t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
+    }).join('') || `<tr><td colspan="13" class="rpk-dim rpk-empty">${nameFilter && s.rows.length ? t`No script name contains "${esc(nameFilter)}".` : t`No runs measured yet. Render a message or reopen the chat.`}</td></tr>`);
 
     setContent(ui.note, !persistAvailable
         ? t`⑤, the compromise mode and the name-macro options of ③ and ⑥ need a SillyTavern with the MessageFormatter hooks.`
@@ -3145,16 +3254,21 @@ function bindUi() {
         for (const [id, key] of Object.entries(TOGGLES)) find('#' + id).checked = !!settings[key];
         for (const key of Object.keys(LIMITS)) find('#rpk_' + key).value = settings[key];
     };
+    /** What flipping a toggle does beyond the setting, by hand or through "Reset settings". */
+    const afterToggle = (key) => {
+        const on = !!settings[key];
+        if ((key === 'memo' && !on) || key === 'memoHashKeys') clearMemo(); // entries keyed the other way are useless
+        if (key === 'htmlMemo' && !on) htmlMemo.clear();
+        if (key === 'breaker' && !on) for (const s of stats.values()) if (s.tripped) untrip(s); // off: nothing stays skipped
+        if (key === 'frameStats' && !on) resetFeel(); // off: the figures leave the summary
+        if (key === 'listBadges') updateListBadges(); // off: the chips leave at once, not at the list's next rebuild
+    };
     for (const [id, key] of Object.entries(TOGGLES)) {
         const el = find('#' + id);
         el.addEventListener('change', () => {
             settings[key] = el.checked;
             saveSettingsDebounced();
-            if ((key === 'memo' && !el.checked) || key === 'memoHashKeys') clearMemo(); // entries keyed the other way are useless
-            if (key === 'htmlMemo' && !el.checked) htmlMemo.clear();
-            if (key === 'breaker' && !el.checked) for (const s of stats.values()) if (s.tripped) untrip(s); // off: nothing stays skipped
-            if (key === 'frameStats' && !el.checked) resetFeel(); // off: the figures leave the summary
-            if (key === 'listBadges') updateListBadges(); // off: the chips leave at once, not at the list's next rebuild
+            afterToggle(key);
             renderPanel();
         });
     }
@@ -3191,10 +3305,13 @@ function bindUi() {
     }
 
     find('#rpk_reset_settings').addEventListener('click', () => {
+        const was = Object.fromEntries(Object.values(TOGGLES).map(key => [key, !!settings[key]]));
         Object.assign(settings, defaultSettings); // settings.ui (open sections) is not a feature setting and stays
         syncControls();
+        for (const key of Object.values(TOGGLES)) if (!!settings[key] !== was[key]) afterToggle(key);
         clearMemo();
         htmlMemo.clear();
+        if (persistAvailable && !persistFlushTimer) persistFlushTimer = setTimeout(flushPersisted, 0); // evicts beyond the default size limit
         saveSettingsDebounced();
         renderPanel();
         toastr.info(t`Settings restored to their defaults.`);
@@ -3333,20 +3450,33 @@ if (extensionSettings.disabledExtensions?.includes('regex')) {
     console.log('[RegexPerf] the built-in Regex extension is disabled: its scripts do not run until it is turned on; the panel and the caches stay ready.');
 }
 patchProvider();
-eventSource.on(event_types.GENERATION_STARTED, (_type, _params, dryRun) => {
-    if (dryRun) return;
+// SillyTavern marks the page once a generation is underway (deactivateSendButtons(): body[data-generating]). A start
+// it gives up on before that (no backend connection, the server unreachable) emits no end event: it ends after a grace
+// period, and one that gets underway later (a slow server) starts again when the mark appears.
+const START_GRACE_MS = 3000;
+function underway() {
+    return globalThis.document?.body?.dataset.generating === 'true' || !!liveStream();
+}
+let startSeq = 0;
+function startGeneration() {
     checkWrapper();
     generating = true;
     clearStreamCaches();
     startFrames();
-});
-for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPED]) {
-    eventSource.on(event, () => {
-        generating = false;
-        clearStreamCaches();
-        for (const w of wrapped.values()) w._meta?.inc.clear(); // ④ holds the streamed text
-        rerenderSkipped();
-    });
+    const seq = ++startSeq;
+    setTimeout(() => { if (seq === startSeq && generating && !underway()) endGeneration(); }, START_GRACE_MS);
+}
+function endGeneration() {
+    generating = false;
+    clearStreamCaches();
+    for (const w of wrapped.values()) w._meta?.inc.clear(); // ④ holds the streamed text
+    rerenderSkipped();
+}
+eventSource.on(START_EVENT, (_type, _params, dryRun) => { if (!dryRun) startGeneration(); });
+for (const event of [event_types.GENERATION_ENDED, event_types.GENERATION_STOPPED]) eventSource.on(event, endGeneration);
+if (typeof MutationObserver === 'function' && globalThis.document?.body) {
+    new MutationObserver(() => { if (!generating && underway()) startGeneration(); })
+        .observe(document.body, { attributes: true, attributeFilter: ['data-generating'] });
 }
 /**
  * ④: a stream that ended in an error has no final render, so the message would keep its raw live text: rendered once

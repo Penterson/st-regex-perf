@@ -1,6 +1,35 @@
 # Changelog
 
-## Unreleased
+## 0.5.5 — 2026-11-11
+
+Why this release: an audit of 0.5.4 against the code, the READMEs and SillyTavern's pinned sources found thirteen defects and three small inconsistencies, and fixing them turned up one more defect. Each is fixed, with a test. The lean pass below ships with it.
+
+### Fixes
+
+- A slash command typed in the chat box no longer leaves the extension waiting for a reply. SillyTavern emits GENERATION_STARTED for it and returns without an end event, so until the next reply ended, every display script built `getContext()` (about 200 properties) to look for a stream, and the stutter sampler counted idle frames. A generation now starts at GENERATION_AFTER_COMMANDS. A start SillyTavern gives up on after that (no backend connection, the server unreachable) ends after 3 s; one that gets underway later is picked up when SillyTavern marks the page (`body[data-generating]`), and frames count only while that mark is there. The streaming processor is read from `script.js`, without `getContext()`, during real generations too.
+- ① with adaptive sampling (1 run in 64 timed): a script that matches now and then no longer gets ∅ or a place under "Candidates to disable". Whether a script ever matched is recorded on every run; the Matched and Changed columns stay sampled estimates.
+- `/regexperf off <name>` turns off that one script. When another script shared its find pattern, both were turned off (and "Alpha" found the shared row "Alpha, Beta").
+- What the extension saves (a lint fix, a script turned off) changes the script objects in place, and the Regex drawer's switch follows. The drawer's rows keep the objects they were rendered with and save them back, so a later click there reverted the fix.
+- ④'s paragraph cache no longer splits inside a multi-line HTML comment or inside a tag whose attributes run over several lines; with showdown, the hidden comment's text showed while the reply streamed.
+- "Reset settings" does what unticking does: when ⑧ goes off, a script it turned off runs again; when the stutter option goes off, its figures are cleared. ⑧ skips scripts only while it is on, so the measurement's features-off pass runs a tripped script, as SillyTavern would.
+- ⑤'s row id now includes the message's placement and speaker. A user's "OK" and a character's "OK" took turns overwriting one row on every render. Rows written by an earlier version are dropped when their chat opens.
+- "Measure on this chat" stores nothing. It rendered every message of the chat, beyond the "# Messages to Load" SillyTavern shows, and saved ⑤ rows and ⑨ entries for all of them.
+- A RAW/ESCAPED find pattern with macros: finding its script no longer evaluates the macros again on every run (they still run once each time the extension reads the script list). A pattern whose only macros are the name ones is still matched exactly; any other, by its shape.
+- After a persona rename, a find pattern with `{{user}}` was skipped until the script list was read again: its literal prefilter still looked for the old name. A pattern compiled with other macro values than the script info gets a prefilter of its own; ⑥ and ④'s incremental runs, analysed on the other pattern, stay off for it meanwhile.
+- ③ with ⑥ off: when a script's groups can assemble macro syntax (`$1$2`, `$1{…`, trim strings), each match is checked before the output is cached, as ⑥ checks it. The cached output kept SillyTavern's substitution, stale after a rename.
+- A copy of a wrapped pattern made with its constructor (`new re.constructor(re.source, re.flags)`) threw on replace; it now replaces like a plain RegExp.
+- A renamed script shows its new name in the table and the report. The name was read only when the script info's version changed, and a rename changes no version.
+- The summary no longer counts ⑨'s hits as "saved results": the skipped runs list "HTML cache" and "saved results" apart, and so does the text report. In the JSON, `bypass` still counts both, and `htmlBypass` is ⑨'s part.
+
+### Wording
+
+- The name filter's text and the translated tooltips are escaped where they go into the panel's HTML.
+- The comment on index.js's imports matches them.
+- READMEs: when a generation counts as running, how ⑤ keys its rows, what the paragraph cache leaves whole, that the measurement stores nothing, and that `/regexperf off` leaves a script sharing the pattern on.
+
+### Tests
+
+- 16 cases for these findings (110 cases). The harness's generations follow SillyTavern's order: GENERATION_STARTED, GENERATION_AFTER_COMMANDS, the page marked, then the end event.
 
 ### Lean pass (no change in behavior)
 
